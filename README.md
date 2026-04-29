@@ -24,6 +24,9 @@ export BENCHMARK='swe-bench/swe-bench-verified'
 | Ollama/llama.cpp | [Link](#claude-code-ollamallamacpp-docker)  | TBD      | TBD        |
 
 
+> [!note]
+> You can resume a stopped job with `harbor job resume -p path/to/job`
+
 ### Claude Code VertexAI Claude Docker
 
 Set the following variables in your environ:
@@ -101,6 +104,16 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
     --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME \
     --environment-import-path openshift:OpenshiftEnvironment
+```
+
+## Deploy models with vLLM
+
+Check out [`deploy/qwen-all-in-one.yml`](./deploy/qwen-all-in-one.yml) for a sample vLLM deployment of RedHatAI/Qwen3.6-35B-A3B-NVFP4.
+
+Apply to your cluster by running:
+
+```sh
+oc apply -f deploy/qwen-all-in-one.yml
 ```
 
 ## Future Work

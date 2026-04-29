@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    component: vllm
+  name: qwen36-35b
+  namespace: qwen36-35b
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  volumeMode: Filesystem
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: qwen36-35b
+    component: vllm
+  name: qwen36-35b
+  namespace: qwen36-35b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen36-35b
+      component: vllm
+  template:
+    metadata:
+      labels:
+        app: qwen36-35b
+        component: vllm
+    spec:
+      containers:
+      - args:
+        - |
+          vllm serve RedHatAI/Qwen3.6-35B-A3B-NVFP4 \
+            --max-model-len auto \
+            --tensor-parallel-size 2 \
+            --enable-chunked-prefill \
+            --enable-prefix-caching \
+            --reasoning-parser qwen3 \
+            --enable-auto-tool-choice \
+            --tool-call-parser qwen3_coder \
+            --served-model-name qwen3.6-35b
+        command:
+        - /bin/sh
+        - -c
+        image: vllm/vllm-openai:latest
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 900
+          periodSeconds: 10
+        name: qwen36-35b
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 900
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: "10"
+            memory: 20G
+            nvidia.com/gpu: "2"
+          requests:
+            cpu: "2"
+            memory: 6G
+            nvidia.com/gpu: "2"
+        volumeMounts:
+        - mountPath: /.cache
+          name: cache-volume
+        - mountPath: /.config
+          name: config-volume
+        - mountPath: /.triton
+          name: triton-volume
+        - mountPath: /.local
+          name: local-volume
+        - mountPath: /dev/shm
+          name: shm
+      volumes:
+      - name: cache-volume
+        persistentVolumeClaim:
+          claimName: qwen36-35b
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+        name: config-volume
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+        name: local-volume
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+        name: triton-volume
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+        name: shm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    component: vllm
+  name: qwen36-35b
+  namespace: qwen36-35b
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 8000
+  selector:
+    app: qwen36-35b
+    component: vllm
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  labels:
+    app: qwen36-35b
+    component: vllm
+  name: qwen36-35b
+  namespace: qwen36-35b
+spec:
+  port:
+    targetPort: 8000
+  to:
+    kind: Service
+    name: qwen36-35b
+    weight: 100
+  wildcardPolicy: None
