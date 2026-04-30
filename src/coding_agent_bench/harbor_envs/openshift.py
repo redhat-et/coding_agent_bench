@@ -9,7 +9,7 @@ from pathlib import Path
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.task.config import EnvironmentConfig
-from harbor.models.trial.paths import TrialPaths
+from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 
 def _sanitize_k8s_name(name: str) -> str:
@@ -71,6 +71,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         self._image_name: str | None = None
         self._log_streamer: asyncio.subprocess.Process | None = None
         self._log_file_handle = None
+        self._env_paths = EnvironmentPaths()
 
     @staticmethod
     def type() -> str:
@@ -313,9 +314,9 @@ class OpenshiftEnvironment(BaseEnvironment):
         )
 
         await self.exec(
-            f"mkdir -p {self.env_paths.agent_dir} {self.env_paths.verifier_dir} "
-            f"{self.env_paths.artifacts_dir} && "
-            f"chmod 777 {self.env_paths.agent_dir} {self.env_paths.verifier_dir}"
+            f"mkdir -p {self._env_paths.agent_dir} {self._env_paths.verifier_dir} "
+            f"{self._env_paths.artifacts_dir} && "
+            f"chmod 777 {self._env_paths.agent_dir} {self._env_paths.verifier_dir}"
         )
 
         await self._start_log_streaming()

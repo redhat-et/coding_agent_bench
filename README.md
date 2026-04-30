@@ -93,7 +93,9 @@ harbor run --agent claude-code -d $BENCHMARK \
 
 ## WIP
 
-### Run with Openshift
+### Run with Podman
+
+Requires `podman` on PATH with a running Podman machine.
 
 ```bash
 harbor run --agent claude-code -d $BENCHMARK \
@@ -103,7 +105,29 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
     --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
     --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME \
-    --environment-import-path openshift:OpenshiftEnvironment
+    --environment-import-path coding_agent_bench.harbor_envs.podman:PodmanEnvironment
+```
+
+### Run with Openshift
+
+Login to your cluster and select a project:
+
+```bash
+oc login --token=<token> --server=<server>
+oc project <project>
+```
+
+Then run:
+
+```bash
+harbor run --agent claude-code -d $BENCHMARK \
+    --ae ANTHROPIC_BASE_URL=$SERVER_URL \
+    --ae ANTHROPIC_API_KEY='sk-no-key-required' \
+    --ae ANTHROPIC_MODEL=$MODEL_NAME \
+    --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
+    --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
+    --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME \
+    --environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
 ```
 
 ## Deploy models with vLLM
@@ -119,5 +143,6 @@ oc apply -f deploy/qwen-all-in-one.yml
 ## Future Work
 
 - [ ] Support running Harbor in Openshift
+- [ ] Support running Harbor with Podman
 - [ ] Support OpenCode configurations for vLLM and VertexAI
 - [ ] Support Gemini CLI configurations for vLLM and VertexAI
