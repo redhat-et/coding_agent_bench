@@ -2,6 +2,20 @@
 
 Benchmark coding agents and models using Harbor
 
+## Leaderboards
+
+### SWE-Bench Verified (pass@1, N=500)
+
+| Model                             | Reported*                                        | Claude Code                                                            | OpenCode | Gemini CLI |
+| --------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------- | -------- | ---------- |
+| Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | [73.4%](https://qwen.ai/blog?id=qwen3.6-35b-a3b) | [63.2%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Claude_Code.md) ($48) | TBD      | TBD        |
+
+More coming soon...
+
+\* - Reported: The reported performance of the base (unquantized) model by the model creator. This often uses a custom internal harness tailored to the model.
+
+<sup>†</sup> - Cost estimates for OSS models are calculated by ($4 per A100 GPU hour × benchmark duration).
+
 ## Prerequisites
 
 - Install [Harbor](https://www.harborframework.com/docs/getting-started)
