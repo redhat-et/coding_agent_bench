@@ -44,6 +44,7 @@ spec:
             --reasoning-parser qwen3 \
             --enable-auto-tool-choice \
             --tool-call-parser qwen3_coder \
+            --language-model-only \
             --served-model-name qwen3.6-35b
         command:
         - /bin/sh
