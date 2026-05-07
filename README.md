@@ -4,15 +4,20 @@ Benchmark coding agents and models using Harbor
 
 ## Leaderboards
 
+### ✨ [Check out our Coding Agent Leaderboard on HuggingFace](https://huggingface.co/spaces/taagarwa/coding-agent-leaderboard) ✨
+
 ### SWE-Bench Verified (pass@1, N=500)
 
-| Model                             | Reported*                                        | Claude Code                                                            | OpenCode | Gemini CLI |
-| --------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------- | -------- | ---------- |
-| Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | [73.4%](https://qwen.ai/blog?id=qwen3.6-35b-a3b) | [63.2%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Claude_Code.md) ($48) | TBD      | TBD        |
+| Model                                      | Harness     | Score                                                                  |
+| ------------------------------------------ | ----------- | ---------------------------------------------------------------------- |
+| Claude Opus 4.7                            | Internal*   | 87.6%                                                                  |
+| Qwen/Qwen3.6-35B-A3B                       | Internal*   | 73.4%                                                                  |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Claude Code | [63.2%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Claude_Code.md) ($48) |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | OpenCode    | [54.8%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_OpenCode.md) ($67)    |
 
 More coming soon...
 
-\* - Reported: The reported performance of the base (unquantized) model by the model creator. This often uses a custom internal harness tailored to the model.
+\* - Model providers report benchmarks using internal harnesses for testing. These harnesses are not often publicized.
 
 <sup>†</sup> - Cost estimates for OSS models are calculated by ($4 per A100 GPU hour × benchmark duration).
 
@@ -30,12 +35,12 @@ export BENCHMARK='swe-bench/swe-bench-verified'
 
 ## Harbor Commands
 
-| Model Server     | Claude Code                                 | OpenCode | Gemini CLI |
-| ---------------- | ------------------------------------------- | -------- | ---------- |
-| VertexAI Claude  | [Link](#claude-code-vertexai-claude-docker) | TBD      | N/A        |
-| VertexAI Gemini  | N/A                                         | TBD      | TBD        |
-| vLLM             | [Link](#claude-code-vllm-docker)            | TBD      | TBD        |
-| Ollama/llama.cpp | [Link](#claude-code-ollamallamacpp-docker)  | TBD      | TBD        |
+| Model Server     | Claude Code                                 | OpenCode                      | Gemini CLI |
+| ---------------- | ------------------------------------------- | ----------------------------- | ---------- |
+| VertexAI Claude  | [Link](#claude-code-vertexai-claude-docker) | TBD                           | N/A        |
+| VertexAI Gemini  | N/A                                         | TBD                           | TBD        |
+| vLLM             | [Link](#claude-code-vllm-docker)            | [Link](#opencode-vllm-docker) | TBD        |
+| Ollama/llama.cpp | [Link](#claude-code-ollamallamacpp-docker)  | TBD                           | TBD        |
 
 
 > [!note]
@@ -105,6 +110,59 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME
 ```
 
+### OpenCode vLLM Docker
+
+Set the following variables in your environ:
+
+```bash
+export MODEL_NAME=
+```
+
+Set the content of your OpenCode config in your environ. Remember to replace the `<server-url>` with your vLLM server url and the `<model-name>` with your served model name:
+
+```bash
+export OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","model":"vllm/<model-name>","provider":{"vllm":{"npm":"@ai-sdk/openai-compatible","name":"vLLM","options":{"baseURL":"<server-url>"},"models":{"<model-name>":{"name":"<model-name>","limit":{"context":196500,"output":65500}}}}}}'
+```
+
+Then run:
+
+```sh
+harbor run --agent opencode -p $DATASET_DIR/swe-bench-verified \
+    -m vllm/$MODEL_NAME \
+    --ae "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_CONTENT"
+```
+
+## SWE-Bench Acceleration
+
+### Use accelerated images for SWE-bench-verified
+
+1. Download the SWE-Bench-Verified tasks
+
+```sh
+harbor download swe-bench/swe-bench-verified
+```
+
+2. Replace images with the accelerated ones from [Epoch AI](https://epoch.ai/blog/swebench-docker)
+
+```sh
+uv run scripts/replace_swe_bench_images.py <path-to-dataset>
+```
+
+### Pre-pull base images
+
+1. Download the dataset
+
+```sh
+harbor download <dataset>
+```
+
+2. Pull all the base images
+
+```sh
+uv run scripts/pull_images.py <path-to-dataset>
+```
+
+
 ## WIP
 
 ### Run with Podman
@@ -142,6 +200,24 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
     --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME \
     --environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
+```
+
+### Run with Gemini and Gemini CLI
+
+```bash
+export GOOGLE_CLOUD_PROJECT="<your-project>"
+
+harbor run --agent gemini-cli -d $BENCHMARK \
+    -m $MODEL_NAME
+```
+
+### Run with Llama.cpp and Gemini CLI
+
+```bash
+harbor run --agent gemini-cli -d $BENCHMARK \
+    --ae GOOGLE_GEMINI_BASE_URL=$SERVER_URL \
+    --ae GEMINI_MODEL=$MODEL_NAME \
+    -m $MODEL_NAME
 ```
 
 ## Deploy models with vLLM

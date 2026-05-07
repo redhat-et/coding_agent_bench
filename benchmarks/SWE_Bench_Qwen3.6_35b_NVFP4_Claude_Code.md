@@ -11,6 +11,7 @@
 ## Results
 
 **Score:** 63.2% (316 successes / 183 failures / 1 error)  
+**Errors (Initial Run):** 1  
 **Total Time:** ~6 hours  
 **Estimated Cost:** $48 ($4 / GPU / hr * 2 GPU * 6 hr)  
 
