@@ -12,6 +12,7 @@ Benchmark coding agents and models using Harbor
 | ------------------------------------------ | ----------- | ---------------------------------------------------------------------- |
 | Claude Opus 4.7                            | Internal*   | 87.6%                                                                  |
 | Qwen/Qwen3.6-35B-A3B                       | Internal*   | 73.4%                                                                  |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Pi | [65.0%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Pi.md) ($51) |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Claude Code | [63.2%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Claude_Code.md) ($48) |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | OpenCode    | [54.8%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_OpenCode.md) ($67)    |
 
