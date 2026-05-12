@@ -12,7 +12,8 @@
 **Score:** 47.9%  
 **Errors (Initial Run):** 6   
 **Total Time:** 3 hr 51 min  
-**Estimated Cost:** $30.80  
+**Agent Run Time:** 1 hr 41 min
+**Estimated Cost:** $13.47 ($4 / GPU / hr * 2 GPU * 1 hr 41 min)  
 
 ## vLLM Server Config
 
