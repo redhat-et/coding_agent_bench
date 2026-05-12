@@ -21,7 +21,7 @@ Benchmark coding agents and models using Harbor
 
 | Model | Harness | Score |
 | ----- | ------- | ----- |
-| Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Pi | 47.9% |
+| Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Pi | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md) ($31) |
 
 More coming soon...
 
