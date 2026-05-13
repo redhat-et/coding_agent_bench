@@ -15,7 +15,8 @@ class Metrics(BaseModel):
     n_cache_tokens: int
     n_output_tokens: int
     n_total_tokens: int
-    time_seconds: int
+    agent_time_seconds: int
+    total_time_seconds: int
     cost_usd: float
     
     @computed_field
@@ -39,8 +40,12 @@ class Metrics(BaseModel):
         return round(self.cost_usd / self.n_tasks, 2)
 
     @computed_field
-    def mean_time_seconds_per_task(self) -> int:
-        return self.time_seconds // self.n_tasks
+    def mean_total_time_seconds_per_task(self) -> int:
+        return self.total_time_seconds // self.n_tasks
+
+    @computed_field
+    def mean_agent_time_seconds_per_task(self) -> int:
+        return self.agent_time_seconds // self.n_tasks
 
 
 def parse_args():
@@ -65,10 +70,15 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int):
     job_config = json.loads(job_config_path.read_text())
     
     eval_name = list(job_result["stats"]["evals"].keys())[0]
+    print(eval_name)
     n_concurrent = job_config["n_concurrent_trials"]
     task_results = [json.loads(p.read_text()) for p in job_dir.rglob("result.json") if p != job_result_path]
     
-    total_agent_time = int(sum([
+    total_time = int(sum([
+        (datetime.fromisoformat(r["finished_at"]) - datetime.fromisoformat(r["started_at"])).total_seconds() 
+        for r in task_results
+    ]))
+    agent_time = int(sum([
         (datetime.fromisoformat(r["agent_execution"]["finished_at"]) - datetime.fromisoformat(r["agent_execution"]["started_at"])).total_seconds() 
         for r in task_results
     ]))
@@ -77,7 +87,7 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int):
     n_output_tokens = int(sum([r["agent_result"]["n_output_tokens"] for r in task_results if r["agent_result"]["n_output_tokens"] is not None]))
     total_tokens = n_input_tokens + n_cache_tokens + n_output_tokens
     score = round(job_result["stats"]["evals"][eval_name]["metrics"][0]["mean"], 3)
-    cost = round(total_agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
+    cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
     
     metrics = Metrics(
         n_tasks=job_result["n_total_trials"],
@@ -87,7 +97,8 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int):
         n_cache_tokens=n_cache_tokens,
         n_output_tokens=n_output_tokens,
         n_total_tokens=total_tokens,
-        time_seconds=total_agent_time,
+        agent_time_seconds=agent_time,
+        total_time_seconds=total_time,
         cost_usd=cost,
     )
     return metrics
@@ -101,16 +112,21 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int):
     job_config = json.loads(job_config_path.read_text())
     
     eval_name = list(job_result["stats"]["evals"].keys())[0]
+    print(eval_name)
     n_concurrent = job_config["n_concurrent_trials"]
     task_results = [json.loads(p.read_text()) for p in job_dir.rglob("result.json") if p != job_result_path]
     
-    total_agent_time = int(sum([
+    total_time = int(sum([
+        (datetime.fromisoformat(r["finished_at"]) - datetime.fromisoformat(r["started_at"])).total_seconds() 
+        for r in task_results
+    ]))
+    agent_time = int(sum([
         (datetime.fromisoformat(r["agent_execution"]["finished_at"]) - datetime.fromisoformat(r["agent_execution"]["started_at"])).total_seconds() 
         for r in task_results
     ]))
     total_tokens = job_result["stats"]["n_input_tokens"] + job_result["stats"]["n_cache_tokens"] + job_result["stats"]["n_output_tokens"]
     score = round(job_result["stats"]["evals"][eval_name]["metrics"][0]["mean"], 3)
-    cost = round(total_agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
+    cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
     
     metrics = Metrics(
         n_tasks=job_result["n_total_trials"],
@@ -120,7 +136,8 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int):
         n_cache_tokens=job_result["stats"]["n_cache_tokens"],
         n_output_tokens=job_result["stats"]["n_output_tokens"],
         n_total_tokens=total_tokens,
-        time_seconds=total_agent_time,
+        agent_time_seconds=agent_time,
+        total_time_seconds=total_time,
         cost_usd=cost,
     )
     
@@ -141,7 +158,7 @@ def main():
     elif job_format == "latest":
         metrics = compute_metrics_latest(job_dir, num_gpus)
         
-    print(metrics.model_dump_json(indent=2))
+    print(metrics.model_dump_json(indent=4))
 
 if __name__ == "__main__":
     main()
