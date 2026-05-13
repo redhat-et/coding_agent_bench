@@ -29,7 +29,6 @@ def _sanitize_image_name(name: str) -> str:
 
 
 class PodmanEnvironment(BaseEnvironment):
-
     _image_build_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
@@ -124,9 +123,7 @@ class PodmanEnvironment(BaseEnvironment):
                     process.communicate(input=stdin_data), timeout=timeout_sec
                 )
             else:
-                stdout_bytes, stderr_bytes = await process.communicate(
-                    input=stdin_data
-                )
+                stdout_bytes, stderr_bytes = await process.communicate(input=stdin_data)
         except asyncio.TimeoutError:
             process.terminate()
             try:
@@ -160,14 +157,13 @@ class PodmanEnvironment(BaseEnvironment):
         return result
 
     async def _build_image(self) -> str:
-        lock = self._image_build_locks.setdefault(
-            self.environment_name, asyncio.Lock()
-        )
+        lock = self._image_build_locks.setdefault(self.environment_name, asyncio.Lock())
         async with lock:
             await self._run_podman(
                 [
                     "build",
-                    "-t", self._image_name,
+                    "-t",
+                    self._image_name,
                     str(self.environment_dir.resolve().absolute()),
                 ],
                 timeout_sec=int(self.task_env_config.build_timeout_sec),
@@ -188,10 +184,14 @@ class PodmanEnvironment(BaseEnvironment):
         )
 
         run_args = [
-            "run", "-d",
-            "--name", self._container_name,
-            "--cpus", str(self.task_env_config.cpus),
-            "--memory", f"{self.task_env_config.memory_mb}m",
+            "run",
+            "-d",
+            "--name",
+            self._container_name,
+            "--cpus",
+            str(self.task_env_config.cpus),
+            "--memory",
+            f"{self.task_env_config.memory_mb}m",
         ]
 
         merged_env = {**self._persistent_env}
@@ -222,7 +222,9 @@ class PodmanEnvironment(BaseEnvironment):
                 check=False,
             )
         except Exception as e:
-            self.logger.warning(f"Failed to remove container {self._container_name}: {e}")
+            self.logger.warning(
+                f"Failed to remove container {self._container_name}: {e}"
+            )
 
         if delete and self._built_image:
             try:
@@ -260,9 +262,7 @@ class PodmanEnvironment(BaseEnvironment):
         exec_args.append(self._container_name)
         exec_args.extend(["bash", "-c", command])
 
-        return await self._run_podman(
-            exec_args, check=False, timeout_sec=timeout_sec
-        )
+        return await self._run_podman(exec_args, check=False, timeout_sec=timeout_sec)
 
     async def upload_file(self, source_path: Path | str, target_path: str):
         await self._run_podman(

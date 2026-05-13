@@ -23,7 +23,6 @@ def _sanitize_k8s_name(name: str) -> str:
 
 
 class OpenshiftEnvironment(BaseEnvironment):
-
     _image_build_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
@@ -127,9 +126,7 @@ class OpenshiftEnvironment(BaseEnvironment):
                     process.communicate(input=stdin_data), timeout=timeout_sec
                 )
             else:
-                stdout_bytes, stderr_bytes = await process.communicate(
-                    input=stdin_data
-                )
+                stdout_bytes, stderr_bytes = await process.communicate(input=stdin_data)
         except asyncio.TimeoutError:
             process.terminate()
             try:
@@ -164,9 +161,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         return result
 
     async def _build_image(self) -> str:
-        lock = self._image_build_locks.setdefault(
-            self.environment_name, asyncio.Lock()
-        )
+        lock = self._image_build_locks.setdefault(self.environment_name, asyncio.Lock())
         async with lock:
             existing = await self._run_oc_command(
                 ["get", "bc", self._build_name, *self._ns_args(), "-o", "name"],

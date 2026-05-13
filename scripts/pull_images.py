@@ -24,17 +24,19 @@ def main():
     args = parser.parse_args()
     dataset: Path = args.dataset
     dataset = dataset.expanduser().resolve()
-    
+
     if not dataset.exists():
         raise ValueError(f"Dataset {dataset} does not exist")
-    
+
     images = get_images(dataset=dataset)
     print(f"Found {len(images)} images to pull\n")
 
     failed = []
     for i, image in enumerate(images, 1):
         print(f"[{i}/{len(images)}] Pulling {image}")
-        result = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+        result = subprocess.run(
+            ["docker", "pull", image], capture_output=True, text=True
+        )
         if result.returncode != 0:
             print(f"  FAILED: {result.stderr.strip()}")
             failed.append(image)

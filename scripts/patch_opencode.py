@@ -11,9 +11,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-RELATIVE_PATH = Path(
-    "harbor/agents/installed/opencode.py"
-)
+RELATIVE_PATH = Path("harbor/agents/installed/opencode.py")
 
 UNCOMMENTED = """\
         else:

@@ -17,7 +17,9 @@ for dockerfile in sorted(dataset.glob("*/environment/Dockerfile")):
     new_image = f"ghcr.io/epoch-research/swe-bench.eval.{ARCH}.{instance_id}"
 
     text = dockerfile.read_text()
-    new_text = re.sub(r"^(FROM\s+)\S+", rf"\1{new_image}", text, count=1, flags=re.MULTILINE)
+    new_text = re.sub(
+        r"^(FROM\s+)\S+", rf"\1{new_image}", text, count=1, flags=re.MULTILINE
+    )
 
     if text != new_text:
         dockerfile.write_text(new_text)
