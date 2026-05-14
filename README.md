@@ -10,8 +10,6 @@ Benchmark coding agents and models using Harbor
 
 | Model                                      | Harness     | Score                                                                  |
 | ------------------------------------------ | ----------- | ---------------------------------------------------------------------- |
-| Claude Opus 4.7                            | Internal*   | 87.6%                                                                  |
-| Qwen/Qwen3.6-35B-A3B                       | Internal*   | 73.4%                                                                  |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Pi          | [65.0%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Pi.md) ($51)          |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Claude Code | [63.2%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_Claude_Code.md) ($48) |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | OpenCode    | [54.8%](./benchmarks/SWE_Bench_Qwen3.6_35b_NVFP4_OpenCode.md) ($67)    |
@@ -23,10 +21,9 @@ Benchmark coding agents and models using Harbor
 | ----- | ------- | ----- |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Pi | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md) ($13) |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Claude Code | [45.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Claude_Code.md) ($10) |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | OpenCode | [37.5%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenCode.md) ($11) |
 
 More coming soon...
-
-\* - Model providers report benchmarks using internal harnesses for testing. These harnesses are not often publicized.
 
 <sup>†</sup> - Cost estimates for OSS models are calculated by ($4 per A100 GPU hour × benchmark duration).
 

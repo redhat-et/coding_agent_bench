@@ -6,14 +6,15 @@
 **Model:** [RedHatAI/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4)  
 **Harness:** Pi  
 **Environment:** Docker  
-**Job Name:** 2026-05-06__09-29-06  
+**Job Name:** 2026-05-08__08-38-16  
 
 ## Results
 
 **Score:** 65.0% (325 successes / 169 failures / 4 errors)  
 **Errors (Initial Run):** 6  
 **Total Time:** 6 hr 26 min  
-**Estimated Cost:** $51.47 ($4 / GPU / hr * 2 GPU * 6 hr 26 min)  
+**Agent Run Time:** 4 hr 45 min   
+**Estimated Cost:** $38.16 ($4 / GPU / hr * 2 GPU * 4 hr 45 min)  
 
 ## vLLM Server Config
 
@@ -48,7 +49,7 @@ harbor run --agent pi -p $DATASET_DIR/swe-bench-verified \
     -m vllm/$MODEL_NAME \
     --ae PI_OFFLINE=1 \
     --ae PI_CODING_AGENT_DIR=/root/.pi/agent \
-    --mounts-json '["/path/to/models.json:/root/.pi/agent/models.json"]' \
+    --mounts-json '[ { "type": "bind", "source":"/path/to/models.json", "target": "/root/.pi/agent/models.json" } ]'\
     --n-concurrent 9
 ```
 
