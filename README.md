@@ -19,7 +19,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 
 | Model                                      | Harness     | Score                                                                              |
 | ------------------------------------------ | ----------- | ---------------------------------------------------------------------------------- |
-| Sonnet 4.6                                 | Claude Code | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Sonnet_4.6_Claude_Code.md) ($184)       |
+| Sonnet 4.6                                 | Claude Code | [50.0%](./benchmarks/SWE_Bench_Pro_Ansible_Sonnet_4.6_Claude_Code.md) ($184)       |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Pi          | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md) ($13)          |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | Claude Code | [45.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Claude_Code.md) ($10) |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4<sup>†</sup> | OpenCode    | [37.5%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenCode.md) ($11)    |
