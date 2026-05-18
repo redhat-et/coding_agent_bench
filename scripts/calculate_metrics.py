@@ -51,7 +51,7 @@ class Metrics(BaseModel):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("job_dir", type=Path)
-    parser.add_argument("--num-gpus", type=int, default=2)
+    parser.add_argument("--num-gpus", type=int, default=None)
     args = parser.parse_args()
     return args
 
@@ -63,7 +63,7 @@ def determine_format(job_dir: Path):
     return "legacy"
 
 
-def compute_metrics_legacy(job_dir: Path, num_gpus: int):
+def compute_metrics_legacy(job_dir: Path, num_gpus: int = None):
 
     job_result_path = job_dir / "result.json"
     job_result = json.loads(job_result_path.read_text())
@@ -131,7 +131,11 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int):
     )
     total_tokens = n_input_tokens + n_cache_tokens + n_output_tokens
     score = round(job_result["stats"]["evals"][eval_name]["metrics"][0]["mean"], 3)
-    cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
+    cost = job_result["stats"]["cost_usd"]
+    if cost is None or cost == 0:
+        if num_gpus is None:
+            raise ValueError("'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results.")
+        cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
 
     metrics = Metrics(
         n_tasks=job_result["n_total_trials"],
@@ -148,7 +152,7 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int):
     return metrics
 
 
-def compute_metrics_latest(job_dir: Path, num_gpus: int):
+def compute_metrics_latest(job_dir: Path, num_gpus: int = None):
 
     job_result_path = job_dir / "result.json"
     job_result = json.loads(job_result_path.read_text())
@@ -193,7 +197,11 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int):
         + job_result["stats"]["n_output_tokens"]
     )
     score = round(job_result["stats"]["evals"][eval_name]["metrics"][0]["mean"], 3)
-    cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
+    cost = job_result["stats"]["cost_usd"]
+    if cost is None or cost == 0:
+        if num_gpus is None:
+            raise ValueError("'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results.")
+        cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
 
     metrics = Metrics(
         n_tasks=job_result["n_total_trials"],
