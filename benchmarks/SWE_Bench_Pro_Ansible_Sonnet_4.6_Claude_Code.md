@@ -32,7 +32,7 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_VERTEX_PROJECT_ID=$ANTHROPIC_VERTEX_PROJECT_ID \
     --ae ANTHROPIC_MODEL=$ANTHROPIC_MODEL \
     --ae GOOGLE_APPLICATION_CREDENTIALS='/app/.config/gcloud/application_default_credentials.json' \
-    --mounts-json '[ { "type": "bind", "source": "/Users/taagarwa/.config/gcloud/application_default_credentials.json", "target": "/app/.config/gcloud/application_default_credentials.json" } ]' \
+    --mounts-json '[ { "type": "bind", "source": "~/.config/gcloud/application_default_credentials.json", "target": "/app/.config/gcloud/application_default_credentials.json" } ]' \
     --n-concurrent 16
 ```
 
@@ -78,7 +78,7 @@ harbor run --agent claude-code -d $BENCHMARK \
         "mounts_json": [
             {
                 "type": "bind",
-                "source": "/Users/taagarwa/.config/gcloud/application_default_credentials.json",
+                "source": "~/.config/gcloud/application_default_credentials.json",
                 "target": "/app/.config/gcloud/application_default_credentials.json"
             }
         ],
