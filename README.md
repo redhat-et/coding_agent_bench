@@ -2,9 +2,29 @@
 
 Reproducible benchmarks for coding agents and models using Harbor
 
+- [Leaderboards](#leaderboards)
+  - [SWE-Bench Verified (pass@1, N=500)](#swe-bench-verified-pass1-n500)
+  - [SWE-Bench Pro - Ansible Tasks (pass@1, N=96)](#swe-bench-pro---ansible-tasks-pass1-n96)
+- [CLI Utility](#cli-utility)
+  - [Prerequisites](#prerequisites)
+  - [Run a Benchmark](#run-a-benchmark)
+- [Harbor Command Examples](#harbor-command-examples)
+  - [Prerequisites](#prerequisites-1)
+  - [Table](#table)
+- [Deploy models with vLLM](#deploy-models-with-vllm)
+- [SWE-Bench Acceleration](#swe-bench-acceleration)
+  - [Use accelerated images for SWE-bench-verified](#use-accelerated-images-for-swe-bench-verified)
+  - [Pre-pull base images](#pre-pull-base-images)
+- [WIP](#wip)
+  - [Run with Podman](#run-with-podman)
+  - [Run with Openshift](#run-with-openshift)
+  - [Run with Gemini and Gemini CLI](#run-with-gemini-and-gemini-cli)
+  - [Run with vLLM and Gemini CLI](#run-with-vllm-and-gemini-cli)
+
+
 ## Leaderboards
 
-### ✨ [Check out our Coding Agent Leaderboard on HuggingFace](https://huggingface.co/spaces/taagarwa/coding-agent-leaderboard) ✨
+<h3>✨ <a href="https://huggingface.co/spaces/taagarwa/coding-agent-leaderboard">Check out our Coding Agent Leaderboard on HuggingFace</a> ✨</h3>
 
 ### SWE-Bench Verified (pass@1, N=500)
 
@@ -28,32 +48,169 @@ More coming soon...
 
 <sup>†</sup> - Cost estimates for OSS models are calculated by ($4 per A100 GPU hour × agent benchmark duration).
 
-## Prerequisites
+## CLI Utility
 
-- Install [Harbor](https://www.harborframework.com/docs/getting-started)
+The CLI utility will help you configure and run a benchmark jobs with Harbor for self-hosted models.
+It automatically constructs and runs the Harbor job command for your specified benchmark, agent, self-hosted model.
 
-## Benchmarks
+### Prerequisites
 
-Set your benchmark in your environment from among the options in [Harbor Hub](https://hub.harborframework.com/), e.g.:
+- Install dependencies with uv
+    
+    ```bash
+    uv sync
+    ```
 
-```bash
-export BENCHMARK='swe-bench/swe-bench-verified'
+- [Set up a vLLM server](#deploy-models-with-vllm), or other Anthropic- and OpenAI-compatible server
+- Select a benchmark from among the options in [Harbor Hub](https://hub.harborframework.com/)
+
+### Run a Benchmark
+
+The following is the minimal configuration needed to run a job with the CLI:
+
+```sh
+uv run coding-agent-bench \
+    --agent <agent> \
+    --dataset <benchmark-name> \
+    --model-name <model-name> \
+    --server-url <server-url>
 ```
 
-## Harbor Commands
+For example, to run `swe-bench/swe-bench-verified` in Claude Code against a self-hosted model:
 
-| Model Server     | Claude Code                                 | OpenCode                      | Gemini CLI |
-| ---------------- | ------------------------------------------- | ----------------------------- | ---------- |
-| VertexAI Claude  | [Link](#claude-code-vertexai-claude-docker) | TBD                           | N/A        |
-| VertexAI Gemini  | N/A                                         | TBD                           | TBD        |
-| vLLM             | [Link](#claude-code-vllm-docker)            | [Link](#opencode-vllm-docker) | TBD        |
-| Ollama/llama.cpp | [Link](#claude-code-ollamallamacpp-docker)  | TBD                           | TBD        |
+```sh
+uv run coding-agent-bench \
+    --agent claude-code \
+    --dataset scale-ai/swe-bench-pro \
+    --model-name my-model \
+    --server-url http://my.server.url
+```
 
+If you want to see a preview of Harbor command that would be run for a given set of arguments without actually running the job, add the `--dry-run` flag.
 
 > [!note]
-> You can resume a stopped job with `harbor job resume -p path/to/job`
+> Additional configuration options are available, use `uv run coding-agent-bench --help` to see them.
 
-### Claude Code VertexAI Claude Docker
+## Harbor Command Examples
+
+### Prerequisites
+
+- Install [Harbor](https://www.harborframework.com/docs/getting-started)
+- [Set up a vLLM server](#deploy-models-with-vllm), or other Anthropic- and OpenAI-compatible server
+- Set your benchmark in your environment from among the options in [Harbor Hub](https://hub.harborframework.com/), e.g.:
+
+    ```bash
+    export BENCHMARK='swe-bench/swe-bench-verified'
+    ```
+
+- If you need to filter tasks in your benchmark by name, add the `-i` flag with your glob pattern to your `harbor run` command, e.g. `-i "*ansible*"`
+
+### Table
+
+| Harness     | Model Server | Example                       | Status    |
+| ----------- | ------------ | ----------------------------- | --------- |
+| Claude Code | vLLM         | [Link](#claude-code-vllm)     | Validated |
+| Codex       | vLLM         | [Link](#codex-vllm)           | Testing   |
+| OpenCode    | vLLM         | [Link](#opencode-vllm)        | Validated |
+| Pi          | vLLM         | [Link](#pi-vllm)              | Validated |
+| Claude Code | VertexAI     | [Link](#claude-code-vertexai) | Validated |
+
+> [!note]
+> To use with a locally hosted model (e.g. llama.cpp) use a vLLM example and set `SERVER_URL=http://host.docker.internal:<server-port>`
+
+#### Claude Code vLLM
+
+Set the following variables in your environ:
+
+```bash
+export SERVER_URL=
+export MODEL_NAME=
+```
+
+Then run:
+
+```bash
+harbor run --agent claude-code -d $BENCHMARK \
+    --ae ANTHROPIC_BASE_URL=$SERVER_URL \
+    --ae ANTHROPIC_API_KEY='sk-no-key-required' \
+    --ae ANTHROPIC_MODEL=$MODEL_NAME \
+    --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
+    --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
+    --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME
+```
+
+#### Codex vLLM
+
+Set the following variables in your environ:
+
+```bash
+export SERVER_URL=
+export MODEL_NAME=
+```
+
+Use the utility script to create the `config.toml` file:
+
+```bash
+uv run scripts/codex_config_toml.py $MODEL_NAME $SERVER_URL
+```
+
+Then run:
+
+```bash
+harbor run --agent codex -d $BENCHMARK \
+    -m vllm/$MODEL_NAME \
+    --ae CODEX_HOME=/root/.codex/ \
+    --mounts-json '[ { "type": "bind", "source":"/Users/taagarwa/Documents/Projects/coding-agent-bench/config.toml", "target": "/root/.codex/config.toml" } ]'
+```
+
+#### OpenCode vLLM
+
+Set the following variables in your environ:
+
+```bash
+export MODEL_NAME=
+```
+
+Set the content of your OpenCode config in your environ. Remember to replace the `<server-url>` with your vLLM server url and the `<model-name>` with your served model name:
+
+```bash
+export OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","model":"vllm/<model-name>","provider":{"vllm":{"npm":"@ai-sdk/openai-compatible","name":"vLLM","options":{"baseURL":"<server-url>"},"models":{"<model-name>":{"name":"<model-name>","limit":{"context":196500,"output":65500}}}}}}'
+```
+
+Then run:
+
+```sh
+harbor run --agent opencode -p $DATASET_DIR/swe-bench-verified \
+    -m vllm/$MODEL_NAME \
+    --ae "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_CONTENT"
+```
+
+#### Pi vLLM
+
+Set the following variables in your environ:
+
+```bash
+export MODEL_NAME='gemma4-26b'
+```
+
+Create a `models.json` file with your vLLM server information:
+
+```bash
+export PI_MODELS_JSON='{ "providers": { "vllm": { "baseUrl": "<server-url>", "api": "openai-completions", "apiKey": "NONE", "models": [{ "id": "gemma4-26b", "name": "<model-name>", "contextWindow": 262000 }] } } }'
+echo $PI_MODELS_JSON > models.json
+```
+
+Then run:
+
+```bash
+harbor run --agent pi -d $BENCHMARK \
+    -m vllm/$MODEL_NAME \
+    --ae PI_OFFLINE=1 \
+    --ae PI_CODING_AGENT_DIR=/root/.pi/agent \
+    --mounts-json '[ { "type": "bind", "source":"/path/to/models.json", "target": "/root/.pi/agent/models.json" } ]'
+```
+
+#### Claude Code VertexAI
 
 Set the following variables in your environ:
 
@@ -75,68 +232,14 @@ harbor run --agent claude-code -d $BENCHMARK \
     --mounts-json '["~/.config/gcloud/application_default_credentials.json:/app/.config/gcloud/application_default_credentials.json"]'
 ```
 
-### Claude Code vLLM Docker
+## Deploy models with vLLM
 
-Set the following variables in your environ:
+Check out [`deploy/qwen-all-in-one.yml`](./deploy/qwen-all-in-one.yml) for a sample vLLM deployment of [RedHatAI/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4).
 
-```bash
-export SERVER_URL=
-export MODEL_NAME=
-```
-
-Then run:
-
-```bash
-harbor run --agent claude-code -d $BENCHMARK \
-    --ae ANTHROPIC_BASE_URL=$SERVER_URL \
-    --ae ANTHROPIC_API_KEY='sk-no-key-required' \
-    --ae ANTHROPIC_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME
-```
-
-### Claude Code Ollama/llama.cpp Docker
-
-Set the following variables in your environ:
-
-```bash
-export SERVER_URL='http://host.docker.internal:11434'
-export MODEL_NAME=
-```
-
-Then run:
-
-```bash
-harbor run --agent claude-code -d $BENCHMARK \
-    --ae ANTHROPIC_BASE_URL=$SERVER_URL \
-    --ae ANTHROPIC_API_KEY='sk-no-key-required' \
-    --ae ANTHROPIC_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME
-```
-
-### OpenCode vLLM Docker
-
-Set the following variables in your environ:
-
-```bash
-export MODEL_NAME=
-```
-
-Set the content of your OpenCode config in your environ. Remember to replace the `<server-url>` with your vLLM server url and the `<model-name>` with your served model name:
-
-```bash
-export OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","model":"vllm/<model-name>","provider":{"vllm":{"npm":"@ai-sdk/openai-compatible","name":"vLLM","options":{"baseURL":"<server-url>"},"models":{"<model-name>":{"name":"<model-name>","limit":{"context":196500,"output":65500}}}}}}'
-```
-
-Then run:
+Apply to your cluster by running:
 
 ```sh
-harbor run --agent opencode -p $DATASET_DIR/swe-bench-verified \
-    -m vllm/$MODEL_NAME \
-    --ae "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_CONTENT"
+oc apply -f deploy/qwen-all-in-one.yml
 ```
 
 ## SWE-Bench Acceleration
@@ -169,22 +272,16 @@ harbor download <dataset>
 uv run scripts/pull_images.py <path-to-dataset>
 ```
 
-
 ## WIP
 
 ### Run with Podman
 
 Requires `podman` on PATH with a running Podman machine.
 
+In your `harbor` command, add the flag:
+
 ```bash
-harbor run --agent claude-code -d $BENCHMARK \
-    --ae ANTHROPIC_BASE_URL=$SERVER_URL \
-    --ae ANTHROPIC_API_KEY='sk-no-key-required' \
-    --ae ANTHROPIC_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME \
-    --environment-import-path coding_agent_bench.harbor_envs.podman:PodmanEnvironment
+--environment-import-path coding_agent_bench.harbor_envs.podman:PodmanEnvironment
 ```
 
 ### Run with Openshift
@@ -196,17 +293,10 @@ oc login --token=<token> --server=<server>
 oc project <project>
 ```
 
-Then run:
+Then in your `harbor` command, add the flag:
 
 ```bash
-harbor run --agent claude-code -d $BENCHMARK \
-    --ae ANTHROPIC_BASE_URL=$SERVER_URL \
-    --ae ANTHROPIC_API_KEY='sk-no-key-required' \
-    --ae ANTHROPIC_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL_NAME \
-    --ae ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL_NAME \
-    --environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
+--environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
 ```
 
 ### Run with Gemini and Gemini CLI
@@ -218,7 +308,7 @@ harbor run --agent gemini-cli -d $BENCHMARK \
     -m $MODEL_NAME
 ```
 
-### Run with Llama.cpp and Gemini CLI
+### Run with vLLM and Gemini CLI
 
 ```bash
 harbor run --agent gemini-cli -d $BENCHMARK \
@@ -226,20 +316,3 @@ harbor run --agent gemini-cli -d $BENCHMARK \
     --ae GEMINI_MODEL=$MODEL_NAME \
     -m $MODEL_NAME
 ```
-
-## Deploy models with vLLM
-
-Check out [`deploy/qwen-all-in-one.yml`](./deploy/qwen-all-in-one.yml) for a sample vLLM deployment of RedHatAI/Qwen3.6-35B-A3B-NVFP4.
-
-Apply to your cluster by running:
-
-```sh
-oc apply -f deploy/qwen-all-in-one.yml
-```
-
-## Future Work
-
-- [ ] Support running Harbor in Openshift
-- [ ] Support running Harbor with Podman
-- [ ] Support OpenCode configurations for vLLM and VertexAI
-- [ ] Support Gemini CLI configurations for vLLM and VertexAI

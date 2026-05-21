@@ -134,7 +134,9 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int = None):
     cost = job_result["stats"]["cost_usd"]
     if cost is None or cost == 0:
         if num_gpus is None:
-            raise ValueError("'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results.")
+            raise ValueError(
+                "'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results."
+            )
         cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
 
     metrics = Metrics(
@@ -200,7 +202,9 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int = None):
     cost = job_result["stats"]["cost_usd"]
     if cost is None or cost == 0:
         if num_gpus is None:
-            raise ValueError("'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results.")
+            raise ValueError(
+                "'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results."
+            )
         cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
 
     metrics = Metrics(

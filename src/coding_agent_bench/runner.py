@@ -1,0 +1,333 @@
+import signal
+import subprocess
+from typing import Any, Literal
+from pathlib import Path
+import json
+from coding_agent_bench.helpers.codex import codex_create_toml
+from enum import Enum
+
+class SupportedAgent(Enum):
+    
+    claude_code = "claude-code"
+    codex = "codex"
+    opencode = "opencode"
+    pi = "pi"
+
+class Runner:
+    def __init__(self, jobs_dir: Path, job_name: str, dry_run: bool = False):
+        self.jobs_dir = jobs_dir.expanduser().absolute()
+        self.job_name = job_name
+        self.dry_run = dry_run
+
+    def harbor_execute(self, args: list[str]):
+        cmd = ["harbor", "run", *args]
+        if self.dry_run:
+            return cmd
+
+        print(f"Executing command: {cmd}")
+
+        original = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            subprocess.run(cmd)
+        finally:
+            signal.signal(signal.SIGINT, original)
+        return cmd
+
+    def run_job(
+        self,
+        agent: str,
+        dataset: str,
+        model: str,
+        environment: Literal["docker", "openshift"],
+        mounts: list[dict[str, str]] = None,
+        n_concurrent: int = 1,
+        agent_env: dict[str, Any] = None,
+        task_include_pattern: str = None,
+        n_tasks: int = None,
+        **kwargs,
+    ) -> Path:
+        args = []
+
+        # Add agent
+        args += ["--agent", agent]
+
+        # Add dataset
+        if Path(dataset).exists():
+            args += ["-p", dataset]
+        else:
+            args += ["-d", dataset]
+        if task_include_pattern is not None:
+            args += ["-i", task_include_pattern]
+
+        # Add model
+        args += ["--model", model]
+
+        # Add agent envvars
+        if agent_env is not None:
+            for key, value in agent_env.items():
+                args += ["--ae", f"{key}={value}"]
+
+        # Add environment
+        if environment == "openshift":
+            args += [
+                "--environment-import-path",
+                "coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment",
+            ]
+        else:
+            args += ["--env", environment]
+
+        # Add mounts
+        if mounts is not None:
+            args += ["--mounts-json", json.dumps(mounts)]
+
+        # Add number of concurrent tasks
+        args += ["--n-concurrent", str(n_concurrent)]
+
+        # Add total number of tasks
+        if n_tasks is not None:
+            args += ["--n-tasks", str(n_tasks)]
+
+        # Add output path args
+        args += ["--jobs-dir", str(self.jobs_dir)]
+        if self.job_name is not None:
+            args += ["--job-name", self.job_name]
+
+        # Execute the job
+        cmd = self.harbor_execute(args=args)
+
+        # Find job path
+        if self.job_name is not None:
+            job_path = self.jobs_dir / self.job_name
+        else:
+            job_path = sorted(
+                [f for f in self.jobs_dir.glob("*") if f.is_dir()],
+                key=lambda x: x.stat().st_ctime,
+            )[0]
+
+        return cmd, job_path
+
+    def _claude_code_run(
+        self,
+        model_name: str,
+        server_url: str,
+        **kwargs,
+    ) -> Path:
+
+        # Build envvars for claude code
+        agent_env = {
+            "ANTHROPIC_BASE_URL": server_url,
+            "ANTHROPIC_API_KEY": "sk-no-key-required",
+            "ANTHROPIC_MODEL": model_name,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model_name,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model_name,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model_name,
+        }
+
+        return self.run_job(
+            model=model_name,
+            agent_env=agent_env,
+            **kwargs,
+        )
+
+    def _codex_run(
+        self,
+        model_name: str,
+        server_url: str,
+        **kwargs,
+    ):
+
+        # Create file for config.toml
+        outpath = Path("config.toml").absolute()
+        codex_create_toml(model_name=model_name, server_url=server_url, outpath=outpath)
+
+        # Create mounts
+        mounts = [
+            {
+                "type": "bind",
+                "source": str(outpath),
+                "target": "/root/.codex/config.toml",
+            }
+        ]
+
+        # Create agent env and model
+        model = "vllm/" + model_name
+        agent_env = {"CODEX_HOME": "/root/.codex/"}
+
+        return self.run_job(
+            model=model,
+            mounts=mounts,
+            agent_env=agent_env,
+            **kwargs,
+        )
+
+    def _opencode_run(
+        self,
+        model_name: str,
+        server_url: str,
+        model_max_len: int = 262000,
+        **kwargs,
+    ) -> Path:
+
+        # Create OpenCode config
+        model = "vllm/" + model_name
+        context_limit = int(model_max_len * 0.75)
+        output_limit = int(model_max_len * 0.25)
+        opencode_config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": model,
+            "provider": {
+                "vllm": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "vLLM",
+                    "options": {"baseURL": server_url + "/v1"},
+                    "models": {
+                        "qwen3.6-35b": {
+                            "name": "qwen3.6-35b",
+                            "limit": {"context": context_limit, "output": output_limit},
+                        }
+                    },
+                }
+            },
+        }
+
+        # Create agent env
+        agent_env = {
+            "OPENCODE_CONFIG": json.dumps(opencode_config),
+        }
+
+        return self.run_job(
+            model=model,
+            agent_env=agent_env,
+            **kwargs,
+        )
+
+    def _pi_run(
+        self,
+        model_name: str,
+        server_url: str,
+        model_max_len: int = 262000,
+        **kwargs,
+    ) -> Path:
+
+        # Create Pi models.json
+        models_json = {
+            "providers": {
+                "vllm": {
+                    "baseUrl": server_url + "/v1",
+                    "api": "openai-completions",
+                    "apiKey": "NONE",
+                    "models": [
+                        {
+                            "id": model_name,
+                            "name": model_name,
+                            "contextWindow": model_max_len,
+                        }
+                    ],
+                }
+            }
+        }
+
+        # Create file for models.json
+        tmp = Path("models.json").absolute()
+        with open(tmp, "w") as f:
+            json.dump(models_json, f)
+
+        # Create mounts
+        mounts = [
+            {
+                "type": "bind",
+                "source": str(tmp),
+                "target": "/root/.pi/agent/models.json",
+            }
+        ]
+
+        # Create agent env and model
+        agent_env = {"PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": "/root/.pi/agent"}
+        model = "vllm/" + model_name
+
+        return self.run_job(
+            model=model,
+            mounts=mounts,
+            agent_env=agent_env,
+            **kwargs,
+        )
+
+    def run(
+        self,
+        agent: str,
+        dataset: str,
+        model_name: str,
+        server_url: str,
+        environment: Literal["docker", "openshift"],
+        dataset_pattern: str = None,
+        n_concurrent: int = 1,
+        n_tasks: int = None,
+        model_max_len: int = 262000,
+        **kwargs,
+    ) -> tuple[list[str], Path]:
+        """
+        Run a harbor job.
+
+        Returns:
+            list[str]: Constructed command for the job.
+            Path: Path to the job output directory.
+        """
+        if environment not in ["docker", "openshift"]:
+            raise ValueError(f"Invalid environment: {environment}")
+
+        if agent == SupportedAgent.claude_code.value:
+            return self._claude_code_run(
+                agent=agent,
+                dataset=dataset,
+                environment=environment,
+                model_name=model_name,
+                server_url=server_url,
+                model_max_len=model_max_len,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                **kwargs,
+            )
+        elif agent == SupportedAgent.codex.value:
+            return self._codex_run(
+                agent=agent,
+                dataset=dataset,
+                environment=environment,
+                model_name=model_name,
+                server_url=server_url,
+                model_max_len=model_max_len,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                **kwargs,
+            )
+        elif agent == SupportedAgent.opencode.value:
+            return self._opencode_run(
+                agent=agent,
+                dataset=dataset,
+                environment=environment,
+                model_name=model_name,
+                server_url=server_url,
+                model_max_len=model_max_len,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                **kwargs,
+            )
+        elif agent == SupportedAgent.pi.value:
+            return self._pi_run(
+                agent=agent,
+                dataset=dataset,
+                environment=environment,
+                model_name=model_name,
+                server_url=server_url,
+                model_max_len=model_max_len,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                **kwargs,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported agent type. Please choose from: {[e.value for e in SupportedAgent]}."
+            )
