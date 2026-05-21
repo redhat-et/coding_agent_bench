@@ -6,12 +6,13 @@ import json
 from coding_agent_bench.helpers.codex import codex_create_toml
 from enum import Enum
 
+
 class SupportedAgent(Enum):
-    
     claude_code = "claude-code"
     codex = "codex"
     opencode = "opencode"
     pi = "pi"
+
 
 class Runner:
     def __init__(self, jobs_dir: Path, job_name: str, dry_run: bool = False):

@@ -12,12 +12,17 @@ app = typer.Typer()
 @app.command()
 def run(
     agent: Annotated[
-        str, typer.Option(help=f"Agent to use. Must be one of: {[e.value for e in SupportedAgent]}")
+        str,
+        typer.Option(
+            help=f"Agent to use. Must be one of: {[e.value for e in SupportedAgent]}"
+        ),
     ],
     dataset: Annotated[str, typer.Option(help="Dataset name or path")],
     model_name: Annotated[str, typer.Option(help="Model name")],
     server_url: Annotated[str, typer.Option(help="Model server URL")],
-    environment: Annotated[str, typer.Option(help="Environment: docker or openshift")] = "docker",
+    environment: Annotated[
+        str, typer.Option(help="Environment: docker or openshift")
+    ] = "docker",
     jobs_dir: Annotated[Path, typer.Option(help="Directory for job output")] = Path(
         "./jobs"
     ),
