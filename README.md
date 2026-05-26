@@ -42,6 +42,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 | Sonnet 4.6                     | Claude Code | [50.0%](./benchmarks/SWE_Bench_Pro_Ansible_Sonnet_4.6_Claude_Code.md)        | $184            |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Pi          | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md)          | $13<sup>†</sup> |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Claude Code | [45.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Claude_Code.md) | $10<sup>†</sup> |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Qwen Code   | [43.8%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Qwen_Code.md)   | $9<sup>†</sup>  |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenCode    | [37.5%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenCode.md)    | $11<sup>†</sup> |
 
 More coming soon...
@@ -113,6 +114,7 @@ If you want to see a preview of Harbor command that would be run for a given set
 | Codex       | vLLM         | [Link](#codex-vllm)           | Testing   |
 | OpenCode    | vLLM         | [Link](#opencode-vllm)        | Validated |
 | Pi          | vLLM         | [Link](#pi-vllm)              | Validated |
+| Qwen Code   | vLLM         | [Link](#qwen-code-vllm)       | Validated |
 | Claude Code | VertexAI     | [Link](#claude-code-vertexai) | Validated |
 
 > [!note]
@@ -190,7 +192,7 @@ harbor run --agent opencode -p $DATASET_DIR/swe-bench-verified \
 Set the following variables in your environ:
 
 ```bash
-export MODEL_NAME='gemma4-26b'
+export MODEL_NAME=
 ```
 
 Create a `models.json` file with your vLLM server information:
@@ -208,6 +210,25 @@ harbor run --agent pi -d $BENCHMARK \
     --ae PI_OFFLINE=1 \
     --ae PI_CODING_AGENT_DIR=/root/.pi/agent \
     --mounts-json '[ { "type": "bind", "source":"/path/to/models.json", "target": "/root/.pi/agent/models.json" } ]'
+```
+
+#### Qwen Code vLLM
+
+Set the following variables in your environ:
+
+```bash
+export MODEL_NAME=
+export SERVER_URL=
+export OPENAI_BASE_URL=$SERVER_URL/v1
+export OPENAI_API_KEY='NONE'
+```
+
+Then run:
+
+```bash
+harbor run --agent qwen-coder -d $BENCHMARK \
+    -i $DATASET_PATTERN \
+    -m $MODEL_NAME
 ```
 
 #### Claude Code VertexAI
