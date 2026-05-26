@@ -2,7 +2,7 @@
 
 ## Benchmark
 
-**Dataset:** [swe-bench/swe-bench-verified](https://hub.harborframework.com/datasets/swe-bench/swe-bench-verified/latest) (500 tasks)  
+**Dataset:** [swe-bench-pro--ansible](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro) (96 tasks, ansible only) 
 **Model:** [RedHatAI/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4)  
 **Harness:** Qwen Code  
 **Environment:** Docker  

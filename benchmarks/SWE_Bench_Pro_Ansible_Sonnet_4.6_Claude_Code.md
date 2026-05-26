@@ -2,7 +2,7 @@
 
 ## Benchmark
 
-**Dataset:** [swe-bench/swe-bench-verified](https://hub.harborframework.com/datasets/swe-bench/swe-bench-verified/latest) (500 tasks)  
+**Dataset:** [swe-bench-pro--ansible](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro) (96 tasks, ansible only) 
 **Model:**   
 **Harness:** Claude Code  
 **Environment:** Docker  
