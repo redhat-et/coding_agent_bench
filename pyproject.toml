@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "harbor>=0.5.0",
-    "kfp>=2.16.1",
     "typer>=0.15.0",
 ]
 
