@@ -2,8 +2,9 @@ FROM python:3.12-slim
 
 USER root
 
-RUN mkdir -p /app && chown 1001:1001 /app
+RUN mkdir -p /app /home/harbor && chown 1001:1001 /app /home/harbor
 WORKDIR /app
+ENV HOME=/home/harbor
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
