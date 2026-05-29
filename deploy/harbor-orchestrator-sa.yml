@@ -18,7 +18,7 @@ rules:
     resources: [pods, pods/exec, pods/log]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: ["build.openshift.io"]
-    resources: [buildconfigs, builds]
+    resources: [buildconfigs, buildconfigs/instantiatebinary, builds, builds/log]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: ["image.openshift.io"]
     resources: [imagestreams]
@@ -56,27 +56,3 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: harbor-orchestrator
----
-
-# -- Task SA: used by environment pods, only needs anyuid SCC to run as root.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: harbor-task
-  labels:
-    app: harbor
----
-
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: harbor-task-anyuid
-  labels:
-    app: harbor
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: system:openshift:scc:anyuid
-subjects:
-  - kind: ServiceAccount
-    name: harbor-task
