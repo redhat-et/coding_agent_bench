@@ -24,10 +24,7 @@ def run(
     environment: Annotated[
         str, typer.Option(help="Environment: docker or openshift")
     ] = "docker",
-    jobs_dir: Annotated[Path, typer.Option(help="Directory for job output")] = Path(
-        "./jobs"
-    ),
-    job_name: Annotated[str, typer.Option(help="Name of the job")] = None,
+    job_name: Annotated[str, typer.Option(help="Name to give the job")] = None,
     dataset_pattern: Annotated[
         Optional[str], typer.Option(help="Pattern to filter dataset tasks")
     ] = None,
@@ -57,7 +54,7 @@ def run(
     if remote or dry_run:
         _dry_run = True
 
-    builder = HarborCommandBuilder(jobs_dir=jobs_dir, job_name=job_name)
+    builder = HarborCommandBuilder()
     harbor_command, job_dir = builder.build(
         agent=agent,
         dataset=dataset,
@@ -69,6 +66,7 @@ def run(
         n_tasks=n_tasks,
         model_max_len=model_max_len,
         dry_run=_dry_run,
+        job_name=job_name,
     )
     typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
 
@@ -76,6 +74,7 @@ def run(
         typer.echo("Running job on remote server...")
         job = OpenshiftJob()
         job.run(harbor_command)
+        typer.echo("Job started successfully")
 
     elif _dry_run:
         return
@@ -87,7 +86,6 @@ def run(
         finally:
             signal.signal(signal.SIGINT, original)
         typer.echo(f"Job output dir: {job_dir}")
-        return harbor_command
 
 
 if __name__ == "__main__":

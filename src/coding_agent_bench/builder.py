@@ -1,8 +1,10 @@
 from typing import Any, Literal
 from pathlib import Path
 import json
-from coding_agent_bench.helpers.codex import codex_create_toml
 from enum import Enum
+import os
+
+from coding_agent_bench.helpers.codex import codex_create_toml
 
 
 class SupportedAgent(str, Enum):
@@ -13,9 +15,8 @@ class SupportedAgent(str, Enum):
 
 
 class HarborCommandBuilder:
-    def __init__(self, jobs_dir: Path, job_name: str):
-        self.jobs_dir = jobs_dir.expanduser().absolute()
-        self.job_name = job_name
+    def __init__(self):
+        self.jobs_dir = Path(os.getcwd()) / "jobs"
 
     def _build_command(
         self,
@@ -28,6 +29,7 @@ class HarborCommandBuilder:
         agent_env: dict[str, Any] = None,
         task_include_pattern: str = None,
         n_tasks: int = None,
+        job_name: str = None,
         **kwargs,
     ) -> list[str]:
         args = []
@@ -72,12 +74,11 @@ class HarborCommandBuilder:
             args += ["--n-tasks", str(n_tasks)]
 
         # Add output path args
-        args += ["--jobs-dir", str(self.jobs_dir)]
-        if self.job_name is not None:
-            args += ["--job-name", self.job_name]
+        if job_name is not None:
+            args += ["--job-name", job_name]
 
         # Execute the job
-        cmd = ["uv", "run", "harbor", "run", *args]
+        cmd = ["harbor", "run", *args]
 
         return cmd
 
@@ -238,6 +239,7 @@ class HarborCommandBuilder:
         n_concurrent: int = 1,
         n_tasks: int = None,
         model_max_len: int = 262000,
+        job_name: str = None,
         **kwargs,
     ) -> tuple[list[str], Path]:
         """
@@ -261,6 +263,7 @@ class HarborCommandBuilder:
                 dataset_pattern=dataset_pattern,
                 n_concurrent=n_concurrent,
                 n_tasks=n_tasks,
+                job_name=job_name,
                 **kwargs,
             )
         elif agent == SupportedAgent.codex.value:
@@ -274,6 +277,7 @@ class HarborCommandBuilder:
                 dataset_pattern=dataset_pattern,
                 n_concurrent=n_concurrent,
                 n_tasks=n_tasks,
+                job_name=job_name,
                 **kwargs,
             )
         elif agent == SupportedAgent.opencode.value:
@@ -287,6 +291,7 @@ class HarborCommandBuilder:
                 dataset_pattern=dataset_pattern,
                 n_concurrent=n_concurrent,
                 n_tasks=n_tasks,
+                job_name=job_name,
                 **kwargs,
             )
         elif agent == SupportedAgent.pi.value:
@@ -300,6 +305,7 @@ class HarborCommandBuilder:
                 dataset_pattern=dataset_pattern,
                 n_concurrent=n_concurrent,
                 n_tasks=n_tasks,
+                job_name=job_name,
                 **kwargs,
             )
         else:
@@ -308,7 +314,7 @@ class HarborCommandBuilder:
             )
 
         # Find job path
-        if self.job_name is not None:
+        if job_name is not None:
             job_path = self.jobs_dir / self.job_name
         else:
             job_path = sorted(
