@@ -11,8 +11,6 @@ COPY --chown=1001:1001 . .
 
 USER 1001
 
-ENV UV_CACHE_DIR=/tmp/uv-cache
-
-RUN uv sync
+RUN uv sync --no-cache
 
 CMD ["echo", "Image is live!"]
