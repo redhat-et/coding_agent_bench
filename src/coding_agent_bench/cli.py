@@ -1,9 +1,12 @@
 from pathlib import Path
+import signal
+import subprocess
 from typing import Annotated, Optional
 
 import typer
 
-from coding_agent_bench.runner import Runner, SupportedAgent
+from coding_agent_bench.builder import HarborCommandBuilder, SupportedAgent
+from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.utils import cmd_to_string
 
 app = typer.Typer()
@@ -12,10 +15,8 @@ app = typer.Typer()
 @app.command()
 def run(
     agent: Annotated[
-        str,
-        typer.Option(
-            help=f"Agent to use. Must be one of: {[e.value for e in SupportedAgent]}"
-        ),
+        SupportedAgent,
+        typer.Option(help=f"Agent to use"),
     ],
     dataset: Annotated[str, typer.Option(help="Dataset name or path")],
     model_name: Annotated[str, typer.Option(help="Model name")],
@@ -37,12 +38,27 @@ def run(
     model_max_len: Annotated[
         int, typer.Option(help="Maximum model context length in tokens")
     ] = 262000,
+    remote: Annotated[
+        bool,
+        typer.Option(
+            help="Run in the logged in Openshift namespace. Only availble with `--environment=openshift`"
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
 ):
-    runner = Runner(jobs_dir=jobs_dir, job_name=job_name, dry_run=dry_run)
-    cmd, job_dir = runner.run(
+    # Raise error if remote is used and environment is not openshift
+    if remote and environment != "openshift":
+        raise ValueError("Remote mode is only available with `--environment=openshift`")
+
+    # Set dry run to true if we are remote
+    _dry_run = False
+    if remote or dry_run:
+        _dry_run = True
+
+    builder = HarborCommandBuilder(jobs_dir=jobs_dir, job_name=job_name)
+    harbor_command, job_dir = builder.build(
         agent=agent,
         dataset=dataset,
         model_name=model_name,
@@ -52,10 +68,26 @@ def run(
         n_concurrent=n_concurrent,
         n_tasks=n_tasks,
         model_max_len=model_max_len,
+        dry_run=_dry_run,
     )
-    if dry_run:
-        typer.echo(f"Job command:\n{cmd_to_string(cmd)}\n")
-    typer.echo(f"Job output dir: {job_dir}")
+    typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
+
+    if remote:
+        typer.echo("Running job on remote server...")
+        job = OpenshiftJob()
+        job.run(harbor_command)
+
+    elif _dry_run:
+        return
+
+    else:
+        original = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            subprocess.run(harbor_command)
+        finally:
+            signal.signal(signal.SIGINT, original)
+        typer.echo(f"Job output dir: {job_dir}")
+        return harbor_command
 
 
 if __name__ == "__main__":

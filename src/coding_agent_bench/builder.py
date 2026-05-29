@@ -1,5 +1,3 @@
-import signal
-import subprocess
 from typing import Any, Literal
 from pathlib import Path
 import json
@@ -7,34 +5,19 @@ from coding_agent_bench.helpers.codex import codex_create_toml
 from enum import Enum
 
 
-class SupportedAgent(Enum):
+class SupportedAgent(str, Enum):
     claude_code = "claude-code"
     codex = "codex"
     opencode = "opencode"
     pi = "pi"
 
 
-class Runner:
-    def __init__(self, jobs_dir: Path, job_name: str, dry_run: bool = False):
+class HarborCommandBuilder:
+    def __init__(self, jobs_dir: Path, job_name: str):
         self.jobs_dir = jobs_dir.expanduser().absolute()
         self.job_name = job_name
-        self.dry_run = dry_run
 
-    def harbor_execute(self, args: list[str]):
-        cmd = ["harbor", "run", *args]
-        if self.dry_run:
-            return cmd
-
-        print(f"Executing command: {cmd}")
-
-        original = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        try:
-            subprocess.run(cmd)
-        finally:
-            signal.signal(signal.SIGINT, original)
-        return cmd
-
-    def run_job(
+    def _build_command(
         self,
         agent: str,
         dataset: str,
@@ -46,7 +29,7 @@ class Runner:
         task_include_pattern: str = None,
         n_tasks: int = None,
         **kwargs,
-    ) -> Path:
+    ) -> list[str]:
         args = []
 
         # Add agent
@@ -94,25 +77,16 @@ class Runner:
             args += ["--job-name", self.job_name]
 
         # Execute the job
-        cmd = self.harbor_execute(args=args)
+        cmd = ["uv", "run", "harbor", "run", *args]
 
-        # Find job path
-        if self.job_name is not None:
-            job_path = self.jobs_dir / self.job_name
-        else:
-            job_path = sorted(
-                [f for f in self.jobs_dir.glob("*") if f.is_dir()],
-                key=lambda x: x.stat().st_ctime,
-            )[0]
+        return cmd
 
-        return cmd, job_path
-
-    def _claude_code_run(
+    def _build_claude_code_cmd(
         self,
         model_name: str,
         server_url: str,
         **kwargs,
-    ) -> Path:
+    ) -> list[str]:
 
         # Build envvars for claude code
         agent_env = {
@@ -124,18 +98,18 @@ class Runner:
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": model_name,
         }
 
-        return self.run_job(
+        return self._build_command(
             model=model_name,
             agent_env=agent_env,
             **kwargs,
         )
 
-    def _codex_run(
+    def _build_codex_cmd(
         self,
         model_name: str,
         server_url: str,
         **kwargs,
-    ):
+    ) -> list[str]:
 
         # Create file for config.toml
         outpath = Path("config.toml").absolute()
@@ -154,20 +128,20 @@ class Runner:
         model = "vllm/" + model_name
         agent_env = {"CODEX_HOME": "/root/.codex/"}
 
-        return self.run_job(
+        return self._build_command(
             model=model,
             mounts=mounts,
             agent_env=agent_env,
             **kwargs,
         )
 
-    def _opencode_run(
+    def _build_opencode_cmd(
         self,
         model_name: str,
         server_url: str,
         model_max_len: int = 262000,
         **kwargs,
-    ) -> Path:
+    ) -> list[str]:
 
         # Create OpenCode config
         model = "vllm/" + model_name
@@ -196,19 +170,19 @@ class Runner:
             "OPENCODE_CONFIG": json.dumps(opencode_config),
         }
 
-        return self.run_job(
+        return self._build_command(
             model=model,
             agent_env=agent_env,
             **kwargs,
         )
 
-    def _pi_run(
+    def _build_pi_cmd(
         self,
         model_name: str,
         server_url: str,
         model_max_len: int = 262000,
         **kwargs,
-    ) -> Path:
+    ) -> list[str]:
 
         # Create Pi models.json
         models_json = {
@@ -246,14 +220,14 @@ class Runner:
         agent_env = {"PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": "/root/.pi/agent"}
         model = "vllm/" + model_name
 
-        return self.run_job(
+        return self._build_command(
             model=model,
             mounts=mounts,
             agent_env=agent_env,
             **kwargs,
         )
 
-    def run(
+    def build(
         self,
         agent: str,
         dataset: str,
@@ -277,7 +251,7 @@ class Runner:
             raise ValueError(f"Invalid environment: {environment}")
 
         if agent == SupportedAgent.claude_code.value:
-            return self._claude_code_run(
+            cmd = self._build_claude_code_cmd(
                 agent=agent,
                 dataset=dataset,
                 environment=environment,
@@ -290,7 +264,7 @@ class Runner:
                 **kwargs,
             )
         elif agent == SupportedAgent.codex.value:
-            return self._codex_run(
+            cmd = self._build_codex_cmd(
                 agent=agent,
                 dataset=dataset,
                 environment=environment,
@@ -303,7 +277,7 @@ class Runner:
                 **kwargs,
             )
         elif agent == SupportedAgent.opencode.value:
-            return self._opencode_run(
+            cmd = self._build_opencode_cmd(
                 agent=agent,
                 dataset=dataset,
                 environment=environment,
@@ -316,7 +290,7 @@ class Runner:
                 **kwargs,
             )
         elif agent == SupportedAgent.pi.value:
-            return self._pi_run(
+            cmd = self._build_pi_cmd(
                 agent=agent,
                 dataset=dataset,
                 environment=environment,
@@ -332,3 +306,15 @@ class Runner:
             raise ValueError(
                 f"Unsupported agent type. Please choose from: {[e.value for e in SupportedAgent]}."
             )
+
+        # Find job path
+        if self.job_name is not None:
+            job_path = self.jobs_dir / self.job_name
+        else:
+            job_path = sorted(
+                [f for f in self.jobs_dir.glob("*") if f.is_dir()],
+                key=lambda x: x.stat().st_ctime,
+            )[0]
+
+        # If dry_run, return the command and job path
+        return cmd, job_path
