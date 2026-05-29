@@ -234,13 +234,9 @@ class OpenshiftEnvironment(BaseEnvironment):
             },
             "spec": {
                 "restartPolicy": "Never",
-                # Use a dedicated service account with the anyuid SCC so
-                # the container can run as root.  CRI-O mounts / read-only
-                # for non-root UIDs, and the harbor test harness writes
-                # files to / (via cd .. from /tests).
-                # Apply the SA + RoleBinding with:
-                #   oc apply -f deploy/harbor-rbac.yml -n <ns>
-                "serviceAccountName": "harbor-agent",
+                # Task pods use harbor-task SA (anyuid SCC only, no API access).
+                # Apply with: oc apply -f deploy/harbor-rbac.yml -n <ns>
+                "serviceAccountName": "harbor-task",
                 "securityContext": {"runAsUser": 0},
                 "containers": [
                     {

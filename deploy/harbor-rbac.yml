@@ -1,15 +1,52 @@
+# -- Orchestrator SA: used by the job pod to manage task pods, builds, etc.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: harbor-agent
+  name: harbor-orchestrator
   labels:
     app: harbor
 ---
 
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harbor-orchestrator
+  labels:
+    app: harbor
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/exec, pods/log]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["build.openshift.io"]
+    resources: [buildconfigs, builds]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["image.openshift.io"]
+    resources: [imagestreams]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["batch"]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: harbor-agent-anyuid
+  name: harbor-orchestrator
+  labels:
+    app: harbor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: harbor-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: harbor-orchestrator
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-orchestrator-anyuid
   labels:
     app: harbor
 roleRef:
@@ -18,4 +55,28 @@ roleRef:
   name: system:openshift:scc:anyuid
 subjects:
   - kind: ServiceAccount
-    name: harbor-agent
+    name: harbor-orchestrator
+---
+
+# -- Task SA: used by environment pods, only needs anyuid SCC to run as root.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-task
+  labels:
+    app: harbor
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-task-anyuid
+  labels:
+    app: harbor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+subjects:
+  - kind: ServiceAccount
+    name: harbor-task

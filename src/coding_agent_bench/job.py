@@ -37,12 +37,12 @@ class OpenshiftJob:
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
+                        "serviceAccountName": "harbor-orchestrator",
                         "containers": [
                             {
                                 "name": "harbor",
                                 "image": "ghcr.io/redhat-et/coding_agent_bench:latest",
-                                "command": ["/bin/sh", "-c"],
-                                "args": harbor_command,
+                                "command": ["uv", "run", "--no-sync", "--no-cache", *harbor_command],
                             }
                         ],
                     }
@@ -120,7 +120,8 @@ class OpenshiftJob:
             await self._run_oc_command(
                 [
                     "wait",
-                    f"job/{self._pod_name}",
+                    f"pod",
+                    f"--selector=job-name={self._pod_name}",
                     "--for=condition=Ready",
                     "--timeout=300s",
                 ],
