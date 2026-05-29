@@ -239,7 +239,7 @@ class HarborCommandBuilder:
         n_concurrent: int = 1,
         n_tasks: int = None,
         model_max_len: int = 262000,
-        job_name: str = None,
+        job_name: str = "default",
         **kwargs,
     ) -> tuple[list[str], Path]:
         """
@@ -314,13 +314,7 @@ class HarborCommandBuilder:
             )
 
         # Find job path
-        if job_name is not None:
-            job_path = self.jobs_dir / self.job_name
-        else:
-            job_path = sorted(
-                [f for f in self.jobs_dir.glob("*") if f.is_dir()],
-                key=lambda x: x.stat().st_ctime,
-            )[0]
+        job_path = self.jobs_dir / job_name
 
         # If dry_run, return the command and job path
         return cmd, job_path

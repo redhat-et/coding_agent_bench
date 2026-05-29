@@ -28,7 +28,7 @@ class OpenshiftJob:
     def __init__(self):
         self._pod_name = "coding-agent-bench"
 
-    def _job_spec(self, harbor_command: list[str]) -> dict:
+    def _job_spec(self, command: list[str]) -> dict:
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -42,7 +42,7 @@ class OpenshiftJob:
                             {
                                 "name": "harbor",
                                 "image": "ghcr.io/redhat-et/coding_agent_bench:latest",
-                                "command": ["uv", "run", "--no-sync", "--no-cache", *harbor_command],
+                                "command": ["uv", "run", "--no-sync", "--no-cache", *command],
                             }
                         ],
                     }
@@ -107,8 +107,8 @@ class OpenshiftJob:
             check=False,
         )
 
-    async def run_async(self, harbor_command: list[str]):
-        job_spec = self._job_spec(harbor_command)
+    async def run_async(self, command: list[str]):
+        job_spec = self._job_spec(command)
         job_json = json.dumps(job_spec)
 
         try:
@@ -131,5 +131,5 @@ class OpenshiftJob:
             await self._delete_job()
             raise
 
-    def run(self, harbor_command: list[str]):
-        return asyncio.run(self.run_async(harbor_command))
+    def run(self, command: list[str]):
+        return asyncio.run(self.run_async(command))

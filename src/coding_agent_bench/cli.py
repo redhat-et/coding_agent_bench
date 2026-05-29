@@ -1,6 +1,7 @@
 from pathlib import Path
 import signal
 import subprocess
+import sys
 from typing import Annotated, Optional
 
 import typer
@@ -48,38 +49,35 @@ def run(
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
-
-    # Set dry run to true if we are remote
-    _dry_run = False
-    if remote or dry_run:
-        _dry_run = True
-
-    builder = HarborCommandBuilder()
-    harbor_command, job_dir = builder.build(
-        agent=agent,
-        dataset=dataset,
-        model_name=model_name,
-        server_url=server_url,
-        environment=environment,
-        dataset_pattern=dataset_pattern,
-        n_concurrent=n_concurrent,
-        n_tasks=n_tasks,
-        model_max_len=model_max_len,
-        dry_run=_dry_run,
-        job_name=job_name,
-    )
-    typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
-
+    
+    # If remote, run as a job
     if remote:
         typer.echo("Running job on remote server...")
         job = OpenshiftJob()
-        job.run(harbor_command)
+        remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
+        command = ["coding-agent-bench", *remote_args]
+        job.run(command)
         typer.echo("Job started successfully")
-
-    elif _dry_run:
-        return
-
+        
     else:
+        builder = HarborCommandBuilder()
+        harbor_command, job_dir = builder.build(
+            agent=agent,
+            dataset=dataset,
+            model_name=model_name,
+            server_url=server_url,
+            environment=environment,
+            dataset_pattern=dataset_pattern,
+            n_concurrent=n_concurrent,
+            n_tasks=n_tasks,
+            model_max_len=model_max_len,
+            job_name=job_name,
+        )
+        typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
+
+        if dry_run:
+            return
+
         original = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             subprocess.run(harbor_command)
