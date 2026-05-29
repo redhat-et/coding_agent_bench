@@ -19,7 +19,7 @@ def _sanitize_k8s_name(name: str) -> str:
     name = name.strip("-")
     if not name or not name[0].isalnum():
         name = "hb-" + name
-    return name[:63]
+    return name[:58]
 
 
 class OpenshiftEnvironment(BaseEnvironment):
