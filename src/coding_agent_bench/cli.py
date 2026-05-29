@@ -25,7 +25,7 @@ def run(
     environment: Annotated[
         str, typer.Option(help="Environment: docker or openshift")
     ] = "docker",
-    job_name: Annotated[str, typer.Option(help="Name to give the job")] = None,
+    job_name: Annotated[str, typer.Option(help="Name to give the job")] = "default",
     dataset_pattern: Annotated[
         Optional[str], typer.Option(help="Pattern to filter dataset tasks")
     ] = None,

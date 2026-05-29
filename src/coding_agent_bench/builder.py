@@ -115,6 +115,7 @@ class HarborCommandBuilder:
         # Create file for config.toml
         outpath = Path("config.toml").absolute()
         codex_create_toml(model_name=model_name, server_url=server_url, outpath=outpath)
+        print(f"Created config.toml at {outpath}")
 
         # Create mounts
         mounts = [
@@ -168,7 +169,7 @@ class HarborCommandBuilder:
 
         # Create agent env
         agent_env = {
-            "OPENCODE_CONFIG": json.dumps(opencode_config),
+            "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
         }
 
         return self._build_command(
@@ -207,6 +208,7 @@ class HarborCommandBuilder:
         tmp = Path("models.json").absolute()
         with open(tmp, "w") as f:
             json.dump(models_json, f)
+        print(f"Created models.json at {tmp}")
 
         # Create mounts
         mounts = [
