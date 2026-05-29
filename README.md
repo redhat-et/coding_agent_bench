@@ -15,9 +15,11 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [SWE-Bench Acceleration](#swe-bench-acceleration)
   - [Use accelerated images for SWE-bench-verified](#use-accelerated-images-for-swe-bench-verified)
   - [Pre-pull base images](#pre-pull-base-images)
+- [Run with Openshift](#run-with-openshift)
+  - [Run Tasks in Openshift (Orchestrate Locally)](#run-tasks-in-openshift-orchestrate-locally)
+  - [Run Tasks and Orchestrate in Openshift](#run-tasks-and-orchestrate-in-openshift)
 - [WIP](#wip)
   - [Run with Podman](#run-with-podman)
-  - [Run with Openshift](#run-with-openshift)
   - [Run with Gemini and Gemini CLI](#run-with-gemini-and-gemini-cli)
   - [Run with vLLM and Gemini CLI](#run-with-vllm-and-gemini-cli)
 
@@ -295,6 +297,57 @@ harbor download <dataset>
 uv run scripts/pull_images.py <path-to-dataset>
 ```
 
+## Run with Openshift
+
+### Run Tasks in Openshift (Orchestrate Locally)
+
+Login to your cluster and select a project:
+
+```bash
+oc login --token=<token> --server=<server>
+oc project <project>
+```
+
+Create ServiceAccounts and RoleBindings to run tasks:
+
+```bash
+oc apply -f deploy/harbor-task-sa.yml
+```
+
+Then in your `harbor` command, add the flag:
+
+```bash
+--environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
+```
+
+### Run Tasks and Orchestrate in Openshift
+
+Login to your cluster and select a project:
+
+```bash
+oc login --token=<token> --server=<server>
+oc project <project>
+```
+
+Create ServiceAccounts and RoleBindings to run tasks and orchestrate:
+
+```bash
+oc apply -f deploy/harbor-task-sa.yml
+oc apply -f deploy/harbor-orchestrator-sa.yml
+```
+
+Using the CLI, start a job with the `--remote` flag enabled and set `--environment openshift`, e.g.:
+
+```bash
+uv run coding-agent-bench \
+    --agent claude-code \
+    --dataset scale-ai/swe-bench-pro \
+    --model-name my-model \
+    --server-url http://my.server.url \
+    --remote \
+    --environment openshift
+```
+
 ## WIP
 
 ### Run with Podman
@@ -307,20 +360,6 @@ In your `harbor` command, add the flag:
 --environment-import-path coding_agent_bench.harbor_envs.podman:PodmanEnvironment
 ```
 
-### Run with Openshift
-
-Login to your cluster and select a project:
-
-```bash
-oc login --token=<token> --server=<server>
-oc project <project>
-```
-
-Then in your `harbor` command, add the flag:
-
-```bash
---environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
-```
 
 ### Run with Gemini and Gemini CLI
 
