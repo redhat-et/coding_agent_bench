@@ -40,7 +40,7 @@ class OpenshiftJob:
                         "containers": [
                             {
                                 "name": "harbor",
-                                "image": "ghcr.io/rehat-et/coding_agent_bench:latest",
+                                "image": "ghcr.io/redhat-et/coding_agent_bench:latest",
                                 "command": ["/bin/sh", "-c"],
                                 "args": harbor_command,
                             }
@@ -101,24 +101,34 @@ class OpenshiftJob:
 
         return stdout, stderr
 
+    async def _delete_job(self):
+        await self._run_oc_command(
+            ["delete", f"job/{self._pod_name}", "--ignore-not-found"],
+            check=False,
+        )
+
     async def run_async(self, harbor_command: list[str]):
         job_spec = self._job_spec(harbor_command)
         job_json = json.dumps(job_spec)
 
-        await self._run_oc_command(
-            ["apply", "-f", "-"],
-            stdin_data=job_json.encode(),
-        )
+        try:
+            await self._run_oc_command(
+                ["apply", "-f", "-"],
+                stdin_data=job_json.encode(),
+            )
 
-        await self._run_oc_command(
-            [
-                "wait",
-                f"pod/{self._pod_name}",
-                "--for=condition=Ready",
-                "--timeout=300s",
-            ],
-            timeout_sec=310,
-        )
+            await self._run_oc_command(
+                [
+                    "wait",
+                    f"job/{self._pod_name}",
+                    "--for=condition=Ready",
+                    "--timeout=300s",
+                ],
+                timeout_sec=310,
+            )
+        except BaseException:
+            await self._delete_job()
+            raise
 
     def run(self, harbor_command: list[str]):
         return asyncio.run(self.run_async(harbor_command))
