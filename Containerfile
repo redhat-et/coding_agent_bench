@@ -13,6 +13,8 @@ ENV UV_CACHE_DIR=/tmp/uv-cache
 
 RUN uv sync
 
+RUN chmod -R 777 /tmp/uv-cache
+
 USER 1001
 
 CMD ["echo", "Image is live!"]
