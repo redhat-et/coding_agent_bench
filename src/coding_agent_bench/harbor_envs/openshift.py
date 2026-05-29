@@ -234,6 +234,14 @@ class OpenshiftEnvironment(BaseEnvironment):
             },
             "spec": {
                 "restartPolicy": "Never",
+                # Use a dedicated service account with the anyuid SCC so
+                # the container can run as root.  CRI-O mounts / read-only
+                # for non-root UIDs, and the harbor test harness writes
+                # files to / (via cd .. from /tests).
+                # Apply the SA + RoleBinding with:
+                #   oc apply -f deploy/harbor-rbac.yml -n <ns>
+                "serviceAccountName": "harbor-agent",
+                "securityContext": {"runAsUser": 0},
                 "containers": [
                     {
                         "name": "main",
@@ -376,20 +384,9 @@ class OpenshiftEnvironment(BaseEnvironment):
         exec_command = ["exec", self._pod_name, "-c", "main", *self._ns_args(), "--"]
 
         if user is not None:
-            exec_command = [
-                "exec",
-                self._pod_name,
-                "-c",
-                "main",
-                *self._ns_args(),
-                "--",
-                "su",
-                "-s",
-                "/bin/bash",
-                str(user),
-                "-c",
-                shell_command,
-            ]
+            exec_command.extend([
+                "runuser", "-s", "/bin/bash", str(user), "-c", shell_command,
+            ])
         else:
             exec_command.extend(["bash", "-c", shell_command])
 
@@ -410,10 +407,15 @@ class OpenshiftEnvironment(BaseEnvironment):
         )
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
+        # Use trailing "/." to copy the *contents* of source_dir into
+        # target_dir, matching podman cp behavior.  Without this,
+        # "oc cp /path/to/tests pod:/tests" creates /tests/tests/ instead
+        # of placing the files directly under /tests/.
+        source = f"{Path(source_dir).resolve()}/."
         await self._run_oc_command(
             [
                 "cp",
-                str(source_dir),
+                source,
                 f"{self._pod_name}:{target_dir}",
                 "-c",
                 "main",
@@ -438,10 +440,11 @@ class OpenshiftEnvironment(BaseEnvironment):
     async def download_dir(self, source_dir: str, target_dir: Path | str):
         target = Path(target_dir)
         target.mkdir(parents=True, exist_ok=True)
+        # Trailing "/." copies contents, matching podman cp behavior.
         await self._run_oc_command(
             [
                 "cp",
-                f"{self._pod_name}:{source_dir}",
+                f"{self._pod_name}:{source_dir}/.",
                 str(target_dir),
                 "-c",
                 "main",
