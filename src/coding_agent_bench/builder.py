@@ -78,7 +78,7 @@ class HarborCommandBuilder:
             args += ["--job-name", job_name]
 
         # Execute the job
-        cmd = ["harbor", "run", *args]
+        cmd = ["harbor", "run", "--debug", *args]
 
         return cmd
 
