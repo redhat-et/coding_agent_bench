@@ -336,6 +336,12 @@ oc apply -f deploy/harbor-task-sa.yml
 oc apply -f deploy/harbor-orchestrator-sa.yml
 ```
 
+Create a MinIO deployment to store your job results:
+
+```bash
+oc apply -f deploy/harbor-minio.yml
+```
+
 Using the CLI, start a job with the `--remote` flag enabled and set `--environment openshift`, e.g.:
 
 ```bash

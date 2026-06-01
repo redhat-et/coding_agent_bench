@@ -9,6 +9,8 @@ ENV HOME=/home/harbor
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
     | tar xzf - -C /usr/local/bin oc kubectl && \
+    curl -sL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc && \
     apt-get remove -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade pip uv

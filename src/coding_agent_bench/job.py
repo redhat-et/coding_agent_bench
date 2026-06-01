@@ -1,3 +1,4 @@
+import shlex
 import shutil
 import subprocess
 import asyncio
@@ -42,7 +43,17 @@ class OpenshiftJob:
                             {
                                 "name": "harbor",
                                 "image": "ghcr.io/redhat-et/coding_agent_bench:latest",
-                                "command": ["uv", "run", "--no-sync", "--no-cache", *command],
+                                "command": ["sh", "-c"],
+                                "args": [
+                                    "uv run --no-sync --no-cache "
+                                    + shlex.join(command)
+                                    + " && mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
+                                    + " && mc mb --ignore-existing minio/results"
+                                    + " && mc cp --recursive /app/jobs/ minio/results/"
+                                ],
+                                "envFrom": [
+                                    {"secretRef": {"name": "harbor-minio"}}
+                                ],
                             }
                         ],
                     }
