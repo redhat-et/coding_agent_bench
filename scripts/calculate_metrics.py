@@ -222,6 +222,39 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int = None):
 
     return metrics
 
+def format_time(seconds: int):
+    h, m = divmod(seconds, 3600)
+    m, s = divmod(m, 60)
+    return f"{h:02d}h {m:02d}m {s:02d}s"
+
+def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
+    report_template_path = Path(__file__).parent / "templates" / "report_template.md"
+    report_template = report_template_path.read_text()
+    
+    job_result_path = job_dir / "result.json"
+    result_json = job_result_path.read_text()
+
+    job_config_path = job_dir / "config.json"
+    config_json = job_config_path.read_text()
+    job_config = json.loads(job_config_path.read_text())
+
+    n_concurrent = job_config["n_concurrent_trials"]
+    
+    total_time = format_time(metrics.total_time_seconds // n_concurrent)
+    agent_time = format_time(metrics.agent_time_seconds // n_concurrent)
+    
+    report = report_template.format(
+        score=round(metrics.score*100, 1),
+        total_time=total_time,
+        agent_time=agent_time,
+        cost=metrics.cost_usd,
+        num_gpus=num_gpus,
+        config_json=config_json,
+        result_json=result_json,
+    )
+    
+    return report
+
 
 def main():
     args = parse_args()
@@ -238,7 +271,10 @@ def main():
         metrics = compute_metrics_latest(job_dir, num_gpus)
 
     print(metrics.model_dump_json(indent=4))
-
+    
+    # Create the job report
+    report = create_job_report(job_dir, metrics, num_gpus)
+    print(report)
 
 if __name__ == "__main__":
     main()
