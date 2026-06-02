@@ -47,6 +47,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Pi          | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md)          | $13<sup>†</sup> |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Claude Code | [45.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Claude_Code.md) | $10<sup>†</sup> |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Qwen Code   | [43.8%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Qwen_Code.md)   | $9<sup>†</sup>  |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenClaw    | [40.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenClaw.md)    | $9<sup>†</sup>  |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenCode    | [37.5%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenCode.md)    | $11<sup>†</sup> |
 
 More coming soon...
@@ -116,6 +117,7 @@ If you want to see a preview of Harbor command that would be run for a given set
 | ----------- | ------------ | ----------------------------- | --------- |
 | Claude Code | vLLM         | [Link](#claude-code-vllm)     | Validated |
 | Codex       | vLLM         | [Link](#codex-vllm)           | Testing   |
+| OpenClaw    | vLLM         | [Link](#openclaw-vllm)        | Validated |
 | OpenCode    | vLLM         | [Link](#opencode-vllm)        | Validated |
 | Pi          | vLLM         | [Link](#pi-vllm)              | Validated |
 | Qwen Code   | vLLM         | [Link](#qwen-code-vllm)       | Validated |
@@ -167,6 +169,26 @@ harbor run --agent codex -d $BENCHMARK \
     -m vllm/$MODEL_NAME \
     --ae CODEX_HOME=/root/.codex/ \
     --mounts-json '[ { "type": "bind", "source":"/Users/taagarwa/Documents/Projects/coding-agent-bench/config.toml", "target": "/root/.codex/config.toml" } ]'
+```
+
+#### OpenClaw vLLM
+
+Set the following variables in your environ:
+
+```sh
+export MODEL_NAME='qwen3.6-35b'
+export SERVER_URL='http://qwen36-35b-qwen36-35b.apps.ocp-beta-test.nerc.mghpcc.org'
+export OPENAI_BASE_URL=$SERVER_URL/v1
+export OPENAI_API_KEY='NONE'
+```
+
+Then run:
+
+```sh
+harbor run --agent openclaw -p $DATASET_DIR/swe-bench-verified \
+    -m openai/$MODEL_NAME \
+    --agent-kwarg thinking=off \
+    --n-concurrent 8
 ```
 
 #### OpenCode vLLM

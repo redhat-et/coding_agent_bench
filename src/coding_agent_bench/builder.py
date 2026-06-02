@@ -10,6 +10,7 @@ from coding_agent_bench.helpers.codex import codex_create_toml
 class SupportedAgent(str, Enum):
     claude_code = "claude-code"
     codex = "codex"
+    openclaw = "openclaw"
     opencode = "opencode"
     pi = "pi"
 
@@ -137,6 +138,25 @@ class HarborCommandBuilder:
             **kwargs,
         )
 
+    def _build_openclaw_cmd(
+        self,
+        model_name: str,
+        server_url: str,
+        **kwargs
+    ):
+        # Create agent env and model
+        model = "vllm/" + model_name
+        agent_env = {
+            "OPENAI_BASE_URL": server_url.rstrip("/") + "/v1",
+            "OPENAI_API_KEY": "sk-no-key-required",
+        }
+        
+        return self._build_command(
+            model=model,
+            agent_env=agent_env,
+            **kwargs,
+        )
+
     def _build_opencode_cmd(
         self,
         model_name: str,
@@ -156,7 +176,7 @@ class HarborCommandBuilder:
                 "vllm": {
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "vLLM",
-                    "options": {"baseURL": server_url + "/v1"},
+                    "options": {"baseURL": server_url.rstrip("/") + "/v1"},
                     "models": {
                         "qwen3.6-35b": {
                             "name": "qwen3.6-35b",
@@ -190,7 +210,7 @@ class HarborCommandBuilder:
         models_json = {
             "providers": {
                 "vllm": {
-                    "baseUrl": server_url + "/v1",
+                    "baseUrl": server_url.rstrip("/") + "/v1",
                     "api": "openai-completions",
                     "apiKey": "NONE",
                     "models": [
@@ -270,6 +290,20 @@ class HarborCommandBuilder:
             )
         elif agent == SupportedAgent.codex.value:
             cmd = self._build_codex_cmd(
+                agent=agent,
+                dataset=dataset,
+                environment=environment,
+                model_name=model_name,
+                server_url=server_url,
+                model_max_len=model_max_len,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                job_name=job_name,
+                **kwargs,
+            )
+        elif agent == SupportedAgent.openclaw.value:
+            cmd = self._build_openclaw_cmd(
                 agent=agent,
                 dataset=dataset,
                 environment=environment,
