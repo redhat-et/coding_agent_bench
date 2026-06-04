@@ -26,8 +26,9 @@ class OpenshiftJob:
                 "Please run 'oc login' and try again."
             )
 
-    def __init__(self):
-        self._pod_name = "coding-agent-bench"
+    def __init__(self, job_name: str):
+        self._job_name = job_name
+        self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
 
     def _job_spec(self, command: list[str]) -> dict:
         return {
@@ -39,6 +40,7 @@ class OpenshiftJob:
                     "spec": {
                         "restartPolicy": "Never",
                         "serviceAccountName": "harbor-orchestrator",
+                        "volumes": [{"name": "jobs", "type": "emptyDir"}],
                         "containers": [
                             {
                                 "name": "harbor",
@@ -51,6 +53,7 @@ class OpenshiftJob:
                                     + " && mc mb --ignore-existing minio/results"
                                     + " && mc cp --recursive /app/jobs/ minio/results/"
                                 ],
+                                "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-minio"}}
                                 ],

@@ -52,8 +52,10 @@ def run(
     
     # If remote, run as a job
     if remote:
+        if dry_run:
+            typer.echo("Error: Cannot use `--remote` with `--dry-run`. Dry run mode is not available on remote")
         typer.echo("Running job on remote server...")
-        job = OpenshiftJob()
+        job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
         command = ["coding-agent-bench", *remote_args]
         job.run(command)
