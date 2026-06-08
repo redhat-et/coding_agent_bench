@@ -5,6 +5,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [Leaderboards](#leaderboards)
   - [SWE-Bench Verified (pass@1, N=500)](#swe-bench-verified-pass1-n500)
   - [SWE-Bench Pro - Ansible Tasks (pass@1, N=96)](#swe-bench-pro---ansible-tasks-pass1-n96)
+  - [Terminal Bench 2.0 (pass@1, N=87)](#terminal-bench-20-pass1-n87)
 - [CLI Utility](#cli-utility)
   - [Prerequisites](#prerequisites)
   - [Run a Benchmark](#run-a-benchmark)
@@ -50,6 +51,15 @@ Reproducible benchmarks for coding agents and models using Harbor
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Qwen Code   | [43.8%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Qwen_Code.md)   | $9<sup>†</sup>  |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenClaw    | [40.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenClaw.md)    | $9<sup>†</sup>  |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenCode    | [37.5%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_OpenCode.md)    | $11<sup>†</sup> |
+
+
+### Terminal Bench 2.0 (pass@1, N=87)
+
+| Model                          | Harness  | Score                                                              | Cost            |
+| ------------------------------ | -------- | ------------------------------------------------------------------ | --------------- |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenCode | [30.3%](./benchmarks/Terminal_Bench_Qwen3.6_35b_NVFP4_OpenCode.md) | $11<sup>†</sup> |
+
+
 
 More coming soon...
 
