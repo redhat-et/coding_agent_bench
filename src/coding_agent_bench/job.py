@@ -158,7 +158,10 @@ class OpenshiftJob:
                 ):
                     return
 
-            elif phase in ("Failed", "Succeeded", "Unknown", "Error"):
+            elif phase == "Succeeded":
+                return
+
+            elif phase in ("Failed", "Unknown", "Error"):
                 reason = pod.get("status", {}).get("reason", "")
                 message = pod.get("status", {}).get("message", "")
                 raise RuntimeError(

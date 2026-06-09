@@ -96,7 +96,11 @@ def run(
             except subprocess.TimeoutExpired:
                 typer.echo("Harbor did not exit in time, terminating...")
                 proc.terminate()
-                proc.wait(timeout=10)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
             raise SystemExit(130)
         typer.echo(f"Job output dir: {job_dir}")
 
