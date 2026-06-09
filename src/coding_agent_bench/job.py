@@ -45,6 +45,7 @@ class OpenshiftJob:
                             {
                                 "name": "harbor",
                                 "image": "ghcr.io/redhat-et/coding_agent_bench:latest",
+                                "imagePullPolicy": "Always",
                                 "command": ["sh", "-c"],
                                 "args": [
                                     "uv run --no-sync --no-cache "
