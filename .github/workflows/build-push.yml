@@ -2,7 +2,9 @@ name: Build and Push Container Image
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'CICD*'
   workflow_dispatch:
 
 env:
@@ -26,6 +28,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set image tag
+        id: tag
+        run: |
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            echo "branch=latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -33,5 +44,5 @@ jobs:
           file: Containerfile
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.branch }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
