@@ -1,8 +1,8 @@
-# SWE-Bench Verified Qwen3.6-35B-A3B-NVFP4 OpenCode
+# Terminal Bench Qwen3.6-35B-A3B-NVFP4 OpenCode
 
 ## Benchmark
 
-**Dataset:** [harborframework/terminal-bench-2.0](https://huggingface.co/datasets/harborframework/terminal-bench-2.0) (500 tasks)  
+**Dataset:** [harborframework/terminal-bench-2.0](https://huggingface.co/datasets/harborframework/terminal-bench-2.0) (89 tasks)  
 **Model:** [RedHatAI/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4)  
 **Harness:** OpenCode  
 **Environment:** Docker  
@@ -44,6 +44,24 @@ harbor run --agent opencode -d $DATASET \
 
 # Rerun failed jobs once to eliminate transient errors
 harbor jobs resume -p jobs/<job-id> -f AgentTimeoutError -f NonZeroAgentExitCodeError
+```
+
+```sh
+oc login
+oc project harbor
+
+export BENCHMARK='terminal-bench/terminal-bench-2'
+export DATASET_DIR='datasets'
+export MODEL_NAME='qwen3.6-35b'
+export SERVER_URL='http://qwen36-35b-qwen36-35b.apps.ocp-beta-test.nerc.mghpcc.org'
+
+# Run Tau3 bench with OpenCode
+coding-agent-bench --agent opencode \
+    --dataset $BENCHMARK \
+    --model-name $MODEL_NAME \
+    --server-url $SERVER_URL \
+    --environment openshift --remote \
+    --n-tasks 1
 ```
 
 **`config.json`:**

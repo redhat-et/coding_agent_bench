@@ -1,10 +1,10 @@
-# SWE-Bench Verified Qwen3.6-35B-A3B-NVFP4 OpenCode
+# Terminal Bench Qwen3.6-35B-A3B-NVFP4 Pi
 
 ## Benchmark
 
-**Dataset:** [swe-bench/swe-bench-verified](https://hub.harborframework.com/datasets/swe-bench/swe-bench-verified/latest) (500 tasks)  
+**Dataset:** [harborframework/terminal-bench-2.0](https://huggingface.co/datasets/harborframework/terminal-bench-2.0) (89 tasks)   
 **Model:** [RedHatAI/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4)  
-**Harness:** OpenCode  
+**Harness:** Pi  
 **Environment:** Docker  
 **Job Name:** 2026-06-08__09-33-24  
 
