@@ -115,6 +115,40 @@ class OpenshiftJob:
 
         return stdout, stderr
 
+    async def _signal_job_pod(self) -> None:
+        """Send SIGTERM to the harbor process inside the job pod so it
+        can run its own cleanup (stopping task pods via
+        OpenshiftEnvironment.stop)."""
+        stdout, _ = await self._run_oc_command(
+            [
+                "get", "pod",
+                f"--selector=job-name={self._pod_name}",
+                "-o", "jsonpath={.items[0].metadata.name}",
+            ],
+            check=False,
+        )
+        pod_name = (stdout or "").strip()
+        if not pod_name:
+            return
+
+        await self._run_oc_command(
+            ["exec", pod_name, "--", "kill", "-TERM", "1"],
+            check=False,
+        )
+
+        for _ in range(30):
+            result_stdout, _ = await self._run_oc_command(
+                [
+                    "get", "pod", pod_name,
+                    "-o", "jsonpath={.status.phase}",
+                ],
+                check=False,
+            )
+            phase = (result_stdout or "").strip()
+            if phase in ("Succeeded", "Failed", ""):
+                break
+            await asyncio.sleep(2)
+
     async def _delete_job(self):
         await self._run_oc_command(
             ["delete", f"job/{self._pod_name}", "--ignore-not-found"],
@@ -202,6 +236,7 @@ class OpenshiftJob:
 
             await self._wait_for_job_pod_ready()
         except (asyncio.CancelledError, KeyboardInterrupt):
+            await self._signal_job_pod()
             await self._delete_job()
             raise
         except BaseException:
@@ -212,4 +247,8 @@ class OpenshiftJob:
         return asyncio.run(self.run_async(command))
 
     def cleanup(self):
-        asyncio.run(self._delete_job())
+        asyncio.run(self._cleanup_async())
+
+    async def _cleanup_async(self):
+        await self._signal_job_pod()
+        await self._delete_job()

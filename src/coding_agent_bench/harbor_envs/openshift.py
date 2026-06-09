@@ -267,7 +267,14 @@ class OpenshiftEnvironment(BaseEnvironment):
                     {
                         "name": "main",
                         "image": image,
-                        "command": ["tail", "-f", "/dev/null"],
+                        "command": ["bash", "-c",
+                            'while true; do '
+                            'for f in $(find /logs \\( -name "*.log" -o -name "*.txt" \\) 2>/dev/null); do '
+                            'if ! echo "$TAILED" | grep -qF "$f"; then '
+                            'TAILED="$TAILED $f"; '
+                            'tail -F "$f" & '
+                            'fi; done; sleep 5; done'
+                        ],
                         "env": env_list,
                         "resources": resources,
                     }
