@@ -57,6 +57,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 
 | Model                          | Harness  | Score                                                              | Cost            |
 | ------------------------------ | -------- | ------------------------------------------------------------------ | --------------- |
+| RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Pi       | [36.0%](./benchmarks/Terminal_Bench_Qwen3.6_35b_NVFP4_Pi.md)       | $11<sup>†</sup> |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | OpenCode | [30.3%](./benchmarks/Terminal_Bench_Qwen3.6_35b_NVFP4_OpenCode.md) | $11<sup>†</sup> |
 
 
