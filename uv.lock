@@ -347,6 +347,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "harbor" },
+    { name = "tenacity" },
     { name = "typer" },
 ]
 
@@ -358,6 +359,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "harbor", specifier = ">=0.13.1" },
+    { name = "tenacity", specifier = ">=8.0" },
     { name = "typer", specifier = ">=0.15.0" },
 ]
 

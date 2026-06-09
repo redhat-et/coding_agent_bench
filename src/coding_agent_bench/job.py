@@ -121,6 +121,72 @@ class OpenshiftJob:
             check=False,
         )
 
+    async def _wait_for_job_pod_ready(self, timeout_sec: int = 300) -> None:
+        for elapsed in range(timeout_sec):
+            stdout, _ = await self._run_oc_command(
+                [
+                    "get",
+                    "pod",
+                    f"--selector=job-name={self._pod_name}",
+                    "-o",
+                    "json",
+                ],
+                check=False,
+            )
+            if not stdout:
+                if elapsed % 10 == 0:
+                    print(
+                        f"No pods found for job {self._pod_name} ({elapsed}s elapsed)"
+                    )
+                await asyncio.sleep(1)
+                continue
+
+            pods = json.loads(stdout).get("items", [])
+            if not pods:
+                await asyncio.sleep(1)
+                continue
+
+            pod = pods[0]
+            phase = pod.get("status", {}).get("phase", "")
+
+            if phase == "Running":
+                container_statuses = pod.get("status", {}).get(
+                    "containerStatuses", []
+                )
+                if container_statuses and all(
+                    cs.get("ready") for cs in container_statuses
+                ):
+                    return
+
+            elif phase in ("Failed", "Succeeded", "Unknown", "Error"):
+                reason = pod.get("status", {}).get("reason", "")
+                message = pod.get("status", {}).get("message", "")
+                raise RuntimeError(
+                    f"Job pod for {self._pod_name} entered terminal phase "
+                    f"'{phase}': reason={reason}, message={message}"
+                )
+
+            elif phase == "Pending":
+                for cs in pod.get("status", {}).get("containerStatuses", []):
+                    waiting = cs.get("state", {}).get("waiting", {})
+                    waiting_reason = waiting.get("reason", "")
+                    if waiting_reason in ("ImagePullBackOff", "ErrImagePull"):
+                        raise RuntimeError(
+                            f"Failed to pull image for job {self._pod_name}: "
+                            f"{waiting.get('message', waiting_reason)}"
+                        )
+
+            if elapsed % 10 == 0:
+                print(
+                    f"Job pod status: {phase} ({elapsed}s elapsed)"
+                )
+
+            await asyncio.sleep(1)
+
+        raise RuntimeError(
+            f"Job pod for {self._pod_name} not ready after {timeout_sec} seconds"
+        )
+
     async def run_async(self, command: list[str]):
         job_spec = self._job_spec(command)
         job_json = json.dumps(job_spec)
@@ -131,19 +197,16 @@ class OpenshiftJob:
                 stdin_data=job_json.encode(),
             )
 
-            await self._run_oc_command(
-                [
-                    "wait",
-                    f"pod",
-                    f"--selector=job-name={self._pod_name}",
-                    "--for=condition=Ready",
-                    "--timeout=300s",
-                ],
-                timeout_sec=310,
-            )
+            await self._wait_for_job_pod_ready()
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            await self._delete_job()
+            raise
         except BaseException:
             await self._delete_job()
             raise
 
     def run(self, command: list[str]):
         return asyncio.run(self.run_async(command))
+
+    def cleanup(self):
+        asyncio.run(self._delete_job())

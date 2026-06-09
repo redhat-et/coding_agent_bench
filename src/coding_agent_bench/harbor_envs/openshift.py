@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
@@ -160,9 +162,42 @@ class OpenshiftEnvironment(BaseEnvironment):
 
         return result
 
-    async def _build_image(self) -> str:
+    async def _image_exists(self) -> bool:
+        is_result = await self._run_oc_command(
+            [
+                "get",
+                "is",
+                self._build_name,
+                *self._ns_args(),
+                "-o",
+                "jsonpath={.status.dockerImageRepository}",
+            ],
+            check=False,
+        )
+        return is_result.return_code == 0 and bool((is_result.stdout or "").strip())
+
+    async def _get_image_url(self) -> str:
+        is_result = await self._run_oc_command(
+            [
+                "get",
+                "is",
+                self._build_name,
+                *self._ns_args(),
+                "-o",
+                "jsonpath={.status.dockerImageRepository}",
+            ]
+        )
+        return (is_result.stdout or "").strip()
+
+    async def _build_image(self, force_build: bool = False) -> str:
         lock = self._image_build_locks.setdefault(self.environment_name, asyncio.Lock())
         async with lock:
+            if not force_build and await self._image_exists():
+                self.logger.debug(
+                    f"Image for {self._build_name} already exists, skipping build"
+                )
+                return await self._get_image_url()
+
             existing = await self._run_oc_command(
                 ["get", "bc", self._build_name, *self._ns_args(), "-o", "name"],
                 check=False,
@@ -191,17 +226,7 @@ class OpenshiftEnvironment(BaseEnvironment):
                 timeout_sec=int(self.task_env_config.build_timeout_sec),
             )
 
-        is_result = await self._run_oc_command(
-            [
-                "get",
-                "is",
-                self._build_name,
-                *self._ns_args(),
-                "-o",
-                "jsonpath={.status.dockerImageRepository}",
-            ]
-        )
-        return (is_result.stdout or "").strip()
+        return await self._get_image_url()
 
     def _pod_spec(self, image: str) -> dict:
         env_list = []
@@ -279,13 +304,108 @@ class OpenshiftEnvironment(BaseEnvironment):
             self._log_file_handle.close()
             self._log_file_handle = None
 
+    async def _get_pod_json(self) -> dict | None:
+        result = await self._run_oc_command(
+            ["get", "pod", self._pod_name, *self._ns_args(), "-o", "json"],
+            check=False,
+        )
+        if result.return_code != 0 or not result.stdout:
+            return None
+        return json.loads(result.stdout)
+
+    async def _wait_for_pod_ready(self, timeout_sec: int = 300) -> None:
+        self.logger.debug(f"Waiting for pod {self._pod_name} to be ready...")
+
+        for elapsed in range(timeout_sec):
+            pod = await self._get_pod_json()
+            if pod is None:
+                if elapsed % 10 == 0:
+                    self.logger.debug(
+                        f"Pod {self._pod_name} not found yet ({elapsed}s elapsed)"
+                    )
+                await asyncio.sleep(1)
+                continue
+
+            phase = pod.get("status", {}).get("phase", "")
+
+            if phase == "Running":
+                container_statuses = pod.get("status", {}).get(
+                    "containerStatuses", []
+                )
+                if container_statuses and all(
+                    cs.get("ready") for cs in container_statuses
+                ):
+                    self.logger.debug(f"Pod {self._pod_name} is ready")
+                    return
+
+            elif phase in ("Failed", "Succeeded", "Unknown", "Error"):
+                reason = pod.get("status", {}).get("reason", "")
+                message = pod.get("status", {}).get("message", "")
+                raise RuntimeError(
+                    f"Pod {self._pod_name} entered terminal phase '{phase}': "
+                    f"reason={reason}, message={message}"
+                )
+
+            elif phase == "Pending":
+                for cs in pod.get("status", {}).get("containerStatuses", []):
+                    waiting = cs.get("state", {}).get("waiting", {})
+                    waiting_reason = waiting.get("reason", "")
+                    if waiting_reason in ("ImagePullBackOff", "ErrImagePull"):
+                        raise RuntimeError(
+                            f"Failed to pull image for pod {self._pod_name}: "
+                            f"{waiting.get('message', waiting_reason)}"
+                        )
+
+            if elapsed % 10 == 0:
+                self.logger.debug(
+                    f"Pod {self._pod_name} status: {phase} ({elapsed}s elapsed)"
+                )
+
+            await asyncio.sleep(1)
+
+        raise RuntimeError(
+            f"Pod {self._pod_name} not ready after {timeout_sec} seconds"
+        )
+
+    async def _wait_for_container_exec_ready(
+        self, max_attempts: int = 60
+    ) -> None:
+        for attempt in range(max_attempts):
+            result = await self._run_oc_command(
+                [
+                    "exec",
+                    self._pod_name,
+                    "-c",
+                    "main",
+                    *self._ns_args(),
+                    "--",
+                    "true",
+                ],
+                check=False,
+                timeout_sec=10,
+            )
+            if result.return_code == 0:
+                return
+
+            if attempt % 10 == 0:
+                self.logger.debug(
+                    f"Container not ready for exec, "
+                    f"attempt {attempt + 1}/{max_attempts}"
+                )
+            await asyncio.sleep(3)
+
+        raise RuntimeError(
+            f"Container in pod {self._pod_name} not ready for exec "
+            f"after {max_attempts} attempts"
+        )
+
     async def start(self, force_build: bool) -> None:
         use_prebuilt = not force_build and self.task_env_config.docker_image
 
         if use_prebuilt:
             self._image_name = self.task_env_config.docker_image
         else:
-            self._image_name = await self._build_image()
+            self._image_name = await self._build_image(force_build=force_build)
 
         # Clean up any stale pod from a previous run with the same session ID.
         await self._run_oc_command(
@@ -301,16 +421,8 @@ class OpenshiftEnvironment(BaseEnvironment):
             stdin_data=pod_json.encode(),
         )
 
-        await self._run_oc_command(
-            [
-                "wait",
-                f"pod/{self._pod_name}",
-                "--for=condition=Ready",
-                "--timeout=300s",
-                *self._ns_args(),
-            ],
-            timeout_sec=310,
-        )
+        await self._wait_for_pod_ready()
+        await self._wait_for_container_exec_ready()
 
         await self.exec(
             f"mkdir -p {self._env_paths.agent_dir} {self._env_paths.verifier_dir} "
@@ -319,6 +431,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         )
 
         await self._start_log_streaming()
+        await self._upload_environment_dir_after_start()
 
     async def stop(self, delete: bool):
         await self._stop_log_streaming()
@@ -390,6 +503,11 @@ class OpenshiftEnvironment(BaseEnvironment):
             exec_command, check=False, timeout_sec=timeout_sec
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     async def upload_file(self, source_path: Path | str, target_path: str):
         await self._run_oc_command(
             [
@@ -402,6 +520,11 @@ class OpenshiftEnvironment(BaseEnvironment):
             ]
         )
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        reraise=True,
+    )
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
         # Use trailing "/." to copy the *contents* of source_dir into
         # target_dir, matching podman cp behavior.  Without this,
@@ -419,6 +542,11 @@ class OpenshiftEnvironment(BaseEnvironment):
             ]
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     async def download_file(self, source_path: str, target_path: Path | str):
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -433,6 +561,11 @@ class OpenshiftEnvironment(BaseEnvironment):
             ]
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     async def download_dir(self, source_dir: str, target_dir: Path | str):
         target = Path(target_dir)
         target.mkdir(parents=True, exist_ok=True)
