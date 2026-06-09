@@ -58,9 +58,14 @@ def run(
         job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
         command = ["coding-agent-bench", *remote_args]
-        job.run(command)
+        try:
+            job.run(command)
+        except KeyboardInterrupt:
+            typer.echo("\nInterrupted — cleaning up remote job...")
+            job.cleanup()
+            raise SystemExit(130)
         typer.echo("Job started successfully")
-        
+
     else:
         builder = HarborCommandBuilder()
         harbor_command, job_dir = builder.build(
@@ -80,11 +85,23 @@ def run(
         if dry_run:
             return
 
-        original = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        proc = subprocess.Popen(harbor_command)
         try:
-            subprocess.run(harbor_command)
-        finally:
-            signal.signal(signal.SIGINT, original)
+            proc.wait()
+        except KeyboardInterrupt:
+            typer.echo("\nInterrupted — waiting for harbor to shut down...")
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                typer.echo("Harbor did not exit in time, terminating...")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            raise SystemExit(130)
         typer.echo(f"Job output dir: {job_dir}")
 
 
