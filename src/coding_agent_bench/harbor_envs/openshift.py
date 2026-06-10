@@ -263,6 +263,7 @@ class OpenshiftEnvironment(BaseEnvironment):
                 # Apply with: oc apply -f deploy/harbor-rbac.yml -n <ns>
                 "serviceAccountName": "harbor-task",
                 "securityContext": {"runAsUser": 0},
+                # Stream task log files to container logs to monitor activity
                 "containers": [
                     {
                         "name": "main",
@@ -310,6 +311,20 @@ class OpenshiftEnvironment(BaseEnvironment):
         if self._log_file_handle is not None:
             self._log_file_handle.close()
             self._log_file_handle = None
+
+    async def _check_pod_alive(self) -> None:
+        pod = await self._get_pod_json()
+        if pod is None:
+            raise RuntimeError(
+                f"Pod {self._pod_name} no longer exists; "
+                "cannot copy files from a deleted pod"
+            )
+        phase = pod.get("status", {}).get("phase", "")
+        if phase in ("Failed", "Succeeded", "Unknown", "Error"):
+            raise RuntimeError(
+                f"Pod {self._pod_name} is in terminal phase '{phase}'; "
+                "cannot copy files (oc cp requires exec into a running container)"
+            )
 
     async def _get_pod_json(self) -> dict | None:
         result = await self._run_oc_command(
@@ -516,6 +531,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         reraise=True,
     )
     async def upload_file(self, source_path: Path | str, target_path: str):
+        await self._check_pod_alive()
         await self._run_oc_command(
             [
                 "cp",
@@ -533,6 +549,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         reraise=True,
     )
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
+        await self._check_pod_alive()
         # Use trailing "/." to copy the *contents* of source_dir into
         # target_dir, matching podman cp behavior.  Without this,
         # "oc cp /path/to/tests pod:/tests" creates /tests/tests/ instead
@@ -555,6 +572,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         reraise=True,
     )
     async def download_file(self, source_path: str, target_path: Path | str):
+        await self._check_pod_alive()
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         await self._run_oc_command(
@@ -574,6 +592,7 @@ class OpenshiftEnvironment(BaseEnvironment):
         reraise=True,
     )
     async def download_dir(self, source_dir: str, target_dir: Path | str):
+        await self._check_pod_alive()
         target = Path(target_dir)
         target.mkdir(parents=True, exist_ok=True)
         # Trailing "/." copies contents, matching podman cp behavior.
