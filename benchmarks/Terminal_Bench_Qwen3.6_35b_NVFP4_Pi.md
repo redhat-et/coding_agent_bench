@@ -6,7 +6,7 @@
 **Model:** [RedHatAI/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4)  
 **Harness:** Pi  
 **Environment:** Docker  
-**Job Name:** 2026-06-08__09-33-24  
+**Job Name:** 2026-06-08__14-30-39  
 
 ## Results
 
