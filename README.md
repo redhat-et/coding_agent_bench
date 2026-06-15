@@ -45,6 +45,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 
 | Model                          | Harness     | Score                                                                        | Cost            |
 | ------------------------------ | ----------- | ---------------------------------------------------------------------------- | --------------- |
+| Opus 4.8                       | Claude Code | [69.8%](./benchmarks/SWE_Bench_Pro_Ansible_Sonnet_4.6_Claude_Code.md)        | $186            |
 | Sonnet 4.6                     | Claude Code | [50.0%](./benchmarks/SWE_Bench_Pro_Ansible_Sonnet_4.6_Claude_Code.md)        | $184            |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Pi          | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md)          | $13<sup>†</sup> |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Claude Code | [45.6%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Claude_Code.md) | $10<sup>†</sup> |
@@ -126,15 +127,16 @@ If you want to see a preview of Harbor command that would be run for a given set
 
 ### Table
 
-| Harness     | Model Server | Example                       | Status    |
-| ----------- | ------------ | ----------------------------- | --------- |
-| Claude Code | vLLM         | [Link](#claude-code-vllm)     | Validated |
-| Codex       | vLLM         | [Link](#codex-vllm)           | Testing   |
-| OpenClaw    | vLLM         | [Link](#openclaw-vllm)        | Validated |
-| OpenCode    | vLLM         | [Link](#opencode-vllm)        | Validated |
-| Pi          | vLLM         | [Link](#pi-vllm)              | Validated |
-| Qwen Code   | vLLM         | [Link](#qwen-code-vllm)       | Validated |
-| Claude Code | VertexAI     | [Link](#claude-code-vertexai) | Validated |
+| Harness     | Model Server | Example                        | Status    |
+| ----------- | ------------ | ------------------------------ | --------- |
+| Claude Code | vLLM         | [Link](#claude-code-vllm)      | Validated |
+| Codex       | vLLM         | [Link](#codex-vllm)            | Testing   |
+| OpenClaw    | vLLM         | [Link](#openclaw-vllm)         | Validated |
+| OpenCode    | vLLM         | [Link](#opencode-vllm)         | Validated |
+| Pi          | vLLM         | [Link](#pi-vllm)               | Validated |
+| Qwen Code   | vLLM         | [Link](#qwen-code-vllm)        | Validated |
+| Claude Code | Anthropic    | [Link](#claude-code-anthropic) | Validated |
+| Claude Code | VertexAI     | [Link](#claude-code-vertexai)  | Validated |
 
 > [!note]
 > To use with a locally hosted model (e.g. llama.cpp) use a vLLM example and set `SERVER_URL=http://host.docker.internal:<server-port>`
@@ -268,6 +270,24 @@ Then run:
 harbor run --agent qwen-coder -d $BENCHMARK \
     -i $DATASET_PATTERN \
     -m $MODEL_NAME
+```
+
+#### Claude Code Anthropic
+
+Copy `.env.example` to `.env` and set the following variables:
+
+```
+ANTHROPIC_API_KEY=
+```
+
+Then run:
+
+```bash
+set -a
+source .env
+
+harbor run --agent claude-code -d $BENCHMARK \
+    -m claude-opus-4-8
 ```
 
 #### Claude Code VertexAI
