@@ -12,7 +12,7 @@
 
 **Score:** 37.5%  
 **Errors (Initial Run):** 20   
-**Total Time:** 1 hr 46 min
+**Total Time:** 1 hr 46 min  
 **Agent Time:** 1 hr 32 min    
 **Estimated Cost:** $12.11 ($4 / GPU / hr * 2 GPU * 1 hr 32 min)   
 
