@@ -233,25 +233,49 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
     
     job_result_path = job_dir / "result.json"
     result_json = job_result_path.read_text()
+    result_dict = json.loads(result_json)
 
     job_config_path = job_dir / "config.json"
     config_json = job_config_path.read_text()
-    job_config = json.loads(job_config_path.read_text())
-
-    n_concurrent = job_config["n_concurrent_trials"]
+    config_dict = json.loads(config_json)
     
+    # Parse job metadata
+    dataset = config_dict["datasets"][0]["name"]
+    dataset = "swe-bench/swe-bench-verified" if dataset == "datasets/swe-bench-verified" else dataset
+    num_tasks = result_dict["n_total_trials"]
+    model = config_dict["agents"][0]["model_name"]
+    harness = config_dict["agents"][0]["name"]
+    job_name = config_dict["job_name"]
+
+    # Calculate time spent
+    n_concurrent = config_dict["n_concurrent_trials"]
     total_time = format_time(metrics.total_time_seconds // n_concurrent)
     agent_time = format_time(metrics.agent_time_seconds // n_concurrent)
     
+    # Show GPU calculation
+    gpu_snippet = f"($4 / GPU / hr * {num_gpus} GPU * {agent_time})" if num_gpus else "" 
+    
+    # Create report
     report = report_template.format(
+        dataset=dataset,
+        num_tasks=num_tasks,
+        model=model,
+        harness=harness,
+        job_name=job_name,
         score=round(metrics.score*100, 1),
         total_time=total_time,
         agent_time=agent_time,
-        cost=metrics.cost_usd,
-        num_gpus=num_gpus,
+        cost=round(metrics.cost_usd, 2),
+        gpu_snippet=gpu_snippet,
         config_json=config_json,
         result_json=result_json,
     )
+    
+    # Save report
+    benchmark_dir = Path(__file__).parent.parent / "benchmarks"
+    report_name = f"{dataset.split("/")[-1]}_{model.split("/")[-1]}_{harness}.md".replace("/", "_")
+    with open(benchmark_dir / report_name, "w") as f:
+        f.write(report)
     
     return report
 
@@ -273,8 +297,7 @@ def main():
     print(metrics.model_dump_json(indent=4))
     
     # Create the job report
-    report = create_job_report(job_dir, metrics, num_gpus)
-    print(report)
+    create_job_report(job_dir, metrics, num_gpus)
 
 if __name__ == "__main__":
     main()
