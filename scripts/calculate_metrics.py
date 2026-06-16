@@ -240,7 +240,7 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
     config_dict = json.loads(config_json)
     
     # Parse job metadata
-    dataset = config_dict["datasets"][0]["name"]
+    dataset = config_dict["datasets"][0]["name"] if config_dict["datasets"][0]["name"] is not None else config_dict["datasets"][0]["path"]
     dataset = "swe-bench/swe-bench-verified" if dataset == "datasets/swe-bench-verified" else dataset
     num_tasks = result_dict["n_total_trials"]
     model = config_dict["agents"][0]["model_name"]

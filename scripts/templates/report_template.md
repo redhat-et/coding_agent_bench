@@ -10,7 +10,7 @@
 
 ## Results
 
-**Score:** {score}    
+**Score:** {score}%    
 **Errors (Initial Run):** <TODO>  
 **Total Time:** {total_time}  
 **Agent Time:** {agent_time}  
