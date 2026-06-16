@@ -52,6 +52,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("job_dir", type=Path)
     parser.add_argument("--num-gpus", type=int, default=None)
+    parser.add_argument("--report", action="store_true")
     args = parser.parse_args()
     return args
 
@@ -297,7 +298,8 @@ def main():
     print(metrics.model_dump_json(indent=4))
     
     # Create the job report
-    create_job_report(job_dir, metrics, num_gpus)
+    if args.report:
+        create_job_report(job_dir, metrics, num_gpus)
 
 if __name__ == "__main__":
     main()
