@@ -47,6 +47,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 | Model                          | Harness     | Score                                                                        | Cost            |
 | ------------------------------ | ----------- | ---------------------------------------------------------------------------- | --------------- |
 | Opus 4.8                       | Claude Code | [69.8%](./benchmarks/SWE_Bench_Pro_Ansible_Opus_4.8_Claude_Code.md)          | $186            |
+| GPT 5.5                        | Codex       | [60.4%](./benchmarks/SWE_Bench_Pro_Ansible_GPT_5.5_Codex.md)                 | $188            |
 | Opus 4.6                       | Claude Code | [51.0%](./benchmarks/SWE_Bench_Pro_Ansible_Opus_4.6_Claude_Code.md)          | $172            |
 | Sonnet 4.6                     | Claude Code | [50.0%](./benchmarks/SWE_Bench_Pro_Ansible_Sonnet_4.6_Claude_Code.md)        | $184            |
 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | Pi          | [47.9%](./benchmarks/SWE_Bench_Pro_Ansible_Qwen3.6_35b_NVFP4_Pi.md)          | $13<sup>†</sup> |
@@ -139,6 +140,7 @@ If you want to see a preview of Harbor command that would be run for a given set
 | Qwen Code   | vLLM         | [Link](#qwen-code-vllm)        | Validated |
 | Claude Code | Anthropic    | [Link](#claude-code-anthropic) | Validated |
 | Claude Code | VertexAI     | [Link](#claude-code-vertexai)  | Validated |
+| Codex       | OpenAI       | [Link](#codex-openai)          | Validated |
 
 > [!note]
 > To use with a locally hosted model (e.g. llama.cpp) use a vLLM example and set `SERVER_URL=http://host.docker.internal:<server-port>`
@@ -312,6 +314,24 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_MODEL=$ANTHROPIC_MODEL \
     --ae GOOGLE_APPLICATION_CREDENTIALS='/app/.config/gcloud/application_default_credentials.json' \
     --mounts-json '["~/.config/gcloud/application_default_credentials.json:/app/.config/gcloud/application_default_credentials.json"]'
+```
+
+#### Codex OpenAI
+
+Copy `.env.example` to `.env` and set the following variables:
+
+```
+OPENAI_API_KEY=
+```
+
+Then run:
+
+```bash
+set -a
+source .env
+
+harbor run --agent codex -d $BENCHMARK \
+    -m gpt-5.5
 ```
 
 ## Deploy models with vLLM
