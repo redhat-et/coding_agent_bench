@@ -12,7 +12,7 @@
 {config_json}
 ```
 
-## `result.json`
+`result.json`
 
 ```json
 {result_json}
