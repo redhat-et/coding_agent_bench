@@ -3,7 +3,7 @@
 ## Benchmark
 
 **Dataset:** [swe-bench/swe-bench-verified](https://hub.harborframework.com/datasets/swe-bench/swe-bench-verified/latest) (500 tasks)  
-**Model:** gpt-5.5  
+**Model:** gpt-5.5 - high 
 **Harness:** codex  
 **Environment:** Docker  
 **Job Name:** 2026-06-17__08-52-17  
