@@ -5,7 +5,7 @@
 **Dataset:** [{dataset}](https://hub.harborframework.com/datasets/{dataset}/latest) ({num_tasks} tasks)  
 **Model:** {model}  
 **Harness:** {harness}  
-**Environment:** <TODO>  
+**Environment:** {environment}  
 **Job Name:** {job_name}  
 
 ## Results

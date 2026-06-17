@@ -244,6 +244,7 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
     dataset = config_dict["datasets"][0]["name"] if config_dict["datasets"][0]["name"] is not None else config_dict["datasets"][0]["path"]
     dataset = "swe-bench/swe-bench-verified" if dataset == "datasets/swe-bench-verified" else dataset
     num_tasks = result_dict["n_total_trials"]
+    environment = config_dict["environment"]["type"]
     model = config_dict["agents"][0]["model_name"]
     harness = config_dict["agents"][0]["name"]
     job_name = config_dict["job_name"]
@@ -260,6 +261,7 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
     report = report_template.format(
         dataset=dataset,
         num_tasks=num_tasks,
+        environment=environment,
         model=model,
         harness=harness,
         job_name=job_name,
