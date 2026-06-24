@@ -4,6 +4,8 @@ import json
 from enum import Enum
 import os
 
+from harbor.models.environment_type import EnvironmentType
+
 from coding_agent_bench.helpers.codex import codex_create_toml
 
 
@@ -55,7 +57,7 @@ class HarborCommandBuilder:
                 args += ["--ae", f"{key}={value}"]
 
         # Add environment
-        if environment == "openshift":
+        if environment == "openshift" and "openshift" not in EnvironmentType:
             args += [
                 "--environment-import-path",
                 "coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment",
