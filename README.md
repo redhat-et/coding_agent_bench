@@ -47,6 +47,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 
 | Model                          | Harness     | Score                                                                        | Cost            |
 | ------------------------------ | ----------- | ---------------------------------------------------------------------------- | --------------- |
+| Opus 4.8                       | Claude Code | [78.1%](./benchmarks/SWE_Bench_Pro_Ansible_Opus_4.8_OpenCode.md)             | $151            |
 | Opus 4.8                       | Claude Code | [69.8%](./benchmarks/SWE_Bench_Pro_Ansible_Opus_4.8_Claude_Code.md)          | $186            |
 | GPT 5.5                        | Codex       | [60.4%](./benchmarks/SWE_Bench_Pro_Ansible_GPT_5.5_Codex.md)                 | $188            |
 | Opus 4.6                       | Claude Code | [51.0%](./benchmarks/SWE_Bench_Pro_Ansible_Opus_4.6_Claude_Code.md)          | $172            |
