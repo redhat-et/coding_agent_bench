@@ -152,7 +152,7 @@ class OpenshiftJob:
 
     async def _delete_job(self):
         await self._run_oc_command(
-            ["delete", f"job/{self._pod_name}", "--ignore-not-found"],
+            ["delete", f"job/{self._pod_name}", "--cascade=foreground", "--ignore-not-found"],
             check=False,
         )
 
