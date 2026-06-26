@@ -94,8 +94,26 @@ spec:
           - secretRef:
               name: hf-token-secret
         name: qwen36-27b
+        securityContext:
+          allowPrivilegeEscalation: false
         ports:
         - containerPort: 8000
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 30
         resources:
           limits:
             cpu: "4"
@@ -134,7 +152,7 @@ spec:
         name: triton-volume
       - emptyDir:
           medium: Memory
-          sizeLimit: 2Gi
+          sizeLimit: 16Gi
         name: shm
 ---
 apiVersion: v1
@@ -169,6 +187,9 @@ metadata:
 spec:
   port:
     targetPort: 8000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
   to:
     kind: Service
     name: qwen36-27b

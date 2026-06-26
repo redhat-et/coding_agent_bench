@@ -39,24 +39,24 @@ echo ""
 
 # Check 2: Concurrency
 echo "--- Check 2: ${CONCURRENCY}x concurrency ---"
-TMPDIR=$(mktemp -d)
+RESULTS_DIR=$(mktemp -d)
 for i in $(seq 1 "$CONCURRENCY"); do
-  curl -s -o /dev/null -w "%{http_code}" \
+  curl -s --max-time 120 -o /dev/null -w "%{http_code}" \
     "$SERVER_URL/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":10}" \
-    > "$TMPDIR/$i" &
+    > "$RESULTS_DIR/$i" &
 done
 wait
 
 OK=0
 for i in $(seq 1 "$CONCURRENCY"); do
-  CODE=$(cat "$TMPDIR/$i")
+  CODE=$(cat "$RESULTS_DIR/$i")
   if [ "$CODE" = "200" ]; then
     OK=$((OK+1))
   fi
 done
-rm -rf "$TMPDIR"
+rm -rf "$RESULTS_DIR"
 
 echo "$OK/$CONCURRENCY requests returned 200"
 if [ "$OK" -eq "$CONCURRENCY" ]; then
