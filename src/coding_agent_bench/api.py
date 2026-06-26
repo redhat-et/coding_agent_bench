@@ -23,7 +23,7 @@ _job_event = asyncio.Event()
 _active_job: tuple[str, asyncio.Task, OpenshiftJob] | None = None
 _shutting_down = False
 
-db_path = Path(os.environ.get("JOB_STORE_PATH", "data/jobs.db"))
+db_path = Path(os.environ.get("JOB_STORE_PATH", "jobs.db"))
 
 class JobStatus(str, Enum):
     QUEUED = "queued"
