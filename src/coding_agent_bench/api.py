@@ -216,11 +216,15 @@ async def _run_job(job_id: str, job_name: str, command: list[str]):
                         return
             await asyncio.sleep(5)
 
-    except asyncio.CancelledError:
-        if _shutting_down:
-            await oj._delete_job()
-            job_store.update_status(job_id, JobStatus.FAILED, error="Server shut down")
-            raise
+    except asyncio.CancelledError:  
+        if _shutting_down:  
+            error = "Server shut down"  
+            try:  
+                await oj._delete_job()  
+            except Exception as cleanup_error:  
+                error = f"Server shut down; cleanup failed: {cleanup_error}"  
+            job_store.update_status(job_id, JobStatus.FAILED, error=error)  
+            raise  
         await oj._signal_job_pod()
         await oj._delete_job()
         job_store.update_status(job_id, JobStatus.CANCELLED)
