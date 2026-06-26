@@ -150,13 +150,23 @@ class OpenshiftJob:
                 break
             await asyncio.sleep(2)
 
+    async def _delete_harbor_pods(self):
+        """Delete all pods spawned by harbor that are associated with this job."""
+        await self._run_oc_command(
+            ["delete", "pods", f"--selector=harbor-parent={self._pod_name}", "--ignore-not-found"],
+            check=False,
+        )
+
     async def _delete_job(self):
+        """Delete the job and assoicated pods."""
         await self._run_oc_command(
             ["delete", f"job/{self._pod_name}", "--cascade=foreground", "--ignore-not-found"],
             check=False,
         )
+        await self._delete_harbor_pods()
 
     async def _wait_for_job_pod_ready(self, timeout_sec: int = 300) -> None:
+        """Wait for the job pod to be ready."""
         for elapsed in range(timeout_sec):
             stdout, _ = await self._run_oc_command(
                 [
@@ -247,9 +257,9 @@ class OpenshiftJob:
     def run(self, command: list[str]):
         return asyncio.run(self.run_async(command))
 
-    def cleanup(self):
-        asyncio.run(self._cleanup_async())
-
     async def _cleanup_async(self):
         await self._signal_job_pod()
         await self._delete_job()
+
+    def cleanup(self):
+        asyncio.run(self._cleanup_async())
