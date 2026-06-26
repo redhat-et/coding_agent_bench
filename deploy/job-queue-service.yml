@@ -33,25 +33,25 @@ spec:
         app: job-queue
         component: api
     spec:
+      serviceAccountName: harbor-orchestrator
       containers:
       - image: ghcr.io/redhat-et/coding_agent_bench:latest
         name: job-queue
-        serviceAccountName: harbor-orchestrator
-        cmd: ["/bin/sh", "-c"]
-        args: 
+        command: ["/bin/sh", "-c"]
+        args:
           - |
             uv run uvicorn coding_agent_bench.api:app --port 8000
         resources:
           requests:
             cpu: "1"
             memory: "500M"
-          limits: 
+          limits:
             cpu: "1"
             memory: "1Gi"
         env:
         - name: JOB_STORE_PATH
-          value: /app/data
-        - name:  API_KEY
+          value: /app/data/jobs.db
+        - name: API_KEY
           valueFrom:
             secretKeyRef:
               name: job-queue-secret
@@ -59,15 +59,15 @@ spec:
         ports:
         - containerPort: 8000
           name: http
+        imagePullPolicy: Always
         volumeMounts:
-        - mountPath: /data
+        - mountPath: /app/data
           name: data
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: job-queue-pvc
       restartPolicy: Always
-      imagePullPolicy: Always
 --- 
 kind: Service
 apiVersion: v1

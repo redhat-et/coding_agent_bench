@@ -16,10 +16,12 @@ import json
 import os
 import sqlite3
 import uuid
+import html
 
 _job_queue: list[tuple[str, str, list[str]]] = []
 _job_event = asyncio.Event()
 _active_job: tuple[str, asyncio.Task, OpenshiftJob] | None = None
+_shutting_down = False
 
 db_path = Path(os.environ.get("JOB_STORE_PATH", "data/jobs.db"))
 
@@ -157,9 +159,11 @@ async def _verify_api_key(key: str = Depends(_api_key_header)) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    global _shutting_down
     job_store.mark_orphaned()
     worker_task = asyncio.create_task(_worker())
     yield
+    _shutting_down = True
     worker_task.cancel()
     try:
         await worker_task
@@ -186,6 +190,7 @@ async def _run_job(job_id: str, job_name: str, command: list[str]):
             ["apply", "-f", "-"],
             stdin_data=json.dumps(job_spec).encode(),
         )
+        await oj._wait_for_job_pod_ready()
         job_store.update_status(job_id, JobStatus.RUNNING)
 
         while True:
@@ -204,13 +209,18 @@ async def _run_job(job_id: str, job_name: str, command: list[str]):
                         reason = pods[0].get("status", {}).get("reason", "")
                         message = pods[0].get("status", {}).get("message", "")
                         job_store.update_status(
-                            job_id, JobStatus.FAILED,
+                            job_id,
+                            JobStatus.FAILED,
                             error=f"{phase}: reason={reason}, message={message}",
                         )
                         return
             await asyncio.sleep(5)
 
     except asyncio.CancelledError:
+        if _shutting_down:
+            await oj._delete_job()
+            job_store.update_status(job_id, JobStatus.FAILED, error="Server shut down")
+            raise
         await oj._signal_job_pod()
         await oj._delete_job()
         job_store.update_status(job_id, JobStatus.CANCELLED)
@@ -241,13 +251,19 @@ async def read_root():
 
 @app.get("/ui", response_class=HTMLResponse)
 async def ui():
+    """
+    User interface.
+    
+    Intentionally left accessible to unauthenticated users as it does not expose any secret information
+    or allow users to modify any job.
+    """
     columns = ["job_id", "job_name", "agent", "dataset", "model_name", "status", "error"]
 
     def build_table(title: str, jobs: list[dict]) -> str:
         header = "".join(f"<th>{col}</th>" for col in columns)
         rows = ""
         for job in jobs:
-            cells = "".join(f"<td>{job.get(col, '') or ''}</td>" for col in columns)
+            cells = "".join(f"<td>{html.escape(str(job.get(col, '')) or '')}</td>" for col in columns)
             rows += f"<tr>{cells}</tr>"
         if not jobs:
             rows = f'<tr><td colspan="{len(columns)}">No jobs</td></tr>'
