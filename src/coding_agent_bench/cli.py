@@ -152,6 +152,9 @@ def generate_manifest(
     dry_run: Annotated[
         bool, typer.Option(help="Show calculations only, no YAML")
     ] = False,
+    anyuid: Annotated[
+        bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
+    ] = True,
 ):
     try:
         generate(
@@ -170,6 +173,7 @@ def generate_manifest(
             served_model_name_override=served_model_name,
             output=output,
             dry_run=dry_run,
+            anyuid=anyuid,
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
@@ -230,6 +234,9 @@ def deploy(
     health_timeout: Annotated[
         int, typer.Option(help="Health check timeout in seconds")
     ] = 1800,
+    anyuid: Annotated[
+        bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
+    ] = True,
 ):
     try:
         deploy_model(
@@ -251,6 +258,7 @@ def deploy(
             skip_validation=skip_validation,
             concurrency=concurrency,
             health_timeout=health_timeout,
+            anyuid=anyuid,
         )
     except (ValueError, subprocess.CalledProcessError) as e:
         typer.echo(f"Error: {e}", err=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import math
+import shlex
 import subprocess
 import time
 import urllib.request
@@ -280,6 +281,7 @@ class ManifestConfig:
     vllm_image: str
     route_timeout: str
     vllm_serve_args: list[str] = field(default_factory=list)
+    anyuid: bool = True
     gpu_memory_utilization: float = 0.9
     cpu_request: str = "2"
     cpu_limit: str = "4"
@@ -304,8 +306,8 @@ _ManifestDumper.add_representer(_LiteralStr, _literal_str_representer)
 
 
 def _build_vllm_command(cfg: ManifestConfig) -> str:
-    parts = [f"vllm serve {cfg.model_id}"]
-    parts.append(f"--served-model-name {cfg.served_model_name}")
+    parts = [f"vllm serve {shlex.quote(cfg.model_id)}"]
+    parts.append(f"--served-model-name {shlex.quote(cfg.served_model_name)}")
     parts.append("--async-scheduling")
     parts.append("--dtype auto")
     parts.append(f"--max-model-len {cfg.max_model_len if cfg.max_model_len is not None else 'auto'}")
@@ -538,12 +540,15 @@ _ManifestDumper.add_representer(str, _str_representer)
 def generate_manifest_yaml(cfg: ManifestConfig) -> str:
     docs = [
         _build_service_account(cfg),
-        _build_role_binding(cfg),
+    ]
+    if cfg.anyuid:
+        docs.append(_build_role_binding(cfg))
+    docs.extend([
         _build_pvc(cfg),
         _build_deployment(cfg),
         _build_service(cfg),
         _build_route(cfg),
-    ]
+    ])
     output = yaml.dump_all(docs, Dumper=_ManifestDumper, default_flow_style=False, sort_keys=False)
     if not output.startswith("---"):
         output = "---\n" + output
@@ -573,6 +578,7 @@ def _generate_manifest(
     route_timeout: str = "600s",
     app_name_override: str | None = None,
     served_model_name_override: str | None = None,
+    anyuid: bool = True,
 ) -> str:
     print(f"Fetching metadata for {model_id}...")
     metadata = fetch_model_metadata(model_id)
@@ -628,6 +634,7 @@ def _generate_manifest(
         vllm_image=vllm_image,
         route_timeout=route_timeout,
         vllm_serve_args=vllm_args,
+        anyuid=anyuid,
     )
 
     return generate_manifest_yaml(cfg)
@@ -649,6 +656,7 @@ def generate(
     served_model_name_override: str | None = None,
     output: Path | None = None,
     dry_run: bool = False,
+    anyuid: bool = True,
 ) -> str | None:
     manifest_yaml = _generate_manifest(
         model_id=model_id,
@@ -664,6 +672,7 @@ def generate(
         route_timeout=route_timeout,
         app_name_override=app_name_override,
         served_model_name_override=served_model_name_override,
+        anyuid=anyuid,
     )
 
     if dry_run:
@@ -873,6 +882,7 @@ def deploy(
     skip_validation: bool = False,
     concurrency: int = 8,
     health_timeout: int = 1800,
+    anyuid: bool = True,
 ) -> None:
     app_name = derive_app_name(model_id, app_name_override)
     served_name = derive_served_model_name(model_id, served_model_name_override)
@@ -899,6 +909,7 @@ def deploy(
         route_timeout=route_timeout,
         app_name_override=app_name_override,
         served_model_name_override=served_model_name_override,
+        anyuid=anyuid,
     )
 
     print("Applying manifest...")
