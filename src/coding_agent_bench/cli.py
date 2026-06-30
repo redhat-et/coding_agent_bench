@@ -154,7 +154,7 @@ def generate_manifest(
     ] = False,
     anyuid: Annotated[
         bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
-    ] = True,
+    ] = False,
 ):
     try:
         generate(
@@ -236,7 +236,7 @@ def deploy(
     ] = 1800,
     anyuid: Annotated[
         bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
-    ] = True,
+    ] = False,
 ):
     try:
         deploy_model(

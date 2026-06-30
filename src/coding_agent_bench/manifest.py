@@ -281,7 +281,7 @@ class ManifestConfig:
     vllm_image: str
     route_timeout: str
     vllm_serve_args: list[str] = field(default_factory=list)
-    anyuid: bool = True
+    anyuid: bool = False
     gpu_memory_utilization: float = 0.9
     cpu_request: str = "2"
     cpu_limit: str = "4"
@@ -578,7 +578,7 @@ def _generate_manifest(
     route_timeout: str = "600s",
     app_name_override: str | None = None,
     served_model_name_override: str | None = None,
-    anyuid: bool = True,
+    anyuid: bool = False,
 ) -> str:
     print(f"Fetching metadata for {model_id}...")
     metadata = fetch_model_metadata(model_id)
@@ -656,7 +656,7 @@ def generate(
     served_model_name_override: str | None = None,
     output: Path | None = None,
     dry_run: bool = False,
-    anyuid: bool = True,
+    anyuid: bool = False,
 ) -> str | None:
     manifest_yaml = _generate_manifest(
         model_id=model_id,
@@ -882,7 +882,7 @@ def deploy(
     skip_validation: bool = False,
     concurrency: int = 8,
     health_timeout: int = 1800,
-    anyuid: bool = True,
+    anyuid: bool = False,
 ) -> None:
     app_name = derive_app_name(model_id, app_name_override)
     served_name = derive_served_model_name(model_id, served_model_name_override)
