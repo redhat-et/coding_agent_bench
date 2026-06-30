@@ -320,13 +320,37 @@ th {{ background: #f5f5f5; }}
 </html>"""
     return html_page
 
+def build_cli_command(req: CreateJobRequest):
+    """Build the coding-agent-bench CLI command."""
+    command = ["coding-agent-bench"]
+    
+    # Add required parameters
+    command += [
+        "--agent", req.agent,
+        "--dataset", req.dataset,
+        "--model-name", req.model_name,
+        "--server-url", req.server_url,
+        "--environment", "openshift",
+    ]
+    
+    # Add optional parameters
+    if req.dataset_pattern:
+        command += ["--dataset-pattern", req.dataset_pattern]
+    if req.n_concurrent:
+        command += ["--n-concurrent", str(req.n_concurrent)]
+    if req.n_tasks:
+        command += ["--n-tasks", str(req.n_tasks)]
+    if req.model_max_len:
+        command += ["--model-max-len", str(req.model_max_len)]
+
+    return command
 
 @router.post("/jobs", response_model=CreateJobResponse)
 async def create_job(req: CreateJobRequest):
     """Create a new benchmark job."""
-    # Build the Harbor command
+    # Verify the harbor command
     try:
-        command, _ = HarborCommandBuilder().build(
+        HarborCommandBuilder().build(
             agent=req.agent,
             dataset=req.dataset,
             model_name=req.model_name,
@@ -340,7 +364,11 @@ async def create_job(req: CreateJobRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    
+    # Build the CLI comand
+    command = build_cli_command(req=req)
 
+    # Start the job
     job_id = str(uuid.uuid4())
     job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, command)
     _job_queue.append((job_id, command))
