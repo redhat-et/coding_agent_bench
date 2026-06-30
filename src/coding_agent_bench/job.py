@@ -159,11 +159,19 @@ class OpenshiftJob:
 
     async def _delete_job(self):
         """Delete the job and assoicated pods."""
-        await self._run_oc_command(
-            ["delete", f"job/{self._pod_name}", "--cascade=foreground", "--ignore-not-found"],
-            timeout_sec=60,
-        )
-        await self._delete_harbor_pods()
+        delete_error = None
+        try:
+            await self._run_oc_command(
+                ["delete", f"job/{self._pod_name}", "--cascade=foreground", "--ignore-not-found"],
+                timeout_sec=60,
+            )
+        except Exception as exc:
+            delete_error = exc
+        finally:
+            await self._delete_harbor_pods()
+
+        if delete_error:
+            raise delete_error
 
     async def _wait_for_job_pod_ready(self, timeout_sec: int = 300) -> None:
         """Wait for the job pod to be ready."""
