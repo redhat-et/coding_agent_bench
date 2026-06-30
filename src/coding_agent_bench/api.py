@@ -299,7 +299,7 @@ async def ui():
     completed = job_store.list(JobStatus.COMPLETED) + job_store.list(JobStatus.CANCELLED)
     completed.reverse()
 
-    html = f"""<!DOCTYPE html>
+    html_page = f"""<!DOCTYPE html>
 <html>
 <head>
 <title>Job Queue</title>
@@ -318,7 +318,7 @@ th {{ background: #f5f5f5; }}
 {build_table("Completed", completed)}
 </body>
 </html>"""
-    return html
+    return html_page
 
 
 @router.post("/jobs", response_model=CreateJobResponse)
