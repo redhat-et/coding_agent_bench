@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import math
 import subprocess
 import time
 import urllib.request
@@ -73,8 +74,16 @@ def load_gpu_pools(pools_file: Path | None) -> dict[str, GpuPool]:
         return _default_gpu_pools()
     with open(pools_file) as f:
         data = yaml.safe_load(f)
+    if not isinstance(data, dict) or "pools" not in data:
+        raise ValueError(f"GPU pools file must contain a 'pools' mapping: {pools_file}")
+    if not data["pools"]:
+        raise ValueError(f"GPU pools file has an empty 'pools' section: {pools_file}")
     pools = {}
+    required_keys = {"label", "gpus", "gpu_model", "vram_per_gpu"}
     for name, cfg in data["pools"].items():
+        missing = required_keys - set(cfg.keys())
+        if missing:
+            raise ValueError(f"GPU pool '{name}' missing required keys: {', '.join(sorted(missing))}")
         pools[name] = GpuPool(
             name=name,
             label=cfg["label"],
@@ -254,7 +263,7 @@ def derive_served_model_name(model_id: str, override: str | None = None) -> str:
 
 def determine_pvc_size(weight_gb: float) -> str:
     needed = weight_gb * 1.5
-    size_gi = max(100, int(((needed + 49) // 50) * 50))
+    size_gi = max(100, math.ceil(needed / 50) * 50)
     return f"{size_gi}Gi"
 
 
@@ -471,7 +480,7 @@ def _build_service(cfg: ManifestConfig) -> dict:
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {
-            "labels": {"component": "vllm"},
+            "labels": {"app": cfg.app_name, "component": "vllm"},
             "name": cfg.app_name,
             "namespace": cfg.namespace,
         },

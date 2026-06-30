@@ -173,7 +173,7 @@ def generate_manifest(
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from e
 
 
 @app.command()
@@ -254,7 +254,7 @@ def deploy(
         )
     except (ValueError, subprocess.CalledProcessError) as e:
         typer.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":
