@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 import html
 
-_job_queue: list[tuple[str, str, list[str]]] = []
+_job_queue: list[tuple[str, list[str]]] = []
 _job_event = asyncio.Event()
 _active_job: tuple[str, asyncio.Task, OpenshiftJob] | None = None
 _shutting_down = False
@@ -190,11 +190,11 @@ async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | 
     return "; ".join(errors) if errors else None
 
 
-async def _run_job(job_id: str, job_name: str, command: list[str]):
+async def _run_job(job_id: str, command: list[str]):
     """Run and monitor an Openshift Job."""
     global _active_job
 
-    oj = OpenshiftJob(job_name=job_name)
+    oj = OpenshiftJob(job_name=job_id)
     task = asyncio.current_task()
     assert task is not None
     _active_job = (job_id, task, oj)
@@ -264,11 +264,11 @@ async def _worker():
         await _job_event.wait()
         _job_event.clear()
         while _job_queue:
-            job_id, job_name, command = _job_queue.pop(0)
+            job_id, command = _job_queue.pop(0)
             row = job_store.get(job_id)
             if not row or row["status"] != JobStatus.QUEUED.value:
                 continue
-            await _run_job(job_id, job_name, command)
+            await _run_job(job_id, command)
 
 @router.get("/")
 async def read_root():
@@ -343,7 +343,7 @@ async def create_job(req: CreateJobRequest):
 
     job_id = str(uuid.uuid4())
     job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, command)
-    _job_queue.append((job_id, req.job_name, command))
+    _job_queue.append((job_id, command))
     _job_event.set()
 
     # Return a success response
@@ -375,7 +375,7 @@ async def delete_job(job_id: str):
         raise HTTPException(status_code=400, detail=f"Job already {job_row['status']}")
 
     # Remove from queue if still waiting
-    for i, (qid, _, _) in enumerate(_job_queue):
+    for i, (qid, _) in enumerate(_job_queue):
         if qid == job_id:
             _job_queue.pop(i)
             job_store.update_status(job_id, JobStatus.CANCELLED)
