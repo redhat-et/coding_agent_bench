@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "harbor>=0.13.1",
+    "huggingface-hub>=0.20.0",
+    "pyyaml>=6.0",
     "tenacity>=8.0",
     "typer>=0.15.0",
 ]
