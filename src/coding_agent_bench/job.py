@@ -154,14 +154,14 @@ class OpenshiftJob:
         """Delete all pods spawned by harbor that are associated with this job."""
         await self._run_oc_command(
             ["delete", "pods", f"--selector=harbor-parent={self._pod_name}", "--ignore-not-found"],
-            check=False,
+            timeout_sec=60,
         )
 
     async def _delete_job(self):
         """Delete the job and assoicated pods."""
         await self._run_oc_command(
             ["delete", f"job/{self._pod_name}", "--cascade=foreground", "--ignore-not-found"],
-            check=False,
+            timeout_sec=60,
         )
         await self._delete_harbor_pods()
 

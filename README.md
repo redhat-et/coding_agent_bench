@@ -211,7 +211,7 @@ open $JOB_QUEUE_URL/docs
 Queue up a new benchmark task:
 
 ```sh
-curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "test", "agent": "pi", "dataset": "swe-bench/swe-bench-verified", "model_name": "qwen3.6-27b", "server_url": "<server-url>", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-Api-Key: <your-api-key>"
+curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "test", "agent": "pi", "dataset": "swe-bench/swe-bench-verified", "model_name": "qwen3.6-27b", "server_url": "<server-url>", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
 ```
 
 ```json
@@ -231,13 +231,13 @@ open $JOB_QUEUE_URL/ui
 Or list them from the API:
 
 ```sh
-curl $JOB_QUEUE_URL/jobs -H "X-Api-Key: <your-api-key>"
+curl $JOB_QUEUE_URL/jobs -H "X-API-Key: <your-api-key>"
 ```
 
 Cancel a running or queued job:
 
 ```sh
-curl -X DELETE $JOB_QUEUE_URL/jobs/<job_id> -H "X-Api-Key: <your-api-key>"
+curl -X DELETE $JOB_QUEUE_URL/jobs/<job_id> -H "X-API-Key: <your-api-key>"
 ```
 
 ## Harbor Command Examples
