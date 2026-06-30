@@ -1,6 +1,8 @@
 jobs
 models.json
 config.toml
+data
+jobs.db
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

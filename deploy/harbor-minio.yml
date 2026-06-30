@@ -11,6 +11,7 @@ spec:
   resources:
     requests:
       storage: 50Gi
+  storageClassName: gp3
   volumeMode: Filesystem
 ---
 apiVersion: v1
@@ -117,6 +118,9 @@ metadata:
     component: minio
   name: harbor-minio-api
 spec:
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
   port:
     targetPort: 9000
   to:
@@ -133,6 +137,9 @@ metadata:
     component: minio
   name: harbor-minio-console
 spec:
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
   port:
     targetPort: 9001
   to:
