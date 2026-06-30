@@ -50,7 +50,7 @@ spec:
             memory: "1Gi"
         env:
         - name: JOB_STORE_PATH
-          value: /app/data/jobs.db
+          value: /app/jobs.db
         - name: API_KEY
           valueFrom:
             secretKeyRef:
