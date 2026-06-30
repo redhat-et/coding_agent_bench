@@ -175,6 +175,21 @@ app = FastAPI(lifespan=lifespan)
 router = APIRouter(dependencies=[Depends(_verify_api_key)])
 
 
+async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | None:
+    """Run signal/delete cleanup, returning an error string on failure or None."""
+    errors: list[str] = []
+    if signal:
+        try:
+            await oj._signal_job_pod()
+        except Exception as e:
+            errors.append(f"signal failed: {e}")
+    try:
+        await oj._delete_job()
+    except Exception as e:
+        errors.append(f"delete failed: {e}")
+    return "; ".join(errors) if errors else None
+
+
 async def _run_job(job_id: str, job_name: str, command: list[str]):
     """Run and monitor an Openshift Job."""
     global _active_job
@@ -203,35 +218,41 @@ async def _run_job(job_id: str, job_name: str, command: list[str]):
                 if pods:
                     phase = pods[0].get("status", {}).get("phase", "")
                     if phase == "Succeeded":
-                        job_store.update_status(job_id, JobStatus.COMPLETED)
+                        cleanup_err = await _best_effort_cleanup(oj)
+                        job_store.update_status(
+                            job_id, JobStatus.COMPLETED,
+                            error=f"cleanup failed: {cleanup_err}" if cleanup_err else None,
+                        )
                         return
                     if phase in ("Failed", "Unknown", "Error"):
                         reason = pods[0].get("status", {}).get("reason", "")
                         message = pods[0].get("status", {}).get("message", "")
-                        job_store.update_status(
-                            job_id,
-                            JobStatus.FAILED,
-                            error=f"{phase}: reason={reason}, message={message}",
-                        )
+                        cleanup_err = await _best_effort_cleanup(oj)
+                        error = f"{phase}: reason={reason}, message={message}"
+                        if cleanup_err:
+                            error += f"; cleanup failed: {cleanup_err}"
+                        job_store.update_status(job_id, JobStatus.FAILED, error=error)
                         return
             await asyncio.sleep(5)
 
-    except asyncio.CancelledError:  
-        if _shutting_down:  
-            error = "Server shut down"  
-            try:  
-                await oj._delete_job()  
-            except Exception as cleanup_error:  
-                error = f"Server shut down; cleanup failed: {cleanup_error}"  
-            job_store.update_status(job_id, JobStatus.FAILED, error=error)  
-            raise  
-        await oj._signal_job_pod()
-        await oj._delete_job()
-        job_store.update_status(job_id, JobStatus.CANCELLED)
+    except asyncio.CancelledError:
+        if _shutting_down:
+            cleanup_err = await _best_effort_cleanup(oj)
+            error = "Server shut down"
+            if cleanup_err:
+                error += f"; cleanup failed: {cleanup_err}"
+            job_store.update_status(job_id, JobStatus.FAILED, error=error)
+            raise
+        cleanup_err = await _best_effort_cleanup(oj, signal=True)
+        error = f"cleanup failed: {cleanup_err}" if cleanup_err else None
+        job_store.update_status(job_id, JobStatus.CANCELLED, error=error)
 
     except Exception as e:
-        await oj._delete_job()
-        job_store.update_status(job_id, JobStatus.FAILED, error=str(e))
+        cleanup_err = await _best_effort_cleanup(oj)
+        error = str(e)
+        if cleanup_err:
+            error += f"; cleanup failed: {cleanup_err}"
+        job_store.update_status(job_id, JobStatus.FAILED, error=error)
 
     finally:
         _active_job = None
