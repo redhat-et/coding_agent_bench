@@ -158,6 +158,7 @@ sequenceDiagram
     Harbor Orchestrator Pod->>Openshift Job: Complete
     Queue Service-->>Openshift Job: Poll for completion
     Openshift Job->>Queue Service: Complete
+    Queue Service->>Openshift Job: Cleanup
     Queue Service->>Queue Service: Start Next Job
 ```
 
