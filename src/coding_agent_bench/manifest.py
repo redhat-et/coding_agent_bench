@@ -715,9 +715,13 @@ def wait_for_health(
     url: str,
     timeout_seconds: int = 1800,
     poll_interval: int = 30,
+    initial_delay: int = 1200,
 ) -> bool:
     health_url = f"{url}/health"
     start = time.time()
+    if initial_delay > 0:
+        print(f"  Waiting {initial_delay // 60}m before first health check (model downloading)...")
+        time.sleep(initial_delay)
     while time.time() - start < timeout_seconds:
         elapsed = int(time.time() - start)
         last_error = ""
@@ -882,6 +886,7 @@ def deploy(
     skip_validation: bool = False,
     concurrency: int = 8,
     health_timeout: int = 1800,
+    initial_delay: int = 1200,
     anyuid: bool = False,
 ) -> None:
     app_name = derive_app_name(model_id, app_name_override)
@@ -924,7 +929,7 @@ def deploy(
         return
 
     print(f"\nWaiting for health check (timeout: {health_timeout // 60}m)...")
-    healthy = wait_for_health(url, timeout_seconds=health_timeout)
+    healthy = wait_for_health(url, timeout_seconds=health_timeout, initial_delay=initial_delay)
     if not healthy:
         raise ValueError(
             f"Health check timed out after {health_timeout // 60}m. "

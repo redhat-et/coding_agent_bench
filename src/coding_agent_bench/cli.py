@@ -234,6 +234,9 @@ def deploy(
     health_timeout: Annotated[
         int, typer.Option(help="Health check timeout in seconds")
     ] = 1800,
+    initial_delay: Annotated[
+        int, typer.Option(help="Seconds to wait before first health check (model download time)")
+    ] = 1200,
     anyuid: Annotated[
         bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
     ] = False,
@@ -258,6 +261,7 @@ def deploy(
             skip_validation=skip_validation,
             concurrency=concurrency,
             health_timeout=health_timeout,
+            initial_delay=initial_delay,
             anyuid=anyuid,
         )
     except (ValueError, subprocess.CalledProcessError) as e:
