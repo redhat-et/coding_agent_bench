@@ -3,6 +3,7 @@ import signal
 import subprocess
 import sys
 from typing import Annotated, Optional
+import shlex
 
 import typer
 
@@ -42,6 +43,9 @@ def run(
             help="Run in the logged in Openshift namespace. Only availble with `--environment=openshift`"
         ),
     ] = False,
+    before_script: Annotated[
+        Optional[str], typer.Option(help="Script to run before the job starts. Only available with `--remote`.")
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
@@ -58,6 +62,11 @@ def run(
         job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
         command = ["coding-agent-bench", *remote_args]
+        if before_script is not None:
+            try:
+                command = shlex.split(before_script) + ["&&"] + command
+            except Exception as e:
+                typer.echo(f"Error: Failed to parse before_script: {e}")
         try:
             job.run(command)
         except KeyboardInterrupt:

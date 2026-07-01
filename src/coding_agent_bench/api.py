@@ -44,6 +44,7 @@ class CreateJobRequest(BaseModel):
     n_concurrent: int = Field(1, description="Number of concurrent tasks")
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
     model_max_len: int = Field(262000, description="Maximum model context length in tokens")
+    before_script: Optional[str] = Field(None, description="Script to run before harbor job execution")
 
 
 class CreateJobResponse(BaseModel):
@@ -343,6 +344,8 @@ def build_cli_command(req: CreateJobRequest):
         command += ["--n-tasks", str(req.n_tasks)]
     if req.model_max_len:
         command += ["--model-max-len", str(req.model_max_len)]
+    if req.before_script:
+        command += ["--before-script", req.before_script]
 
     return command
 
