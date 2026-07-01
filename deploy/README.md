@@ -71,7 +71,7 @@ coding-agent-bench deploy RedHatAI/Qwen3.6-27B-FP8 --teardown
 
 ### Model-Specific vLLM Args
 
-Each model requires different vLLM flags for reasoning and tool calling. The `--enable-auto-tool-choice` flag is always included automatically. These flags come from the [vLLM team's model configuration doc](https://docs.google.com/document/d/1uvzhjBjaFyEtI5Tn197dUnITzBksTXXrKZk2Y_9fed0).
+Each model requires different vLLM flags for reasoning and tool calling. The `--enable-auto-tool-choice` flag is always included automatically.
 
 **Qwen3.6-27B-FP8** ([HuggingFace](https://huggingface.co/RedHatAI/Qwen3.6-27B-FP8))
 
