@@ -30,7 +30,7 @@ class OpenshiftJob:
         self._job_name = job_name
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
 
-    def _job_spec(self, command: list[str]) -> dict:
+    def _job_spec(self, command: list[str], before_script: list[str] = None) -> dict:
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -48,9 +48,10 @@ class OpenshiftJob:
                                 "imagePullPolicy": "Always",
                                 "command": ["sh", "-c"],
                                 "args": [
-                                    "uv run --no-sync --no-cache "
-                                    + shlex.join(command)
-                                    + " && mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
+                                    ("" if before_script is None else (shlex.join(before_script) + " && "))
+                                    + "uv run --no-sync --no-cache "
+                                    + shlex.join(command) + ";"
+                                    + " mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
                                     + " && mc mb --ignore-existing minio/results"
                                     + " && mc cp --recursive /app/jobs/ minio/results/"
                                 ],
@@ -243,8 +244,8 @@ class OpenshiftJob:
             f"Job pod for {self._pod_name} not ready after {timeout_sec} seconds"
         )
 
-    async def run_async(self, command: list[str]):
-        job_spec = self._job_spec(command)
+    async def run_async(self, command: list[str], before_script: list[str] = None):
+        job_spec = self._job_spec(command, before_script)
         job_json = json.dumps(job_spec)
 
         try:
@@ -262,8 +263,8 @@ class OpenshiftJob:
             await self._delete_job()
             raise
 
-    def run(self, command: list[str]):
-        return asyncio.run(self.run_async(command))
+    def run(self, command: list[str], before_script: list[str] = None):
+        return asyncio.run(self.run_async(command, before_script))
 
     async def _cleanup_async(self):
         await self._signal_job_pod()

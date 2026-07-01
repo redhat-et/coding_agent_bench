@@ -62,13 +62,18 @@ def run(
         job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
         command = ["coding-agent-bench", *remote_args]
+        
+        # Parse before script if provided
+        _before_script = None
         if before_script is not None:
             try:
-                command = shlex.split(before_script) + ["&&"] + command
+                _before_script = shlex.split(before_script)
             except Exception as e:
                 typer.echo(f"Error: Failed to parse before_script: {e}")
+        
+        # Create the job
         try:
-            job.run(command)
+            job.run(command, _before_script)
         except KeyboardInterrupt:
             typer.echo("\nInterrupted — cleaning up remote job...")
             job.cleanup()
