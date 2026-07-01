@@ -138,6 +138,23 @@ class ModelMetadata:
                 hd = hidden // n_heads
         return hd
 
+    @property
+    def sliding_window(self) -> int | None:
+        return self._text_config().get("sliding_window")
+
+    @property
+    def layer_types(self) -> list[str] | None:
+        """Per-layer attention type list (e.g. Gemma's mix of sliding/full)."""
+        return self._text_config().get("layer_types")
+
+    @property
+    def global_head_dim(self) -> int | None:
+        return self._text_config().get("global_head_dim")
+
+    @property
+    def num_global_key_value_heads(self) -> int | None:
+        return self._text_config().get("num_global_key_value_heads")
+
 
 def fetch_model_metadata(model_id: str) -> ModelMetadata:
     """Fetch model config and safetensors metadata from HuggingFace."""
@@ -167,35 +184,73 @@ def fetch_model_metadata(model_id: str) -> ModelMetadata:
 
 @dataclass
 class VramEstimate:
-    """VRAM estimation: weight size, overhead, and KV cache per token."""
+    """VRAM estimation: weight size, overhead, KV cache, and total."""
 
     weight_gb: float
     overhead_gb: float
+    kv_cache_gb: float
     min_vram_gb: float
-    kv_cache_per_token_bytes: int | None
 
 
-def estimate_vram(metadata: ModelMetadata) -> VramEstimate:
-    """Estimate VRAM needed: weight size + 15% overhead, plus KV cache info."""
-    weight_gb = metadata.weight_size_gb
-    # Overhead for CUDA context, activations, and framework buffers
-    overhead_gb = weight_gb * 0.15
-    min_vram_gb = weight_gb + overhead_gb
+def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int) -> float | None:
+    """Estimate KV cache bytes for one full-context request.
 
-    kv_bytes_per_token = None
+    Accounts for sliding window attention: layers with a sliding window
+    only store KV entries for the window size, not the full context.
+    Models with heterogeneous layer types (e.g. Gemma's mix of
+    sliding_attention + full_attention with different head dims) are
+    handled per-layer-group.
+    """
     n_layers = metadata.num_hidden_layers
     n_kv_heads = metadata.num_key_value_heads
     head_dim = metadata.head_dim
+    if any(v is None for v in [n_layers, n_kv_heads, head_dim]):
+        return None
 
-    if all(v is not None for v in [n_layers, n_kv_heads, head_dim]):
-        # 2 (key+value) * n_kv_heads * head_dim * n_layers * 2 bytes (FP16)
-        kv_bytes_per_token = 2 * n_kv_heads * head_dim * n_layers * 2
+    layer_types = metadata.layer_types
+    sliding_window = metadata.sliding_window
+
+    if layer_types and sliding_window is not None:
+        global_head_dim = metadata.global_head_dim or head_dim
+        global_kv_heads = metadata.num_global_key_value_heads or n_kv_heads
+
+        total_bytes = 0
+        for lt in layer_types:
+            if lt == "full_attention":
+                total_bytes += 2 * global_kv_heads * global_head_dim * 2 * max_model_len
+            else:
+                tokens = min(sliding_window, max_model_len)
+                total_bytes += 2 * n_kv_heads * head_dim * 2 * tokens
+        return float(total_bytes)
+
+    if sliding_window is not None:
+        tokens = min(sliding_window, max_model_len)
+    else:
+        tokens = max_model_len
+
+    return float(2 * n_kv_heads * head_dim * n_layers * 2 * tokens)
+
+
+def estimate_vram(metadata: ModelMetadata, max_model_len: int) -> VramEstimate:
+    """Estimate VRAM for pool selection: weights + 15% overhead + KV cache.
+
+    KV cache is estimated per-layer, accounting for sliding window
+    attention where applicable.  The 15% overhead covers CUDA context,
+    activations, and CUDA graphs.
+    """
+    weight_gb = metadata.weight_size_gb
+    overhead_gb = weight_gb * 0.15
+
+    kv_bytes = _estimate_kv_cache_bytes(metadata, max_model_len)
+    kv_cache_gb = (kv_bytes / (1024**3)) if kv_bytes is not None else 0.0
+
+    min_vram_gb = weight_gb + overhead_gb + kv_cache_gb
 
     return VramEstimate(
         weight_gb=weight_gb,
         overhead_gb=overhead_gb,
+        kv_cache_gb=kv_cache_gb,
         min_vram_gb=min_vram_gb,
-        kv_cache_per_token_bytes=kv_bytes_per_token,
     )
 
 
@@ -225,6 +280,12 @@ def select_gpu_pool(
             return pool
 
     largest = sorted_pools[-1]
+    if largest.total_vram >= vram_needed * 0.85:
+        print(
+            f"Warning: model needs ~{vram_needed:.1f} GB but {largest.name} pool "
+            f"has {largest.total_vram} GB — tight fit, vLLM may reduce context length."
+        )
+        return largest
     raise ValueError(
         f"Model needs ~{vram_needed:.1f} GB VRAM but the largest available pool "
         f"({largest.name}) provides {largest.total_vram} GB. "
@@ -607,7 +668,8 @@ def _generate_manifest(
     metadata = fetch_model_metadata(model_id)
 
     pools = load_gpu_pools(gpu_pools_file)
-    vram = estimate_vram(metadata)
+    max_model_len = determine_max_model_len(metadata, max_model_len_override)
+    vram = estimate_vram(metadata, max_model_len)
 
     param_breakdown = ", ".join(
         f"{dtype}: {format_params(count)}"
@@ -617,14 +679,12 @@ def _generate_manifest(
     print(f"  Model:            {metadata.model_id}")
     print(f"  Parameters:       {format_params(metadata.total_params)} ({param_breakdown})")
     print(f"  Weight size:      {vram.weight_gb:.1f} GB")
-    print(f"  Min VRAM needed:  {vram.min_vram_gb:.1f} GB (weights + overhead)")
-    if vram.kv_cache_per_token_bytes:
-        kv_kb = vram.kv_cache_per_token_bytes / 1024
-        print(f"  KV cache:         {kv_kb:.1f} KB/token (vLLM allocates at runtime)")
+    if vram.kv_cache_gb > 0:
+        print(f"  KV cache:         {vram.kv_cache_gb:.1f} GB (1 request × {max_model_len} tokens)")
+    print(f"  Min VRAM needed:  {vram.min_vram_gb:.1f} GB (weights + overhead + KV cache)")
 
     pool = select_gpu_pool(vram.min_vram_gb, pools, gpu_pool_override)
     tensor_parallel = pool.gpus
-    max_model_len = determine_max_model_len(metadata, max_model_len_override)
     pvc_size = determine_pvc_size(metadata.weight_size_gb)
     app_name = derive_app_name(model_id, app_name_override)
     served_name = derive_served_model_name(model_id, served_model_name_override)

@@ -128,7 +128,7 @@ Available pools (configurable via `--gpu-pools-file`):
 | large | 4x L4 | 92 GB | `gpu-pool-size: large` |
 | xlarge | 4x L40S | 192 GB | `gpu-pool-size: xlarge` |
 
-The tool selects the smallest pool that fits the model's weight size + 15% overhead. To use custom hardware, create a YAML file:
+The tool selects the smallest pool that fits the model's estimated VRAM (weights + 15% overhead + KV cache for one full-context request). KV cache estimation accounts for sliding window attention where applicable. To use custom hardware, create a YAML file:
 
 ```yaml
 pools:
