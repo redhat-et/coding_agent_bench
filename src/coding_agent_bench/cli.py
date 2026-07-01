@@ -155,7 +155,11 @@ def generate_manifest(
     anyuid: Annotated[
         bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
     ] = False,
+    before_script: Annotated[
+        Optional[str], typer.Option(help="Shell command to run before vLLM starts (e.g., download a custom parser)")
+    ] = None,
 ):
+    """Generate a vLLM OpenShift deployment manifest from a HuggingFace model ID."""
     try:
         generate(
             model_id=model_id,
@@ -174,6 +178,7 @@ def generate_manifest(
             output=output,
             dry_run=dry_run,
             anyuid=anyuid,
+            before_script=before_script,
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
@@ -240,7 +245,11 @@ def deploy(
     anyuid: Annotated[
         bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
     ] = False,
+    before_script: Annotated[
+        Optional[str], typer.Option(help="Shell command to run before vLLM starts (e.g., download a custom parser)")
+    ] = None,
 ):
+    """Deploy, validate, and manage a vLLM model server on OpenShift."""
     try:
         deploy_model(
             model_id=model_id,
@@ -263,6 +272,7 @@ def deploy(
             health_timeout=health_timeout,
             initial_delay=initial_delay,
             anyuid=anyuid,
+            before_script=before_script,
         )
     except (ValueError, subprocess.CalledProcessError) as e:
         typer.echo(f"Error: {e}", err=True)

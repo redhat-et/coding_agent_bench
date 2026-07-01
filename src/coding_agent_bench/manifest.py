@@ -33,6 +33,8 @@ BYTES_PER_DTYPE = {
 
 @dataclass
 class GpuPool:
+    """A cluster GPU pool with its hardware specs and nodeSelector label."""
+
     name: str
     label: str
     gpus: int
@@ -71,6 +73,7 @@ def _default_gpu_pools() -> dict[str, GpuPool]:
 
 
 def load_gpu_pools(pools_file: Path | None) -> dict[str, GpuPool]:
+    """Load GPU pool definitions from a YAML file, or return built-in defaults."""
     if pools_file is None:
         return _default_gpu_pools()
     with open(pools_file) as f:
@@ -97,6 +100,8 @@ def load_gpu_pools(pools_file: Path | None) -> dict[str, GpuPool]:
 
 @dataclass
 class ModelMetadata:
+    """HuggingFace model metadata: parameter counts, config, and weight size."""
+
     model_id: str
     parameter_count: dict[str, int]
     config: dict
@@ -135,6 +140,7 @@ class ModelMetadata:
 
 
 def fetch_model_metadata(model_id: str) -> ModelMetadata:
+    """Fetch model config and safetensors metadata from HuggingFace."""
     api = HfApi()
 
     config_path = hf_hub_download(model_id, "config.json")
@@ -161,6 +167,8 @@ def fetch_model_metadata(model_id: str) -> ModelMetadata:
 
 @dataclass
 class VramEstimate:
+    """VRAM estimation: weight size, overhead, and KV cache per token."""
+
     weight_gb: float
     overhead_gb: float
     min_vram_gb: float
@@ -168,6 +176,7 @@ class VramEstimate:
 
 
 def estimate_vram(metadata: ModelMetadata) -> VramEstimate:
+    """Estimate VRAM needed: weight size + 15% overhead, plus KV cache info."""
     weight_gb = metadata.weight_size_gb
     # Overhead for CUDA context, activations, and framework buffers
     overhead_gb = weight_gb * 0.15
@@ -195,6 +204,7 @@ def select_gpu_pool(
     pools: dict[str, GpuPool],
     override: str | None = None,
 ) -> GpuPool:
+    """Select the smallest GPU pool that fits the model, or use an override."""
     if override:
         if override not in pools:
             available = ", ".join(pools.keys())
@@ -226,6 +236,7 @@ def determine_max_model_len(
     metadata: ModelMetadata,
     override: int | None = None,
 ) -> int | None:
+    """Return the max context length from model config, or an override."""
     if override is not None:
         return override
     return metadata.max_position_embeddings
@@ -251,18 +262,21 @@ def _normalize_model_name(model_id: str, *, keep_dots: bool = False) -> str:
 
 
 def derive_app_name(model_id: str, override: str | None = None) -> str:
+    """Derive a K8s-safe resource name from a HuggingFace model ID."""
     if override:
         return override
     return _normalize_model_name(model_id, keep_dots=False)[:63]
 
 
 def derive_served_model_name(model_id: str, override: str | None = None) -> str:
+    """Derive the vLLM --served-model-name from a HuggingFace model ID."""
     if override:
         return override
     return _normalize_model_name(model_id, keep_dots=True)
 
 
 def determine_pvc_size(weight_gb: float) -> str:
+    """Calculate PVC size in Gi, rounded up to next 50 Gi (min 100 Gi)."""
     needed = weight_gb * 1.5
     size_gi = max(100, math.ceil(needed / 50) * 50)
     return f"{size_gi}Gi"
@@ -270,6 +284,8 @@ def determine_pvc_size(weight_gb: float) -> str:
 
 @dataclass
 class ManifestConfig:
+    """All parameters needed to generate a vLLM deployment manifest."""
+
     model_id: str
     app_name: str
     served_model_name: str
@@ -282,6 +298,7 @@ class ManifestConfig:
     route_timeout: str
     vllm_serve_args: list[str] = field(default_factory=list)
     anyuid: bool = False
+    before_script: str | None = None
     gpu_memory_utilization: float = 0.9
     cpu_request: str = "2"
     cpu_limit: str = "4"
@@ -319,7 +336,10 @@ def _build_vllm_command(cfg: ManifestConfig) -> str:
     parts.append("--enable-auto-tool-choice")
     for arg in cfg.vllm_serve_args:
         parts.append(arg)
-    return " \\\n  ".join(parts) + "\n"
+    vllm_cmd = " \\\n  ".join(parts)
+    if cfg.before_script:
+        return f"{cfg.before_script} && \\\n{vllm_cmd}\n"
+    return vllm_cmd + "\n"
 
 
 def _build_service_account(cfg: ManifestConfig) -> dict:
@@ -538,6 +558,7 @@ _ManifestDumper.add_representer(str, _str_representer)
 
 
 def generate_manifest_yaml(cfg: ManifestConfig) -> str:
+    """Assemble all K8s resources into a multi-document YAML string."""
     docs = [
         _build_service_account(cfg),
     ]
@@ -579,7 +600,9 @@ def _generate_manifest(
     app_name_override: str | None = None,
     served_model_name_override: str | None = None,
     anyuid: bool = False,
+    before_script: str | None = None,
 ) -> str:
+    """Fetch model metadata, estimate resources, and build the YAML manifest."""
     print(f"Fetching metadata for {model_id}...")
     metadata = fetch_model_metadata(model_id)
 
@@ -635,6 +658,7 @@ def _generate_manifest(
         route_timeout=route_timeout,
         vllm_serve_args=vllm_args,
         anyuid=anyuid,
+        before_script=before_script,
     )
 
     return generate_manifest_yaml(cfg)
@@ -657,7 +681,9 @@ def generate(
     output: Path | None = None,
     dry_run: bool = False,
     anyuid: bool = False,
+    before_script: str | None = None,
 ) -> str | None:
+    """Generate a manifest and print/write it. CLI entry point for generate-manifest."""
     manifest_yaml = _generate_manifest(
         model_id=model_id,
         reasoning_parser=reasoning_parser,
@@ -673,6 +699,7 @@ def generate(
         app_name_override=app_name_override,
         served_model_name_override=served_model_name_override,
         anyuid=anyuid,
+        before_script=before_script,
     )
 
     if dry_run:
@@ -696,6 +723,7 @@ def _run_oc(args: list[str], namespace: str | None = None) -> subprocess.Complet
 
 
 def get_route_url(app_name: str, namespace: str) -> str:
+    """Get the HTTPS route URL for a deployed app from OpenShift."""
     result = _run_oc(
         ["get", "route", app_name, "-o", "jsonpath={.spec.host}"],
         namespace=namespace,
@@ -707,6 +735,7 @@ def get_route_url(app_name: str, namespace: str) -> str:
 
 
 def apply_manifest(manifest_yaml: str, namespace: str) -> None:
+    """Apply a YAML manifest to OpenShift via oc apply -f stdin."""
     cmd = ["oc", "apply", "-f", "-", "-n", namespace]
     subprocess.run(cmd, input=manifest_yaml, text=True, check=True)
 
@@ -717,6 +746,7 @@ def wait_for_health(
     poll_interval: int = 30,
     initial_delay: int = 1200,
 ) -> bool:
+    """Poll /health until 200 or timeout, with an initial delay for model loading."""
     health_url = f"{url}/health"
     start = time.time()
     if initial_delay > 0:
@@ -739,6 +769,7 @@ def wait_for_health(
 
 
 def validate_deployment(url: str, model_name: str, concurrency: int = 8) -> bool:
+    """Run validation checks: model responding, concurrency, and tool calling."""
     passed = 0
     failed = 0
 
@@ -850,6 +881,7 @@ def validate_deployment(url: str, model_name: str, concurrency: int = 8) -> bool
 
 
 def scale_down(app_name: str, namespace: str) -> None:
+    """Scale deployment to 0 replicas, freeing GPUs but keeping cached weights."""
     _run_oc(
         ["scale", f"deployment/{app_name}", "--replicas=0"],
         namespace=namespace,
@@ -858,6 +890,7 @@ def scale_down(app_name: str, namespace: str) -> None:
 
 
 def teardown(app_name: str, namespace: str) -> None:
+    """Delete all K8s resources for a model (SA, RoleBinding, PVC, Deployment, Service, Route)."""
     _run_oc(
         ["delete", "route,svc,deployment,pvc,rolebinding,sa",
          "-l", f"app={app_name}",
@@ -888,7 +921,9 @@ def deploy(
     health_timeout: int = 1800,
     initial_delay: int = 1200,
     anyuid: bool = False,
+    before_script: str | None = None,
 ) -> None:
+    """Deploy a model: generate manifest, apply, wait for health, and validate."""
     app_name = derive_app_name(model_id, app_name_override)
     served_name = derive_served_model_name(model_id, served_model_name_override)
 
@@ -915,6 +950,7 @@ def deploy(
         app_name_override=app_name_override,
         served_model_name_override=served_model_name_override,
         anyuid=anyuid,
+        before_script=before_script,
     )
 
     print("Applying manifest...")

@@ -112,8 +112,11 @@ coding-agent-bench deploy RedHatAI/gpt-oss-120b --anyuid \
 ```bash
 coding-agent-bench deploy RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 --anyuid \
   --reasoning-parser nemotron_v3 \
-  --tool-call-parser qwen3_coder
+  --tool-call-parser qwen3_coder \
+  --before-script "wget https://raw.githubusercontent.com/RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/refs/heads/main/nemotron_nas_parser.py"
 ```
+
+Nemotron requires downloading a custom parser before vLLM starts. The `--before-script` flag prepends a shell command to the container's entrypoint.
 
 ### GPU Pools
 
