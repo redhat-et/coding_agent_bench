@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import math
+import re
 import shlex
 import subprocess
 import time
@@ -195,11 +196,12 @@ class VramEstimate:
 def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int | None) -> float | None:
     """Estimate KV cache bytes for one full-context request.
 
-    Accounts for sliding window attention: layers with a sliding window
-    only store KV entries for the window size, not the full context.
-    Models with heterogeneous layer types (e.g. Gemma's mix of
-    sliding_attention + full_attention with different head dims) are
-    handled per-layer-group.
+    Assumes FP8 KV cache (1 byte per element), which is the default
+    dtype used in generated manifests.  Accounts for sliding window
+    attention: layers with a sliding window only store KV entries for
+    the window size, not the full context.  Models with heterogeneous
+    layer types (e.g. Gemma's mix of sliding_attention + full_attention
+    with different head dims) are handled per-layer-group.
     """
     n_layers = metadata.num_hidden_layers
     n_kv_heads = metadata.num_key_value_heads
@@ -212,6 +214,8 @@ def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int | None)
     if sliding_window is not None and sliding_window <= 0:
         sliding_window = None
 
+    kv_dtype_bytes = 1  # FP8
+
     if layer_types and sliding_window is not None:
         global_head_dim = metadata.global_head_dim or head_dim
         global_kv_heads = metadata.num_global_key_value_heads or n_kv_heads
@@ -219,10 +223,10 @@ def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int | None)
         total_bytes = 0
         for lt in layer_types:
             if lt == "full_attention":
-                total_bytes += 2 * global_kv_heads * global_head_dim * 2 * max_model_len
+                total_bytes += 2 * global_kv_heads * global_head_dim * kv_dtype_bytes * max_model_len
             else:
                 tokens = min(sliding_window, max_model_len)
-                total_bytes += 2 * n_kv_heads * head_dim * 2 * tokens
+                total_bytes += 2 * n_kv_heads * head_dim * kv_dtype_bytes * tokens
         return float(total_bytes)
 
     if sliding_window is not None:
@@ -230,7 +234,7 @@ def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int | None)
     else:
         tokens = max_model_len
 
-    return float(2 * n_kv_heads * head_dim * n_layers * 2 * tokens)
+    return float(2 * n_kv_heads * head_dim * n_layers * kv_dtype_bytes * tokens)
 
 
 def estimate_vram(metadata: ModelMetadata, max_model_len: int | None) -> VramEstimate:
@@ -403,6 +407,7 @@ def _build_vllm_command(cfg: ManifestConfig) -> str:
     parts.append(f"--gpu-memory-utilization {cfg.gpu_memory_utilization}")
     parts.append("--enable-chunked-prefill")
     parts.append("--enable-prefix-caching")
+    parts.append("--kv-cache-dtype fp8")
     parts.append("--enable-auto-tool-choice")
     for arg in cfg.vllm_serve_args:
         parts.append(arg)
@@ -837,6 +842,23 @@ def wait_for_health(
     return False
 
 
+def get_vllm_concurrency(app_name: str, namespace: str) -> tuple[int, float] | None:
+    """Extract max concurrency from vLLM pod logs after startup."""
+    try:
+        result = _run_oc(["logs", f"deployment/{app_name}"], namespace)
+    except subprocess.CalledProcessError:
+        return None
+    match = re.search(
+        r"Maximum concurrency for ([\d,]+) tokens per request: ([\d.]+)x",
+        result.stdout,
+    )
+    if not match:
+        return None
+    max_len = int(match.group(1).replace(",", ""))
+    concurrency = float(match.group(2))
+    return max_len, concurrency
+
+
 def validate_deployment(url: str, model_name: str, concurrency: int = 8) -> bool:
     """Run validation checks: model responding, concurrency, and tool calling."""
     passed = 0
@@ -1041,6 +1063,11 @@ def deploy(
             f"The model may still be downloading weights. Check pod logs with: "
             f"oc logs -f deployment/{app_name} -n {namespace}"
         )
+
+    concurrency_info = get_vllm_concurrency(app_name, namespace)
+    if concurrency_info:
+        max_len, max_concurrency = concurrency_info
+        print(f"  vLLM max concurrency: {max_concurrency}x at {max_len:,} tokens")
 
     print(f"\n=== Validating {served_name} ===")
     success = validate_deployment(url, served_name, concurrency=concurrency)
