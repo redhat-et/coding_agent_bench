@@ -192,7 +192,7 @@ class VramEstimate:
     min_vram_gb: float
 
 
-def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int) -> float | None:
+def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int | None) -> float | None:
     """Estimate KV cache bytes for one full-context request.
 
     Accounts for sliding window attention: layers with a sliding window
@@ -204,11 +204,13 @@ def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int) -> flo
     n_layers = metadata.num_hidden_layers
     n_kv_heads = metadata.num_key_value_heads
     head_dim = metadata.head_dim
-    if any(v is None for v in [n_layers, n_kv_heads, head_dim]):
+    if any(v is None for v in [n_layers, n_kv_heads, head_dim, max_model_len]):
         return None
 
     layer_types = metadata.layer_types
     sliding_window = metadata.sliding_window
+    if sliding_window is not None and sliding_window <= 0:
+        sliding_window = None
 
     if layer_types and sliding_window is not None:
         global_head_dim = metadata.global_head_dim or head_dim
@@ -231,7 +233,7 @@ def _estimate_kv_cache_bytes(metadata: ModelMetadata, max_model_len: int) -> flo
     return float(2 * n_kv_heads * head_dim * n_layers * 2 * tokens)
 
 
-def estimate_vram(metadata: ModelMetadata, max_model_len: int) -> VramEstimate:
+def estimate_vram(metadata: ModelMetadata, max_model_len: int | None) -> VramEstimate:
     """Estimate VRAM for pool selection: weights + 15% overhead + KV cache.
 
     KV cache is estimated per-layer, accounting for sliding window
