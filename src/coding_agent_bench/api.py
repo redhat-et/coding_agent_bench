@@ -326,6 +326,7 @@ def build_cli_command(req: CreateJobRequest):
     
     # Add required parameters
     command += [
+        "--job-name", req.job_name,
         "--agent", req.agent,
         "--dataset", req.dataset,
         "--model-name", req.model_name,
