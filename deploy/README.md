@@ -21,6 +21,7 @@ Fetches model metadata from HuggingFace (parameter count, dtype, context length)
 
 ```bash
 coding-agent-bench generate-manifest RedHatAI/Qwen3.6-27B-FP8 \
+  --anyuid \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --chat-template-kwargs '{"enable_thinking": true}' \
@@ -28,7 +29,7 @@ coding-agent-bench generate-manifest RedHatAI/Qwen3.6-27B-FP8 \
   -o deploy/Qwen3.6_27b_FP8.yml
 ```
 
-The tool auto-detects GPU requirements. Use `--dry-run` to see calculations without generating YAML. Use `--gpu-pool` to override the auto-selected pool, or `--gpu-pools-file` to point to a custom YAML defining available hardware.
+The tool auto-detects GPU requirements. Use `--dry-run` to see calculations without generating YAML. Use `--gpu-pool` to override the auto-selected pool, or `--gpu-pools-file` to point to a custom YAML defining available hardware. Pass `--anyuid` to include the anyuid SCC RoleBinding required by vLLM >v0.22 on OpenShift.
 
 Any model on HuggingFace works — vLLM-specific args (reasoning parser, tool-call parser, chat template kwargs) come from the [vLLM docs](https://docs.vllm.ai/) and must be passed as flags since they aren't derivable from HuggingFace metadata.
 
@@ -39,6 +40,7 @@ Combines manifest generation, `oc apply`, health check polling, and validation i
 ```bash
 # Deploy and validate (generates manifest, applies it, waits for health, runs checks)
 coding-agent-bench deploy RedHatAI/Qwen3.6-27B-FP8 \
+  --anyuid \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --chat-template-kwargs '{"enable_thinking": true}' \
@@ -46,6 +48,7 @@ coding-agent-bench deploy RedHatAI/Qwen3.6-27B-FP8 \
 
 # Skip validation after deploy
 coding-agent-bench deploy RedHatAI/Qwen3.6-27B-FP8 \
+  --anyuid \
   --reasoning-parser qwen3 \
   --skip-validation
 
