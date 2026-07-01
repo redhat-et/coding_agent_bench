@@ -282,10 +282,12 @@ def select_gpu_pool(
             return pool
 
     largest = sorted_pools[-1]
-    if largest.total_vram >= vram_needed * 0.85:
+    largest_usable = largest.total_vram * 0.9
+    if largest_usable >= vram_needed * 0.85:
         print(
             f"Warning: model needs ~{vram_needed:.1f} GB but {largest.name} pool "
-            f"has {largest.total_vram} GB — tight fit, vLLM may reduce context length."
+            f"has {largest.total_vram} GB ({largest_usable:.0f} GB usable) — tight fit, "
+            f"vLLM may reduce context length."
         )
         return largest
     raise ValueError(
@@ -301,8 +303,13 @@ def determine_max_model_len(
 ) -> int | None:
     """Return the max context length from model config, or an override."""
     if override is not None:
+        if override <= 0:
+            raise ValueError("--max-model-len must be a positive integer")
         return override
-    return metadata.max_position_embeddings
+    max_model_len = metadata.max_position_embeddings
+    if max_model_len is not None and max_model_len <= 0:
+        raise ValueError(f"Invalid max_position_embeddings in model config: {max_model_len}")
+    return max_model_len
 
 
 def _normalize_model_name(model_id: str, *, keep_dots: bool = False) -> str:
@@ -401,7 +408,7 @@ def _build_vllm_command(cfg: ManifestConfig) -> str:
         parts.append(arg)
     vllm_cmd = " \\\n  ".join(parts)
     if cfg.before_script:
-        return f"{cfg.before_script} && \\\n{vllm_cmd}\n"
+        return f"set -eu\n{cfg.before_script}\n{vllm_cmd}\n"
     return vllm_cmd + "\n"
 
 
@@ -810,10 +817,10 @@ def wait_for_health(
 ) -> bool:
     """Poll /health until 200 or timeout, with an initial delay for model loading."""
     health_url = f"{url}/health"
-    start = time.time()
     if initial_delay > 0:
         print(f"  Waiting {initial_delay // 60}m before first health check (model downloading)...")
         time.sleep(initial_delay)
+    start = time.time()
     while time.time() - start < timeout_seconds:
         elapsed = int(time.time() - start)
         last_error = ""
