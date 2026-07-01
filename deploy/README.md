@@ -31,7 +31,7 @@ coding-agent-bench generate-manifest RedHatAI/Qwen3.6-27B-FP8 \
 
 The tool auto-detects GPU requirements. Use `--dry-run` to see calculations without generating YAML. Use `--gpu-pool` to override the auto-selected pool, or `--gpu-pools-file` to point to a custom YAML defining available hardware. Pass `--anyuid` to include the anyuid SCC RoleBinding required by vLLM >v0.22 on OpenShift.
 
-Any model on HuggingFace works — vLLM-specific args (reasoning parser, tool-call parser, chat template kwargs) come from the [vLLM docs](https://docs.vllm.ai/) and must be passed as flags since they aren't derivable from HuggingFace metadata.
+Any model on HuggingFace works — vLLM-specific args (reasoning parser, tool-call parser, chat template kwargs) come from the [vLLM docs](https://docs.vllm.ai/) and must be passed as flags since they aren't derivable from HuggingFace metadata. See [Model-Specific Args](#model-specific-vllm-args) below for the flags each model needs.
 
 ### `deploy` — Deploy, validate, and manage a vLLM server
 
@@ -68,6 +68,52 @@ coding-agent-bench deploy RedHatAI/Qwen3.6-27B-FP8 --teardown
 - `--scale-down` scales the deployment to 0 replicas. The PVC and cached weights remain, so scaling back up is faster than a fresh deploy.
 - `--teardown` deletes all 6 resources created by the manifest. Use when you're done with a model entirely.
 - `--health-timeout` sets how long to wait for the vLLM server to become healthy (default: 1800s / 30 min — large models on L40S can take a while due to bandwidth).
+
+### Model-Specific vLLM Args
+
+Each model requires different vLLM flags for reasoning and tool calling. The `--enable-auto-tool-choice` flag is always included automatically. These flags come from the [vLLM team's model configuration doc](https://docs.google.com/document/d/1uvzhjBjaFyEtI5Tn197dUnITzBksTXXrKZk2Y_9fed0).
+
+**Qwen3.6-27B-FP8** ([HuggingFace](https://huggingface.co/RedHatAI/Qwen3.6-27B-FP8))
+
+```bash
+coding-agent-bench deploy RedHatAI/Qwen3.6-27B-FP8 --anyuid \
+  --reasoning-parser qwen3 \
+  --tool-call-parser qwen3_coder \
+  --chat-template-kwargs '{"enable_thinking": true}'
+```
+
+**Gemma-4-31B-it-FP8-block** ([HuggingFace](https://huggingface.co/RedHatAI/gemma-4-31B-it-FP8-block))
+
+```bash
+coding-agent-bench deploy RedHatAI/gemma-4-31B-it-FP8-block --anyuid \
+  --reasoning-parser gemma4 \
+  --tool-call-parser gemma4 \
+  --chat-template-kwargs '{"enable_thinking": true}'
+```
+
+**Mistral-Small-4-119B-2603** ([HuggingFace](https://huggingface.co/RedHatAI/Mistral-Small-4-119B-2603))
+
+```bash
+coding-agent-bench deploy RedHatAI/Mistral-Small-4-119B-2603 --anyuid \
+  --reasoning-parser mistral \
+  --tool-call-parser mistral \
+  --chat-template-kwargs '{"reasoning_effort": "high"}'
+```
+
+**gpt-oss-120b** ([HuggingFace](https://huggingface.co/RedHatAI/gpt-oss-120b))
+
+```bash
+coding-agent-bench deploy RedHatAI/gpt-oss-120b --anyuid \
+  --tool-call-parser openai
+```
+
+**NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4** ([HuggingFace](https://huggingface.co/RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4))
+
+```bash
+coding-agent-bench deploy RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 --anyuid \
+  --reasoning-parser nemotron_v3 \
+  --tool-call-parser qwen3_coder
+```
 
 ### GPU Pools
 
