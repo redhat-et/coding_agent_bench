@@ -6,7 +6,7 @@ RUN mkdir -p /app /home/harbor && chown 1001:1001 /app /home/harbor
 WORKDIR /app
 ENV HOME=/home/harbor
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+RUN apt-get update && apt-get install -y --no-install-recommends curl git && \
     curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
     | tar xzf - -C /usr/local/bin oc kubectl && \
     curl -sL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
