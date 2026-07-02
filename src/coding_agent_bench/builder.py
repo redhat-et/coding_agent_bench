@@ -10,6 +10,8 @@ from coding_agent_bench.helpers.codex import codex_create_toml
 
 
 class SupportedAgent(str, Enum):
+    
+    oracle = "oracle"
     claude_code = "claude-code"
     codex = "codex"
     openclaw = "openclaw"
@@ -84,6 +86,15 @@ class HarborCommandBuilder:
         cmd = ["harbor", "run", "--debug", *args]
 
         return cmd
+    
+    def _build_oracle_cmd(
+        self,
+        model_name: str,
+        **kwargs,
+    ) -> list[str]:
+        """Build command for oracle (non-LLM) agent."""
+        # No configuration required
+        return self._build_command(model=model_name, **kwargs)
 
     def _build_claude_code_cmd(
         self,
@@ -276,7 +287,22 @@ class HarborCommandBuilder:
         if environment not in ["docker", "openshift"]:
             raise ValueError(f"Invalid environment: {environment}")
 
-        if agent == SupportedAgent.claude_code.value:
+        if agent == SupportedAgent.oracle.value:
+            cmd = self._build_oracle_cmd(
+                agent=agent,
+                dataset=dataset,
+                environment=environment,
+                model_name=model_name,
+                server_url=server_url,
+                model_max_len=model_max_len,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                job_name=job_name,
+                **kwargs,
+            )
+            
+        elif agent == SupportedAgent.claude_code.value:
             cmd = self._build_claude_code_cmd(
                 agent=agent,
                 dataset=dataset,
