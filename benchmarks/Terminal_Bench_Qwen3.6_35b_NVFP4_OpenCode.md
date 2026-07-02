@@ -46,24 +46,6 @@ harbor run --agent opencode -d $DATASET \
 harbor jobs resume -p jobs/<job-id> -f AgentTimeoutError -f NonZeroAgentExitCodeError
 ```
 
-```sh
-oc login
-oc project harbor
-
-export BENCHMARK='terminal-bench/terminal-bench-2'
-export DATASET_DIR='datasets'
-export MODEL_NAME='qwen3.6-35b'
-export SERVER_URL='http://qwen36-35b-qwen36-35b.apps.ocp-beta-test.nerc.mghpcc.org'
-
-# Run Tau3 bench with OpenCode
-coding-agent-bench --agent opencode \
-    --dataset $BENCHMARK \
-    --model-name $MODEL_NAME \
-    --server-url $SERVER_URL \
-    --environment openshift --remote \
-    --n-tasks 1
-```
-
 **`config.json`:**
 
 ```json
