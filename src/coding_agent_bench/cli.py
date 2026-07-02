@@ -52,6 +52,7 @@ def run(
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
 ):
+    """Run a benchmark with full Harbor configuration support."""
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
