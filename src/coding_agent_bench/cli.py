@@ -63,7 +63,7 @@ def run(
         typer.echo("Running job on remote server...")
         job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
-        command = ["coding-agent-bench", *remote_args]
+        command = ["coding-agent-bench", "run", *remote_args]
         
         # Parse before script if provided
         _before_script = None

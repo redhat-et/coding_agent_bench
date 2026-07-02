@@ -323,7 +323,7 @@ th {{ background: #f5f5f5; }}
 
 def build_cli_command(req: CreateJobRequest):
     """Build the coding-agent-bench CLI command."""
-    command = ["coding-agent-bench"]
+    command = ["coding-agent-bench", "run"]
     
     # Add required parameters
     command += [

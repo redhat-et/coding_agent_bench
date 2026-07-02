@@ -117,7 +117,7 @@ It automatically constructs and runs the Harbor job command for your specified b
 The following is the minimal configuration needed to run a job with the CLI:
 
 ```sh
-uv run coding-agent-bench \
+uv run coding-agent-bench run \
     --agent <agent> \
     --dataset <benchmark-name> \
     --model-name <model-name> \
@@ -127,7 +127,7 @@ uv run coding-agent-bench \
 For example, to run `swe-bench/swe-bench-verified` in Claude Code against a self-hosted model:
 
 ```sh
-uv run coding-agent-bench \
+uv run coding-agent-bench run \
     --agent claude-code \
     --dataset scale-ai/swe-bench-pro \
     --model-name my-model \
@@ -137,7 +137,7 @@ uv run coding-agent-bench \
 If you want to see a preview of Harbor command that would be run for a given set of arguments without actually running the job, add the `--dry-run` flag.
 
 > [!note]
-> Additional configuration options are available, use `uv run coding-agent-bench --help` to see them.
+> Additional configuration options are available, use `uv run coding-agent-bench run --help` to see them.
 
 ## Queue Service
 
@@ -315,7 +315,7 @@ Then run:
 harbor run --agent codex -d $BENCHMARK \
     -m vllm/$MODEL_NAME \
     --ae CODEX_HOME=/root/.codex/ \
-    --mounts-json '[ { "type": "bind", "source":"/Users/taagarwa/Documents/Projects/coding-agent-bench/config.toml", "target": "/root/.codex/config.toml" } ]'
+    --mounts-json '[ { "type": "bind", "source":"/path/to/coding-agent-bench/config.toml", "target": "/root/.codex/config.toml" } ]'
 ```
 
 ### OpenClaw vLLM
@@ -550,7 +550,7 @@ oc apply -f deploy/harbor-minio.yml
 Using the CLI, start a job with the `--remote` flag enabled and set `--environment openshift`, e.g.:
 
 ```bash
-uv run coding-agent-bench \
+uv run coding-agent-bench run \
     --agent claude-code \
     --dataset scale-ai/swe-bench-pro \
     --model-name my-model \
