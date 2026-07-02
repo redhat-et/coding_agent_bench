@@ -34,6 +34,8 @@ spec:
         component: api
     spec:
       serviceAccountName: harbor-orchestrator
+      securityContext:
+        fsGroup: 1001
       containers:
       - image: ghcr.io/redhat-et/coding_agent_bench:latest
         name: job-queue
