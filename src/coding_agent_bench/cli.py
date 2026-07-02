@@ -9,6 +9,8 @@ import typer
 
 from coding_agent_bench.builder import HarborCommandBuilder, SupportedAgent
 from coding_agent_bench.job import OpenshiftJob
+from coding_agent_bench.manifest import deploy as deploy_model
+from coding_agent_bench.manifest import generate
 from coding_agent_bench.utils import cmd_to_string
 
 app = typer.Typer()
@@ -117,6 +119,178 @@ def run(
                     proc.wait()
             raise SystemExit(130)
         typer.echo(f"Job output dir: {job_dir}")
+
+
+@app.command()
+def generate_manifest(
+    model_id: Annotated[str, typer.Argument(help="HuggingFace model ID (e.g., RedHatAI/Qwen3.6-27B-FP8)")],
+    reasoning_parser: Annotated[
+        Optional[str], typer.Option(help="vLLM reasoning parser (e.g., qwen3, nemotron_v3)")
+    ] = None,
+    tool_call_parser: Annotated[
+        Optional[str], typer.Option(help="vLLM tool-call parser (e.g., qwen3_coder, mistral)")
+    ] = None,
+    chat_template_kwargs: Annotated[
+        Optional[str], typer.Option(help="JSON string for --default-chat-template-kwargs")
+    ] = None,
+    vllm_arg: Annotated[
+        Optional[list[str]], typer.Option(help="Extra vLLM arg (repeatable)")
+    ] = None,
+    gpu_pool: Annotated[
+        Optional[str], typer.Option(help="Override GPU pool (e.g., small, large, xlarge)")
+    ] = None,
+    gpu_pools_file: Annotated[
+        Optional[Path], typer.Option(help="Path to YAML file defining available GPU pools")
+    ] = None,
+    max_model_len: Annotated[
+        Optional[int], typer.Option(help="Override max model length")
+    ] = None,
+    namespace: Annotated[
+        str, typer.Option(help="OpenShift namespace")
+    ] = "coding-agent-leaderboard",
+    vllm_image: Annotated[
+        str, typer.Option(help="vLLM container image")
+    ] = "vllm/vllm-openai:v0.23.0",
+    route_timeout: Annotated[
+        str, typer.Option(help="HAProxy route timeout")
+    ] = "600s",
+    app_name: Annotated[
+        Optional[str], typer.Option(help="Override app/resource name")
+    ] = None,
+    served_model_name: Annotated[
+        Optional[str], typer.Option(help="Override served model name")
+    ] = None,
+    output: Annotated[
+        Optional[Path], typer.Option("-o", "--output", help="Output file (default: stdout)")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option(help="Show calculations only, no YAML")
+    ] = False,
+    anyuid: Annotated[
+        bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
+    ] = False,
+    before_script: Annotated[
+        Optional[str], typer.Option(help="Shell command to run before vLLM starts (e.g., download a custom parser)")
+    ] = None,
+):
+    """Generate a vLLM OpenShift deployment manifest from a HuggingFace model ID."""
+    try:
+        generate(
+            model_id=model_id,
+            reasoning_parser=reasoning_parser,
+            tool_call_parser=tool_call_parser,
+            chat_template_kwargs=chat_template_kwargs,
+            extra_vllm_args=vllm_arg,
+            gpu_pool_override=gpu_pool,
+            gpu_pools_file=gpu_pools_file,
+            max_model_len_override=max_model_len,
+            namespace=namespace,
+            vllm_image=vllm_image,
+            route_timeout=route_timeout,
+            app_name_override=app_name,
+            served_model_name_override=served_model_name,
+            output=output,
+            dry_run=dry_run,
+            anyuid=anyuid,
+            before_script=before_script,
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
+
+
+@app.command()
+def deploy(
+    model_id: Annotated[str, typer.Argument(help="HuggingFace model ID (e.g., RedHatAI/Qwen3.6-27B-FP8)")],
+    reasoning_parser: Annotated[
+        Optional[str], typer.Option(help="vLLM reasoning parser (e.g., qwen3, nemotron_v3)")
+    ] = None,
+    tool_call_parser: Annotated[
+        Optional[str], typer.Option(help="vLLM tool-call parser (e.g., qwen3_coder, mistral)")
+    ] = None,
+    chat_template_kwargs: Annotated[
+        Optional[str], typer.Option(help="JSON string for --default-chat-template-kwargs")
+    ] = None,
+    vllm_arg: Annotated[
+        Optional[list[str]], typer.Option(help="Extra vLLM arg (repeatable)")
+    ] = None,
+    gpu_pool: Annotated[
+        Optional[str], typer.Option(help="Override GPU pool (e.g., small, large, xlarge)")
+    ] = None,
+    gpu_pools_file: Annotated[
+        Optional[Path], typer.Option(help="Path to YAML file defining available GPU pools")
+    ] = None,
+    max_model_len: Annotated[
+        Optional[int], typer.Option(help="Override max model length")
+    ] = None,
+    namespace: Annotated[
+        str, typer.Option(help="OpenShift namespace")
+    ] = "coding-agent-leaderboard",
+    vllm_image: Annotated[
+        str, typer.Option(help="vLLM container image")
+    ] = "vllm/vllm-openai:v0.23.0",
+    route_timeout: Annotated[
+        str, typer.Option(help="HAProxy route timeout")
+    ] = "600s",
+    app_name: Annotated[
+        Optional[str], typer.Option(help="Override app/resource name")
+    ] = None,
+    served_model_name: Annotated[
+        Optional[str], typer.Option(help="Override served model name")
+    ] = None,
+    scale_down: Annotated[
+        bool, typer.Option(help="Scale deployment to 0 (frees GPUs, keeps cached weights)")
+    ] = False,
+    teardown: Annotated[
+        bool, typer.Option(help="Delete all resources for this model")
+    ] = False,
+    skip_validation: Annotated[
+        bool, typer.Option(help="Skip health check and validation after deploy")
+    ] = False,
+    concurrency: Annotated[
+        int, typer.Option(help="Number of concurrent requests for validation")
+    ] = 8,
+    health_timeout: Annotated[
+        int, typer.Option(help="Health check timeout in seconds")
+    ] = 1800,
+    initial_delay: Annotated[
+        int, typer.Option(help="Seconds to wait before first health check (model download time)")
+    ] = 1200,
+    anyuid: Annotated[
+        bool, typer.Option(help="Include anyuid SCC RoleBinding (required for vLLM >v0.22)")
+    ] = False,
+    before_script: Annotated[
+        Optional[str], typer.Option(help="Shell command to run before vLLM starts (e.g., download a custom parser)")
+    ] = None,
+):
+    """Deploy, validate, and manage a vLLM model server on OpenShift."""
+    try:
+        deploy_model(
+            model_id=model_id,
+            reasoning_parser=reasoning_parser,
+            tool_call_parser=tool_call_parser,
+            chat_template_kwargs=chat_template_kwargs,
+            extra_vllm_args=vllm_arg,
+            gpu_pool_override=gpu_pool,
+            gpu_pools_file=gpu_pools_file,
+            max_model_len_override=max_model_len,
+            namespace=namespace,
+            vllm_image=vllm_image,
+            route_timeout=route_timeout,
+            app_name_override=app_name,
+            served_model_name_override=served_model_name,
+            do_scale_down=scale_down,
+            do_teardown=teardown,
+            skip_validation=skip_validation,
+            concurrency=concurrency,
+            health_timeout=health_timeout,
+            initial_delay=initial_delay,
+            anyuid=anyuid,
+            before_script=before_script,
+        )
+    except (ValueError, subprocess.CalledProcessError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":
