@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -17,6 +18,8 @@ import os
 import sqlite3
 import uuid
 import html
+
+logger = logging.getLogger(__name__)
 
 _job_queue: list[tuple[str, list[str]]] = []
 _job_event = asyncio.Event()
@@ -163,17 +166,61 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     global _shutting_down
     job_store.mark_orphaned()
     worker_task = asyncio.create_task(_worker())
+    cleanup_task = asyncio.create_task(_build_pod_cleanup_loop())
     yield
     _shutting_down = True
     worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    cleanup_task.cancel()
+    for task in (worker_task, cleanup_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
 router = APIRouter(dependencies=[Depends(_verify_api_key)])
+
+
+async def _run_oc(command: list[str], timeout_sec: int = 30) -> str:
+    """Run an oc command with timeout and process-kill handling."""
+    process = await asyncio.create_subprocess_exec(
+        "oc", *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_sec
+        )
+    except asyncio.TimeoutError:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+        raise
+    return stdout_bytes.decode() if stdout_bytes else ""
+
+
+async def _build_pod_cleanup_loop():
+    """Periodically delete completed/failed build pods from the namespace."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            for phase in ("Succeeded", "Failed"):
+                stdout = await _run_oc([
+                    "get", "pods",
+                    "-l", "openshift.io/build.name",
+                    f"--field-selector=status.phase=={phase}",
+                    "-o", "jsonpath={.items[*].metadata.name}",
+                ])
+                pods = stdout.split() if stdout.strip() else []
+                if pods:
+                    await _run_oc(["delete", "pods", *pods, "--ignore-not-found"])
+        except Exception:
+            logger.exception("Build pod cleanup failed")
 
 
 async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | None:
