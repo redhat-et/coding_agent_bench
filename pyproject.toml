@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.136.3",
-    "harbor>=0.13.1",
+    "harbor",
     "huggingface-hub>=0.20.0",
     "pyyaml>=6.0",
     "tenacity>=8.0",
@@ -24,3 +24,6 @@ build-backend = "uv_build"
 dev = [
     "ruff>=0.15.12",
 ]
+
+[tool.uv.sources]
+harbor = { git = "https://github.com/taagarwa-rh/harbor.git", rev = "fix/openshift-various-bugs" }
