@@ -441,7 +441,7 @@ harbor run --agent claude-code -d $BENCHMARK \
     --ae ANTHROPIC_VERTEX_PROJECT_ID=$ANTHROPIC_VERTEX_PROJECT_ID \
     --ae ANTHROPIC_MODEL=$ANTHROPIC_MODEL \
     --ae GOOGLE_APPLICATION_CREDENTIALS='/app/.config/gcloud/application_default_credentials.json' \
-    --mounts-json '["~/.config/gcloud/application_default_credentials.json:/app/.config/gcloud/application_default_credentials.json"]'
+    --mounts-json '[ { "type": "bind", "source":"~/.config/gcloud/application_default_credentials.json", "target": "/app/.config/gcloud/application_default_credentials.json" } ]'
 ```
 
 ### Codex OpenAI
