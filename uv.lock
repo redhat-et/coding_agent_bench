@@ -643,7 +643,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.17.1"
-source = { git = "https://github.com/taagarwa-rh/harbor.git?rev=fix%2Fopenshift-various-bugs#42fbe76b8b23d0f3d7623617afe510698628fe65" }
+source = { git = "https://github.com/taagarwa-rh/harbor.git?rev=fix%2Fopenshift-various-bugs#03afbe17bf5c15e6c50c8745be093a3b15f676c3" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },
