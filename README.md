@@ -28,6 +28,7 @@ Reproducible benchmarks for coding agents and models using Harbor
   - [Codex vLLM](#codex-vllm)
   - [OpenClaw vLLM](#openclaw-vllm)
   - [OpenCode vLLM](#opencode-vllm)
+  - [OpenHands vLLM](#openhands-vllm)
   - [Pi vLLM](#pi-vllm)
   - [Qwen Code vLLM](#qwen-code-vllm)
   - [Claude Code Anthropic](#claude-code-anthropic)
@@ -264,6 +265,7 @@ curl -X DELETE $JOB_QUEUE_URL/jobs/<job_id> -H "X-API-Key: <your-api-key>"
 | Codex       | vLLM         | [Link](#codex-vllm)            | Testing   |
 | OpenClaw    | vLLM         | [Link](#openclaw-vllm)         | Validated |
 | OpenCode    | vLLM         | [Link](#opencode-vllm)         | Validated |
+| OpenHands    | vLLM         | [Link](#openhands-vllm)         | Validated |
 | Pi          | vLLM         | [Link](#pi-vllm)               | Validated |
 | Qwen Code   | vLLM         | [Link](#qwen-code-vllm)        | Validated |
 | Claude Code | Anthropic    | [Link](#claude-code-anthropic) | Validated |
@@ -323,8 +325,8 @@ harbor run --agent codex -d $BENCHMARK \
 Set the following variables in your environ:
 
 ```sh
-export MODEL_NAME='qwen3.6-35b'
-export SERVER_URL='http://qwen36-35b-qwen36-35b.apps.ocp-beta-test.nerc.mghpcc.org'
+export MODEL_NAME=
+export SERVER_URL=
 export OPENAI_BASE_URL=$SERVER_URL/v1
 export OPENAI_API_KEY='NONE'
 ```
@@ -358,6 +360,25 @@ Then run:
 harbor run --agent opencode -p $DATASET_DIR/swe-bench-verified \
     -m vllm/$MODEL_NAME \
     --ae "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_CONTENT"
+```
+
+### OpenHands vLLM
+
+Set the following variables in your environ:
+
+```bash
+export MODEL_NAME=
+export SERVER_URL=
+export LLM_API_KEY="NONE"
+```
+
+Then run:
+
+```bash
+harbor run -d $BENCHMARK \
+  -a openhands-sdk \
+  -m hosted_vllm/$MODEL_NAME \
+  --ae HOSTED_VLLM_API_BASE=$SERVER_URL/v1
 ```
 
 ### Pi vLLM

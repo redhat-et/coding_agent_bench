@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
@@ -109,6 +110,28 @@ class OpenCodeAgentConfig(AgentConfig):
 
         agent_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
+        }
+        return AgentConfigResult(model=model, agent_env=agent_env)
+
+
+class OpenHandsSdkAgentConfig(AgentConfig):
+    """OpenHands agent. Sets environment variables for a vLLM provider."""
+    
+    name = "openhands-sdk"
+
+    def configure(self, **kwargs) -> AgentConfigResult:
+        model_name = kwargs["model_name"]
+        server_url = kwargs["server_url"]
+
+        # Set LLM API in host environment
+        os.environ["LLM_API_KEY"] = "NONE"
+        
+        # Configure the environment
+        model = "hosted_vllm/" + model_name
+        api_base = server_url.rstrip("/") + "/v1"
+
+        agent_env = {
+            "HOSTED_VLLM_API_BASE": api_base,
         }
         return AgentConfigResult(model=model, agent_env=agent_env)
 
