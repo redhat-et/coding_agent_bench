@@ -58,6 +58,11 @@ spec:
             secretKeyRef:
               name: job-queue-secret
               key: API_KEY
+        - name: BREV_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: job-queue-secret
+              key: BREV_TOKEN
         ports:
         - containerPort: 8000
           name: http
