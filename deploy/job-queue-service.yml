@@ -61,6 +61,8 @@ spec:
         ports:
         - containerPort: 8000
           name: http
+        - containerPort: 9000
+          name: brev-model
         imagePullPolicy: Always
         volumeMounts:
         - mountPath: /app/data
@@ -87,6 +89,24 @@ spec:
   - name: http
     port: 80
     targetPort: 8000
+    protocol: TCP
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: brev-model-service
+  labels:
+    app: job-queue
+    component: brev-model
+spec:
+  selector:
+    app: job-queue
+    component: api
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: 9000
     protocol: TCP
 ---
 apiVersion: route.openshift.io/v1

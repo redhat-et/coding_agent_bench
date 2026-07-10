@@ -11,6 +11,10 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
 
+import atexit
+import signal
+
+from coding_agent_bench.brev import BrevInstance
 from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
 from coding_agent_bench.job import OpenshiftJob
 import json
@@ -21,10 +25,11 @@ import html
 
 logger = logging.getLogger(__name__)
 
-_job_queue: list[tuple[str, list[str]]] = []
+_job_queue: list[tuple[str, list[str], str]] = []
 _job_event = asyncio.Event()
 _active_job: tuple[str, asyncio.Task, OpenshiftJob] | None = None
 _shutting_down = False
+_brev_instance: BrevInstance | None = None
 
 db_path = Path(os.environ.get("JOB_STORE_PATH", "jobs.db"))
 
@@ -161,12 +166,28 @@ async def _verify_api_key(key: str = Depends(_api_key_header)) -> str:
     return key
 
 
+def _brev_emergency_cleanup(*_args) -> None:
+    """Last-resort synchronous cleanup for signal handlers and atexit."""
+    if _brev_instance is not None:
+        _brev_instance.destroy_sync()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     global _shutting_down
+
+    # Clean up any Brev instance orphaned by a previous crash
+    BrevInstance.cleanup_orphaned()
+
     job_store.mark_orphaned()
     worker_task = asyncio.create_task(_worker())
     cleanup_task = asyncio.create_task(_build_pod_cleanup_loop())
+
+    # Register emergency Brev cleanup for hard kills
+    signal.signal(signal.SIGTERM, _brev_emergency_cleanup)
+    signal.signal(signal.SIGINT, _brev_emergency_cleanup)
+    atexit.register(_brev_emergency_cleanup)
+
     yield
     _shutting_down = True
     worker_task.cancel()
@@ -176,6 +197,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await task
         except asyncio.CancelledError:
             pass
+    if _brev_instance is not None:
+        await _brev_instance.destroy()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -238,9 +261,61 @@ async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | 
     return "; ".join(errors) if errors else None
 
 
-async def _run_job(job_id: str, command: list[str]):
+def _substitute_server_url(command: list[str], new_url: str) -> list[str]:
+    """Replace the --server-url value in a CLI command list."""
+    result = list(command)
+    for i, arg in enumerate(result):
+        if arg == "--server-url" and i + 1 < len(result):
+            result[i + 1] = new_url
+            break
+    return result
+
+
+def _next_brev_model() -> str | None:
+    """Return the model_name of the next queued Brev job, or None."""
+    for _, cmd, model in _job_queue:
+        for i in range(len(cmd) - 1):
+            if cmd[i] == "--server-url" and cmd[i + 1] == "brev":
+                return model
+    return None
+
+
+async def _brev_post_job_cleanup(model_name: str) -> None:
+    """Stop the current model if the next job needs a different one,
+    and destroy the instance if the queue is empty."""
+    global _brev_instance
+    if _brev_instance is None:
+        return
+
+    next_model = _next_brev_model()
+    if next_model == model_name:
+        logger.info("Next job uses same model %s, keeping it running", model_name)
+        return
+
+    await _brev_instance.stop_model(model_name)
+    if next_model is None:
+        await _brev_instance.destroy()
+        _brev_instance = None
+
+
+async def _run_job(job_id: str, command: list[str], model_name: str):
     """Run and monitor an Openshift Job."""
-    global _active_job
+    global _active_job, _brev_instance
+
+    uses_brev = any(
+        command[i] == "--server-url" and i + 1 < len(command) and command[i + 1] == "brev"
+        for i in range(len(command))
+    )
+
+    if uses_brev:
+        if _brev_instance is None:
+            _brev_instance = BrevInstance()
+        await _brev_instance.ensure_running()
+        if _brev_instance._current_model != model_name:
+            if _brev_instance._current_model is not None:
+                await _brev_instance.stop_model(_brev_instance._current_model)
+            await _brev_instance.start_model(model_name)
+        command = _substitute_server_url(command, _brev_instance.server_url)
 
     oj = OpenshiftJob(job_name=job_id)
     task = asyncio.current_task()
@@ -267,6 +342,8 @@ async def _run_job(job_id: str, command: list[str]):
                     phase = pods[0].get("status", {}).get("phase", "")
                     if phase == "Succeeded":
                         cleanup_err = await _best_effort_cleanup(oj)
+                        if uses_brev:
+                            await _brev_post_job_cleanup(model_name)
                         job_store.update_status(
                             job_id, JobStatus.COMPLETED,
                             error=f"cleanup failed: {cleanup_err}" if cleanup_err else None,
@@ -276,6 +353,8 @@ async def _run_job(job_id: str, command: list[str]):
                         reason = pods[0].get("status", {}).get("reason", "")
                         message = pods[0].get("status", {}).get("message", "")
                         cleanup_err = await _best_effort_cleanup(oj)
+                        if uses_brev:
+                            await _brev_post_job_cleanup(model_name)
                         error = f"{phase}: reason={reason}, message={message}"
                         if cleanup_err:
                             error += f"; cleanup failed: {cleanup_err}"
@@ -284,6 +363,8 @@ async def _run_job(job_id: str, command: list[str]):
             await asyncio.sleep(5)
 
     except asyncio.CancelledError:
+        if uses_brev:
+            await _brev_post_job_cleanup(model_name)
         if _shutting_down:
             cleanup_err = await _best_effort_cleanup(oj)
             error = "Server shut down"
@@ -296,6 +377,8 @@ async def _run_job(job_id: str, command: list[str]):
         job_store.update_status(job_id, JobStatus.CANCELLED, error=error)
 
     except Exception as e:
+        if uses_brev:
+            await _brev_post_job_cleanup(model_name)
         cleanup_err = await _best_effort_cleanup(oj)
         error = str(e)
         if cleanup_err:
@@ -312,11 +395,11 @@ async def _worker():
         await _job_event.wait()
         _job_event.clear()
         while _job_queue:
-            job_id, command = _job_queue.pop(0)
+            job_id, command, model_name = _job_queue.pop(0)
             row = job_store.get(job_id)
             if not row or row["status"] != JobStatus.QUEUED.value:
                 continue
-            await _run_job(job_id, command)
+            await _run_job(job_id, command, model_name)
 
 @router.get("/")
 async def read_root():
@@ -422,7 +505,8 @@ async def create_job(req: CreateJobRequest):
     # Start the job
     job_id = str(uuid.uuid4())
     job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, command)
-    _job_queue.append((job_id, command))
+    _job_queue.append((job_id, command, req.model_name))
+    _job_queue.sort(key=lambda item: item[2])
     _job_event.set()
 
     # Return a success response
@@ -454,7 +538,7 @@ async def delete_job(job_id: str):
         raise HTTPException(status_code=400, detail=f"Job already {job_row['status']}")
 
     # Remove from queue if still waiting
-    for i, (qid, _) in enumerate(_job_queue):
+    for i, (qid, _, _model) in enumerate(_job_queue):
         if qid == job_id:
             _job_queue.pop(i)
             job_store.update_status(job_id, JobStatus.CANCELLED)

@@ -21,4 +21,7 @@ USER 1001
 
 RUN uv sync --no-cache
 
+# Install Brev
+RUN bash -c "$(curl -fsSL https://raw.githubusercontent.com/brevdev/brev-cli/main/bin/install-latest.sh)"
+
 CMD ["echo", "Image is live!"]
