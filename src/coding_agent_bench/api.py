@@ -12,7 +12,6 @@ from enum import Enum
 from pathlib import Path
 
 import atexit
-import signal
 
 from coding_agent_bench.brev import BrevInstance
 from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
@@ -167,7 +166,7 @@ async def _verify_api_key(key: str = Depends(_api_key_header)) -> str:
 
 
 def _brev_emergency_cleanup(*_args) -> None:
-    """Last-resort synchronous cleanup for signal handlers and atexit."""
+    """Last-resort synchronous cleanup registered via atexit."""
     if _brev_instance is not None:
         _brev_instance.destroy_sync()
 
@@ -183,9 +182,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     worker_task = asyncio.create_task(_worker())
     cleanup_task = asyncio.create_task(_build_pod_cleanup_loop())
 
-    # Register emergency Brev cleanup for hard kills
-    signal.signal(signal.SIGTERM, _brev_emergency_cleanup)
-    signal.signal(signal.SIGINT, _brev_emergency_cleanup)
+    # Register emergency Brev cleanup as last-resort for hard kills;
+    # signal handlers are left to uvicorn so it can shut down gracefully
+    # and run the async _brev_instance.destroy() path above.
     atexit.register(_brev_emergency_cleanup)
 
     yield
@@ -307,22 +306,22 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
         for i in range(len(command))
     )
 
-    if uses_brev:
-        if _brev_instance is None:
-            _brev_instance = BrevInstance()
-        await _brev_instance.ensure_running()
-        if _brev_instance._current_model != model_name:
-            if _brev_instance._current_model is not None:
-                await _brev_instance.stop_model(_brev_instance._current_model)
-            await _brev_instance.start_model(model_name)
-        command = _substitute_server_url(command, _brev_instance.server_url)
-
     oj = OpenshiftJob(job_name=job_id)
     task = asyncio.current_task()
     assert task is not None
     _active_job = (job_id, task, oj)
 
     try:
+        if uses_brev:
+            if _brev_instance is None:
+                _brev_instance = BrevInstance()
+            await _brev_instance.ensure_running()
+            if _brev_instance._current_model != model_name:
+                if _brev_instance._current_model is not None:
+                    await _brev_instance.stop_model(_brev_instance._current_model)
+                await _brev_instance.start_model(model_name)
+            command = _substitute_server_url(command, _brev_instance.server_url)
+
         job_spec = oj._job_spec(command)
         await oj._run_oc_command(
             ["apply", "-f", "-"],

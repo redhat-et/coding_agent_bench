@@ -345,13 +345,11 @@ class BrevInstance:
                 if attempt < 2:
                     await asyncio.sleep(5)
 
-        # Final attempt with check=False so we at least log the failure
         logger.error(
             "All brev delete attempts failed for %s: %s",
             self._instance_name, last_err,
         )
-        self._running = False
-        self._current_model = None
+        raise last_err  # type: ignore[misc]
 
     def destroy_sync(self) -> None:
         """Synchronous best-effort destroy for use in signal handlers and atexit.
