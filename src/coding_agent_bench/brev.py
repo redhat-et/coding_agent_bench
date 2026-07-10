@@ -167,7 +167,7 @@ class BrevInstance:
         self,
         args: list[str],
         check: bool = True,
-        timeout_sec: int = 300,
+        timeout_sec: int = 1800,
     ) -> tuple[str, str]:
         cmd = ["brev", *args]
         logger.info("Running: %s", " ".join(cmd))
@@ -227,7 +227,7 @@ class BrevInstance:
         logger.info("Creating Brev instance %s", self._instance_name)
         await self._run_brev(
             ["create", self._instance_name, "--type", self._instance_type],
-            timeout_sec=600,
+            timeout_sec=1800,
         )
         self._running = True
 
@@ -332,7 +332,7 @@ class BrevInstance:
                 await self._run_brev(
                     ["delete", self._instance_name],
                     check=True,
-                    timeout_sec=120,
+                    timeout_sec=1200,
                 )
                 self._running = False
                 self._current_model = None
@@ -367,7 +367,7 @@ class BrevInstance:
                 subprocess.run(
                     ["brev", "delete", self._instance_name],
                     capture_output=True,
-                    timeout=120,
+                    timeout=1200,
                     check=True,
                 )
                 logger.info("Sync brev delete succeeded")
@@ -406,7 +406,7 @@ class BrevInstance:
             subprocess.run(
                 ["brev", "delete", instance_name],
                 capture_output=True,
-                timeout=120,
+                timeout=1200,
                 check=False,
             )
             logger.info(
