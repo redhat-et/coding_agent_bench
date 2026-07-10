@@ -17,15 +17,124 @@ BREV_INSTANCE_TYPE = "dmz.h100x2.pcie"
 
 @dataclass
 class ModelConfig:
-    docker_command: str
     container_name: str
+    docker_command: str
 
 
 MODEL_CONFIGS: dict[str, ModelConfig] = {
-    # "RedHatAI/gpt-oss-120b": ModelConfig(
-    #     docker_command="docker run -d --name gpt-oss-120b --gpus all -p 8000:8000 ...",
-    #     container_name="gpt-oss-120b",
-    # ),
+    "RedHatAI/Qwen3.6-27B-FP8": ModelConfig(
+        container_name="qwen3.6-27b",
+        docker_command="""docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:v0.24.0 \
+    --model RedHatAI/Qwen3.6-27B-FP8 \
+    --dtype auto \
+    --max-model-len 131072 \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --gpu-memory-utilization 0.9 \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --default-chat-template-kwargs '{"enable_thinking": true}'
+"""
+    ),
+    "RedHatAI/gemma-4-31B-it-FP8-block": ModelConfig(
+        container_name="gemma-4-31b-it",
+        docker_command="""docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:v0.24.0 \
+    --model RedHatAI/gemma-4-31B-it-FP8-block \
+    --dtype auto \
+    --max-model-len 131072 \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --gpu-memory-utilization 0.9 \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --reasoning-parser gemma4 \
+    --tool-call-parser gemma4 \
+    --default-chat-template-kwargs '{"enable_thinking": true}'
+"""
+    ),
+    "RedHatAI/gpt-oss-120b": ModelConfig(
+        container_name="gpt-oss-120b",
+        docker_command="""docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:v0.24.0 \
+    --model RedHatAI/gpt-oss-120b \
+    --dtype auto \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 2 \
+    --gpu-memory-utilization 0.9 \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser openai
+""",
+    ),
+    "RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": ModelConfig(
+        container_name="nemotron-3-super-120b",
+        docker_command="""docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:v0.24.0 \
+    --model RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+    --dtype auto \
+    --tensor-parallel-size 2 \
+    --gpu-memory-utilization 0.9 \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --reasoning-parser nemotron_v3 \
+    --tool-call-parser qwen3_coder
+"""
+    ),
+    "RedHatAI/Mistral-Small-4-119B-2603-NVFP4": ModelConfig(
+        container_name="mistral-small-4-119b",
+        docker_command="""docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:v0.24.0 \
+    --model RedHatAI/Mistral-Small-4-119B-2603-NVFP4 \
+    --dtype auto \
+    --max-model-len 131072 \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --gpu-memory-utilization 0.9 \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --kv-cache-dtype auto \
+    --enable-auto-tool-choice \
+    --reasoning-parser mistral \
+    --tool-call-parser mistral \
+    --default-chat-template-kwargs '{"reasoning_effort": "high"}' \
+    --limit-mm-per-prompt '{"image": 0}'
+"""
+    )
 }
 
 
