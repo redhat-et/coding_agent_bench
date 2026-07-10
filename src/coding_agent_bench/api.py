@@ -429,6 +429,24 @@ async def ui():
     completed = job_store.list(JobStatus.COMPLETED) + job_store.list(JobStatus.CANCELLED)
     completed.reverse()
 
+    brev_section = ""
+    if _brev_instance is not None:
+        instance_name = html.escape(_brev_instance._instance_name)
+        instance_type = html.escape(_brev_instance._instance_type)
+        model = html.escape(_brev_instance._current_model or "none")
+        status = "running" if _brev_instance.is_alive else "stopped"
+        brev_section = f"""<h2>Brev Instance</h2>
+<table>
+<tr><th>Instance</th><th>Type</th><th>Status</th><th>Current Model</th></tr>
+<tr><td>{instance_name}</td><td>{instance_type}</td><td>{status}</td><td>{model}</td></tr>
+</table>"""
+    else:
+        brev_section = """<h2>Brev Instance</h2>
+<table>
+<tr><th>Instance</th><th>Type</th><th>Status</th><th>Current Model</th></tr>
+<tr><td colspan="4">No active instance</td></tr>
+</table>"""
+
     html_page = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -443,6 +461,7 @@ th {{ background: #f5f5f5; }}
 </head>
 <body>
 <h1>Job Queue</h1>
+{brev_section}
 {build_table("Running", running)}
 {build_table("Queued", queued)}
 {build_table("Completed", completed)}
