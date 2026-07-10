@@ -23,6 +23,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [Queue Service](#queue-service)
   - [Set up the service](#set-up-the-service)
   - [Use the service](#use-the-service)
+  - [Brev Integration](#brev-integration)
 - [Harbor Command Examples](#harbor-command-examples)
   - [Claude Code vLLM](#claude-code-vllm)
   - [Codex vLLM](#codex-vllm)
@@ -144,6 +145,7 @@ If you want to see a preview of Harbor command that would be run for a given set
 
 The queue service is a FastAPI application that can be deployed on OpenShift to queue and run benchmarks automatically.
 Benchmark results are stored to MinIO for later review.
+The queue service can also be configured to spin up/down models on demand using GPU-enabled VMs from [NVIDIA's Brev](https://developer.nvidia.com/brev).
 
 ```mermaid
 sequenceDiagram
@@ -181,7 +183,7 @@ sequenceDiagram
     oc apply -f deploy/harbor-orchestrator-sa.yml
     oc apply -f deploy/harbor-task-sa.yml
     ```
-4. Create a secret file named `job-queue-secret` with an `API_KEY` and apply it:
+4. Create a secret file named `job-queue-secret` with an `API_KEY` (and optional `BREV_TOKEN`) and apply it:
     ```yaml
     apiVersion: v1
     kind: Secret
@@ -189,6 +191,7 @@ sequenceDiagram
       name:  job-queue-secret
     stringData:
       API_KEY: <your-api-key>
+      # BREV_TOKEN: <your-brev-token>
     type: Opaque
     ```
 5. Create the queue service:
@@ -242,6 +245,41 @@ Cancel a running or queued job:
 ```sh
 curl -X DELETE $JOB_QUEUE_URL/jobs/<job_id> -H "X-API-Key: <your-api-key>"
 ```
+
+### Brev Integration
+
+The queue service can automatically manage [NVIDIA Brev](https://developer.nvidia.com/brev) GPU VMs to serve models on demand. When a job is submitted with `server_url` set to `"brev"`, the service will:
+
+1. Create a Brev VM instance and set up a port-forward to it
+2. Start the requested model as a Docker container on the VM
+3. Wait for the model's `/health` endpoint to respond
+4. Run the benchmark job
+5. Stop the model container when the job completes
+
+If the next job in the queue uses the same model, the model container is kept running to avoid unnecessary restart cycles. Jobs are automatically reordered so that jobs using the same model run consecutively. When the queue is empty, the Brev instance is deleted.
+
+**Prerequisites:**
+
+- Add your `BREV_TOKEN` to the `job-queue-secret` (see [Set up the service](#set-up-the-service) step 4)
+- Ensure your model is configured in `src/coding_agent_bench/brev.py` under `MODEL_CONFIGS`
+
+**Usage:**
+
+```sh
+curl -X POST $JOB_QUEUE_URL/jobs \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-api-key>" \
+  -d '{
+    "job_name": "my-benchmark",
+    "agent": "pi",
+    "dataset": "swe-bench/swe-bench-verified",
+    "model_name": "RedHatAI/Qwen3.6-27B-FP8",
+    "server_url": "brev",
+    "n_concurrent": 16
+  }'
+```
+
+To bypass Brev and use a specific server, set `server_url` to the server URL as usual.
 
 ## Harbor Command Examples
 
