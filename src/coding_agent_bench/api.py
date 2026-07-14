@@ -175,19 +175,22 @@ def _brev_emergency_cleanup(*_args) -> None:
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     global _shutting_down
 
-    # Clean up any Brev instance orphaned by a previous crash
+    logger.info("Server starting up")
+
+    logger.info("Cleaning up orphaned Brev instances from previous runs")
     BrevInstance.cleanup_orphaned()
 
+    logger.info("Marking orphaned jobs (queued/running) as failed")
     job_store.mark_orphaned()
     worker_task = asyncio.create_task(_worker())
     cleanup_task = asyncio.create_task(_build_pod_cleanup_loop())
 
-    # Register emergency Brev cleanup as last-resort for hard kills;
-    # signal handlers are left to uvicorn so it can shut down gracefully
-    # and run the async _brev_instance.destroy() path above.
     atexit.register(_brev_emergency_cleanup)
 
+    logger.info("Server ready — worker and cleanup tasks started")
     yield
+
+    logger.info("Server shutting down")
     _shutting_down = True
     worker_task.cancel()
     cleanup_task.cancel()
@@ -197,7 +200,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except asyncio.CancelledError:
             pass
     if _brev_instance is not None:
+        logger.info("Destroying Brev instance during shutdown")
         await _brev_instance.destroy()
+        logger.info("Brev instance destroyed")
+    logger.info("Server shutdown complete")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -288,13 +294,16 @@ async def _brev_post_job_cleanup(model_name: str) -> None:
 
     next_model = _next_brev_model()
     if next_model == model_name:
-        logger.info("Next job uses same model %s, keeping it running", model_name)
+        logger.info("Brev: next job uses same model %s — keeping it running", model_name)
         return
 
+    logger.info("Brev: stopping model %s (next model: %s)", model_name, next_model or "none")
     await _brev_instance.stop_model(model_name)
     if next_model is None:
+        logger.info("Brev: no more queued Brev jobs — destroying instance")
         await _brev_instance.destroy()
         _brev_instance = None
+        logger.info("Brev: instance destroyed")
 
 
 async def _run_job(job_id: str, command: list[str], model_name: str):
@@ -306,6 +315,8 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
         for i in range(len(command))
     )
 
+    logger.info("Job %s: starting (model=%s, uses_brev=%s)", job_id, model_name, uses_brev)
+
     oj = OpenshiftJob(job_name=job_id)
     task = asyncio.current_task()
     assert task is not None
@@ -314,20 +325,30 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
     try:
         if uses_brev:
             if _brev_instance is None:
+                logger.info("Job %s: creating new Brev instance", job_id)
                 _brev_instance = BrevInstance()
+            logger.info("Job %s: ensuring Brev instance is running", job_id)
             await _brev_instance.ensure_running()
             if _brev_instance._current_model != model_name:
                 if _brev_instance._current_model is not None:
+                    logger.info("Job %s: stopping previous Brev model %s", job_id, _brev_instance._current_model)
                     await _brev_instance.stop_model(_brev_instance._current_model)
+                logger.info("Job %s: starting Brev model %s", job_id, model_name)
                 await _brev_instance.start_model(model_name)
+            logger.info("Job %s: Brev model ready, substituting server URL", job_id)
             command = _substitute_server_url(command, _brev_instance.server_url)
 
+        logger.info("Job %s: creating OpenShift job", job_id)
         job_spec = oj._job_spec(command)
         await oj._run_oc_command(
             ["apply", "-f", "-"],
             stdin_data=json.dumps(job_spec).encode(),
         )
+
+        logger.info("Job %s: waiting for pod to be ready", job_id)
         await oj._wait_for_job_pod_ready()
+
+        logger.info("Job %s: pod ready — status → RUNNING", job_id)
         job_store.update_status(job_id, JobStatus.RUNNING)
 
         while True:
@@ -340,6 +361,7 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
                 if pods:
                     phase = pods[0].get("status", {}).get("phase", "")
                     if phase == "Succeeded":
+                        logger.info("Job %s: pod succeeded — cleaning up", job_id)
                         cleanup_err = await _best_effort_cleanup(oj)
                         if uses_brev:
                             await _brev_post_job_cleanup(model_name)
@@ -347,10 +369,12 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
                             job_id, JobStatus.COMPLETED,
                             error=f"cleanup failed: {cleanup_err}" if cleanup_err else None,
                         )
+                        logger.info("Job %s: status → COMPLETED", job_id)
                         return
                     if phase in ("Failed", "Unknown", "Error"):
                         reason = pods[0].get("status", {}).get("reason", "")
                         message = pods[0].get("status", {}).get("message", "")
+                        logger.error("Job %s: pod entered %s (reason=%s, message=%s)", job_id, phase, reason, message)
                         cleanup_err = await _best_effort_cleanup(oj)
                         if uses_brev:
                             await _brev_post_job_cleanup(model_name)
@@ -358,10 +382,12 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
                         if cleanup_err:
                             error += f"; cleanup failed: {cleanup_err}"
                         job_store.update_status(job_id, JobStatus.FAILED, error=error)
+                        logger.info("Job %s: status → FAILED", job_id)
                         return
             await asyncio.sleep(5)
 
     except asyncio.CancelledError:
+        logger.info("Job %s: cancelled (shutting_down=%s)", job_id, _shutting_down)
         if uses_brev:
             await _brev_post_job_cleanup(model_name)
         if _shutting_down:
@@ -370,12 +396,16 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
             if cleanup_err:
                 error += f"; cleanup failed: {cleanup_err}"
             job_store.update_status(job_id, JobStatus.FAILED, error=error)
+            logger.info("Job %s: status → FAILED (server shutdown)", job_id)
             raise
+        logger.info("Job %s: signalling pod and cleaning up", job_id)
         cleanup_err = await _best_effort_cleanup(oj, signal=True)
         error = f"cleanup failed: {cleanup_err}" if cleanup_err else None
         job_store.update_status(job_id, JobStatus.CANCELLED, error=error)
+        logger.info("Job %s: status → CANCELLED", job_id)
 
     except Exception as e:
+        logger.exception("Job %s: unexpected error", job_id)
         if uses_brev:
             await _brev_post_job_cleanup(model_name)
         cleanup_err = await _best_effort_cleanup(oj)
@@ -383,6 +413,7 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
         if cleanup_err:
             error += f"; cleanup failed: {cleanup_err}"
         job_store.update_status(job_id, JobStatus.FAILED, error=error)
+        logger.info("Job %s: status → FAILED", job_id)
 
     finally:
         _active_job = None
@@ -390,15 +421,19 @@ async def _run_job(job_id: str, command: list[str], model_name: str):
 
 async def _worker():
     """Process jobs from the queue one at a time."""
+    logger.info("Worker started — waiting for jobs")
     while True:
         await _job_event.wait()
         _job_event.clear()
+        logger.info("Worker woke up — %d job(s) in queue", len(_job_queue))
         while _job_queue:
             job_id, command, model_name = _job_queue.pop(0)
             row = job_store.get(job_id)
             if not row or row["status"] != JobStatus.QUEUED.value:
+                logger.info("Worker: skipping job %s (status=%s)", job_id, row["status"] if row else "not found")
                 continue
             await _run_job(job_id, command, model_name)
+        logger.info("Worker: queue drained — waiting for more jobs")
 
 @router.get("/")
 async def read_root():
@@ -517,17 +552,16 @@ async def create_job(req: CreateJobRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    # Build the CLI comand
     command = build_cli_command(req=req)
 
-    # Start the job
     job_id = str(uuid.uuid4())
+    logger.info("Job %s: created (name=%s, agent=%s, dataset=%s, model=%s)", job_id, req.job_name, req.agent.value, req.dataset, req.model_name)
     job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, command)
     _job_queue.append((job_id, command, req.model_name))
     _job_queue.sort(key=lambda item: item[2])
     _job_event.set()
+    logger.info("Job %s: queued (position %d of %d)", job_id, len(_job_queue), len(_job_queue))
 
-    # Return a success response
     return CreateJobResponse(message="Job created.", job_id=job_id, job_name=req.job_name, command=command)
 
 @router.get("/jobs", response_model=list[JobResponse])
@@ -555,19 +589,21 @@ async def delete_job(job_id: str):
     if job_row["status"] in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
         raise HTTPException(status_code=400, detail=f"Job already {job_row['status']}")
 
-    # Remove from queue if still waiting
     for i, (qid, _, _model) in enumerate(_job_queue):
         if qid == job_id:
             _job_queue.pop(i)
             job_store.update_status(job_id, JobStatus.CANCELLED)
+            logger.info("Job %s: cancelled (was queued)", job_id)
             return {"message": "Job cancelled", "job_id": job_id}
 
-    # Cancel the actively running job
     if _active_job and _active_job[0] == job_id:
         job_store.update_status(job_id, JobStatus.CANCELLING)
         _active_job[1].cancel()
+        logger.info("Job %s: cancellation requested (was running)", job_id)
         return {"message": "Job cancelling", "job_id": job_id}
 
+    job_store.update_status(job_id, JobStatus.CANCELLED)
+    logger.info("Job %s: cancelled (not in queue or active — likely in transition)", job_id)
     return {"message": "Job cancelled", "job_id": job_id}
 
 app.include_router(router)
