@@ -24,9 +24,15 @@ logger = logging.getLogger(__name__)
 _job_queue: list[tuple[str, list[str]]] = []
 _job_event = asyncio.Event()
 _active_jobs: dict[str, tuple[asyncio.Task, OpenshiftJob]] = {}
+_background_tasks: set[asyncio.Task] = set()
 _shutting_down = False
 
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "3"))
+try:
+    MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "3"))
+except ValueError as exc:
+    raise RuntimeError("MAX_CONCURRENT_JOBS must be an integer") from exc
+if MAX_CONCURRENT_JOBS < 1:
+    raise RuntimeError("MAX_CONCURRENT_JOBS must be at least 1")
 _job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 db_path = Path(os.environ.get("JOB_STORE_PATH", "jobs.db"))
@@ -292,7 +298,7 @@ async def _run_job(job_id: str, command: list[str]):
 
             except asyncio.CancelledError:
                 if _shutting_down:
-                    cleanup_err = await _best_effort_cleanup(oj)
+                    cleanup_err = await _best_effort_cleanup(oj, signal=True)
                     error = "Server shut down"
                     if cleanup_err:
                         error += f"; cleanup failed: {cleanup_err}"
@@ -330,7 +336,8 @@ async def _worker():
             row = job_store.get(job_id)
             if not row or row["status"] != JobStatus.QUEUED.value:
                 continue
-            asyncio.create_task(_run_job(job_id, command))
+            _background_tasks.add(task := asyncio.create_task(_run_job(job_id, command)))
+            task.add_done_callback(_background_tasks.discard)
 
 @router.get("/")
 async def read_root():
