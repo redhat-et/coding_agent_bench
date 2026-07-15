@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 
 _job_queue: list[tuple[str, list[str]]] = []
 _job_event = asyncio.Event()
-_active_job: tuple[str, asyncio.Task, OpenshiftJob] | None = None
+_active_jobs: dict[str, tuple[asyncio.Task, OpenshiftJob]] = {}
 _shutting_down = False
+
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "3"))
+_job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 db_path = Path(os.environ.get("JOB_STORE_PATH", "jobs.db"))
 
@@ -171,7 +174,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _shutting_down = True
     worker_task.cancel()
     cleanup_task.cancel()
-    for task in (worker_task, cleanup_task):
+    for _, (task, _oj) in list(_active_jobs.items()):
+        task.cancel()
+    all_tasks = [worker_task, cleanup_task] + [t for t, _ in _active_jobs.values()]
+    for task in all_tasks:
         try:
             await task
         except asyncio.CancelledError:
@@ -240,74 +246,82 @@ async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | 
 
 async def _run_job(job_id: str, command: list[str]):
     """Run and monitor an Openshift Job."""
-    global _active_job
 
     oj = OpenshiftJob(job_name=job_id)
     task = asyncio.current_task()
     assert task is not None
-    _active_job = (job_id, task, oj)
+    _active_jobs[job_id] = (task, oj)
 
     try:
-        job_spec = oj._job_spec(command)
-        await oj._run_oc_command(
-            ["apply", "-f", "-"],
-            stdin_data=json.dumps(job_spec).encode(),
-        )
-        await oj._wait_for_job_pod_ready()
-        job_store.update_status(job_id, JobStatus.RUNNING)
+        async with _job_semaphore:
+            try:
+                job_spec = oj._job_spec(command)
+                await oj._run_oc_command(
+                    ["apply", "-f", "-"],
+                    stdin_data=json.dumps(job_spec).encode(),
+                )
+                await oj._wait_for_job_pod_ready()
+                job_store.update_status(job_id, JobStatus.RUNNING)
 
-        while True:
-            stdout, _ = await oj._run_oc_command(
-                ["get", "pod", f"--selector=job-name={oj._pod_name}", "-o", "json"],
-                check=False,
-            )
-            if stdout:
-                pods = json.loads(stdout).get("items", [])
-                if pods:
-                    phase = pods[0].get("status", {}).get("phase", "")
-                    if phase == "Succeeded":
-                        cleanup_err = await _best_effort_cleanup(oj)
-                        job_store.update_status(
-                            job_id, JobStatus.COMPLETED,
-                            error=f"cleanup failed: {cleanup_err}" if cleanup_err else None,
-                        )
-                        return
-                    if phase in ("Failed", "Unknown", "Error"):
-                        reason = pods[0].get("status", {}).get("reason", "")
-                        message = pods[0].get("status", {}).get("message", "")
-                        cleanup_err = await _best_effort_cleanup(oj)
-                        error = f"{phase}: reason={reason}, message={message}"
-                        if cleanup_err:
-                            error += f"; cleanup failed: {cleanup_err}"
-                        job_store.update_status(job_id, JobStatus.FAILED, error=error)
-                        return
-            await asyncio.sleep(5)
+                while True:
+                    stdout, _ = await oj._run_oc_command(
+                        ["get", "pod", f"--selector=job-name={oj._pod_name}", "-o", "json"],
+                        check=False,
+                    )
+                    if stdout:
+                        pods = json.loads(stdout).get("items", [])
+                        if pods:
+                            phase = pods[0].get("status", {}).get("phase", "")
+                            if phase == "Succeeded":
+                                cleanup_err = await _best_effort_cleanup(oj)
+                                job_store.update_status(
+                                    job_id, JobStatus.COMPLETED,
+                                    error=f"cleanup failed: {cleanup_err}" if cleanup_err else None,
+                                )
+                                return
+                            if phase in ("Failed", "Unknown", "Error"):
+                                reason = pods[0].get("status", {}).get("reason", "")
+                                message = pods[0].get("status", {}).get("message", "")
+                                cleanup_err = await _best_effort_cleanup(oj)
+                                error = f"{phase}: reason={reason}, message={message}"
+                                if cleanup_err:
+                                    error += f"; cleanup failed: {cleanup_err}"
+                                job_store.update_status(job_id, JobStatus.FAILED, error=error)
+                                return
+                    await asyncio.sleep(5)
+
+            except asyncio.CancelledError:
+                if _shutting_down:
+                    cleanup_err = await _best_effort_cleanup(oj)
+                    error = "Server shut down"
+                    if cleanup_err:
+                        error += f"; cleanup failed: {cleanup_err}"
+                    job_store.update_status(job_id, JobStatus.FAILED, error=error)
+                    raise
+                cleanup_err = await _best_effort_cleanup(oj, signal=True)
+                error = f"cleanup failed: {cleanup_err}" if cleanup_err else None
+                job_store.update_status(job_id, JobStatus.CANCELLED, error=error)
+
+            except Exception as e:
+                cleanup_err = await _best_effort_cleanup(oj)
+                error = str(e)
+                if cleanup_err:
+                    error += f"; cleanup failed: {cleanup_err}"
+                job_store.update_status(job_id, JobStatus.FAILED, error=error)
 
     except asyncio.CancelledError:
         if _shutting_down:
-            cleanup_err = await _best_effort_cleanup(oj)
-            error = "Server shut down"
-            if cleanup_err:
-                error += f"; cleanup failed: {cleanup_err}"
-            job_store.update_status(job_id, JobStatus.FAILED, error=error)
+            job_store.update_status(job_id, JobStatus.FAILED, error="Server shut down")
             raise
-        cleanup_err = await _best_effort_cleanup(oj, signal=True)
-        error = f"cleanup failed: {cleanup_err}" if cleanup_err else None
-        job_store.update_status(job_id, JobStatus.CANCELLED, error=error)
-
-    except Exception as e:
-        cleanup_err = await _best_effort_cleanup(oj)
-        error = str(e)
-        if cleanup_err:
-            error += f"; cleanup failed: {cleanup_err}"
-        job_store.update_status(job_id, JobStatus.FAILED, error=error)
+        job_store.update_status(job_id, JobStatus.CANCELLED)
 
     finally:
-        _active_job = None
+        _active_jobs.pop(job_id, None)
+        _job_event.set()
 
 
 async def _worker():
-    """Process jobs from the queue one at a time."""
+    """Process jobs from the queue, up to MAX_CONCURRENT_JOBS at a time."""
     while True:
         await _job_event.wait()
         _job_event.clear()
@@ -316,7 +330,7 @@ async def _worker():
             row = job_store.get(job_id)
             if not row or row["status"] != JobStatus.QUEUED.value:
                 continue
-            await _run_job(job_id, command)
+            asyncio.create_task(_run_job(job_id, command))
 
 @router.get("/")
 async def read_root():
@@ -461,9 +475,10 @@ async def delete_job(job_id: str):
             return {"message": "Job cancelled", "job_id": job_id}
 
     # Cancel the actively running job
-    if _active_job and _active_job[0] == job_id:
+    active = _active_jobs.get(job_id)
+    if active:
         job_store.update_status(job_id, JobStatus.CANCELLING)
-        _active_job[1].cancel()
+        active[0].cancel()
         return {"message": "Job cancelling", "job_id": job_id}
 
     return {"message": "Job cancelled", "job_id": job_id}
