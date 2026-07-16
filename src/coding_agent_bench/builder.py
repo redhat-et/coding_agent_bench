@@ -42,6 +42,11 @@ class HarborCommandBuilder:
         # Add agent
         args += ["--agent", agent]
 
+        # Pin openclaw to last known working version (2026.7.1+ requires
+        # interactive onboarding that breaks headless/container runs)
+        if agent == "openclaw":
+            args += ["--ak", "version=2026.6.1"]
+
         # Add dataset
         if Path(dataset).exists():
             args += ["-p", dataset]
