@@ -30,6 +30,36 @@ class OpenshiftJob:
         self._job_name = job_name
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
 
+    def _resume_job_spec(self, shell_command: str) -> dict:
+        """Build a pod spec for a resume job with a raw shell command."""
+        return {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": self._pod_name, "labels": {"app": "harbor"}},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "serviceAccountName": "harbor-orchestrator",
+                        "volumes": [{"name": "jobs", "type": "emptyDir"}],
+                        "containers": [
+                            {
+                                "name": "harbor",
+                                "image": "ghcr.io/redhat-et/coding_agent_bench:latest",
+                                "imagePullPolicy": "Always",
+                                "command": ["sh", "-c"],
+                                "args": [shell_command],
+                                "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
+                                "envFrom": [
+                                    {"secretRef": {"name": "harbor-minio"}}
+                                ],
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
     def _job_spec(self, command: list[str], before_script: list[str] = None) -> dict:
         return {
             "apiVersion": "batch/v1",

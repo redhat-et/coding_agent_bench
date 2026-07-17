@@ -15,6 +15,7 @@ from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
 from coding_agent_bench.job import OpenshiftJob
 import json
 import os
+import shlex
 import sqlite3
 import uuid
 import html
@@ -48,6 +49,14 @@ class CreateJobRequest(BaseModel):
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
     model_max_len: int = Field(262000, description="Maximum model context length in tokens")
     before_script: Optional[str] = Field(None, description="Script to run before harbor job execution")
+
+
+class ResumeJobRequest(BaseModel):
+    filter_error_types: list[str] = Field(
+        default_factory=list,
+        description="Error types to retry (e.g. RuntimeError). Empty = retry all errors",
+    )
+    n_concurrent: Optional[int] = Field(None, description="Override concurrency for retry")
 
 
 class CreateJobResponse(BaseModel):
@@ -248,7 +257,11 @@ async def _run_job(job_id: str, command: list[str]):
     _active_job = (job_id, task, oj)
 
     try:
-        job_spec = oj._job_spec(command)
+        is_resume = len(command) == 3 and command[0] == "sh" and command[1] == "-c"
+        if is_resume:
+            job_spec = oj._resume_job_spec(command[2])
+        else:
+            job_spec = oj._job_spec(command)
         await oj._run_oc_command(
             ["apply", "-f", "-"],
             stdin_data=json.dumps(job_spec).encode(),
@@ -467,5 +480,47 @@ async def delete_job(job_id: str):
         return {"message": "Job cancelling", "job_id": job_id}
 
     return {"message": "Job cancelled", "job_id": job_id}
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
+    """Resume a completed/failed job by retrying errored tasks via harbor jobs resume."""
+    job_row = job_store.get(job_id)
+    if not job_row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job_row["status"] not in (JobStatus.COMPLETED.value, JobStatus.FAILED.value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only resume completed/failed jobs, got {job_row['status']}",
+        )
+
+    original_job_name = job_row["job_name"]
+    resume_job_id = str(uuid.uuid4())
+    resume_job_name = f"{original_job_name}--resume"
+
+    filter_flags = "".join(f" -f {shlex.quote(t)}" for t in req.filter_error_types)
+    concurrent_flag = f" --n-concurrent {req.n_concurrent}" if req.n_concurrent else ""
+
+    shell_command = (
+        "mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
+        f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ /app/jobs/{shlex.quote(original_job_name)}/"
+        f" && uv run --no-sync --no-cache harbor jobs resume -p /app/jobs/{shlex.quote(original_job_name)}{filter_flags}{concurrent_flag}"
+        f" ; mc cp --recursive /app/jobs/{shlex.quote(original_job_name)}/ minio/results/{shlex.quote(original_job_name)}/"
+    )
+
+    command = ["sh", "-c", shell_command]
+    job_store.insert(
+        resume_job_id, resume_job_name, job_row["agent"],
+        job_row["dataset"], job_row["model_name"], command,
+    )
+    _job_queue.append((resume_job_id, command))
+    _job_event.set()
+
+    return {
+        "message": "Resume job created",
+        "job_id": resume_job_id,
+        "job_name": resume_job_name,
+        "parent_job_id": job_id,
+    }
+
 
 app.include_router(router)
