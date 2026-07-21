@@ -534,6 +534,13 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
             "            with open(path, 'w') as f: f.write(content)",
             "            replaced += 1",
             "print(f'Replaced URL in {replaced} files')",
+            "# Regenerate Pi mount file with new URL",
+            "agent = c.get('agents', [{}])[0]",
+            "mounts = c.get('environment', {}).get('mounts', [])",
+            "for m in mounts:",
+            "    src, tgt = m.get('source',''), m.get('target','')",
+            f"    if agent.get('name') == 'pi' and 'models.json' in tgt: json.dump({{'providers': {{'vllm': {{'baseUrl': 'https://' + new_host + '/v1', 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{{'id': agent.get('model_name',''), 'name': agent.get('model_name',''), 'contextWindow': 262000}}]}}}}}}, open(src, 'w')); print('Regenerated Pi models.json')",
+            f"    if agent.get('name') == 'codex' and 'config.toml' in tgt: open(src, 'w').write('[api]\\nbase_url = \"https://' + new_host + '\"\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"' + agent.get('model_name','') + '\"\\n'); print('Regenerated Codex config.toml')",
         ]
         replace_script = "\n".join(replace_lines)
         url_replace_step = f" && python3 -c {shlex.quote(replace_script)}"
