@@ -19,6 +19,7 @@ import shlex
 import sqlite3
 import uuid
 import html
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -503,23 +504,66 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     filter_flags = "".join(f" -f {shlex.quote(t)}" for t in req.filter_error_types)
     job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
 
+    py_job_dir = f"/app/jobs/{original_job_name}"
+
     patch_steps = ""
-    if req.n_concurrent or req.server_url or req.model_name:
+    if req.n_concurrent or req.model_name:
+        py_config_path = json.dumps(f"{py_job_dir}/config.json")
         patch_script = "import json; "
-        patch_script += f"c = json.load(open('{job_dir}/config.json')); "
+        patch_script += f"c = json.load(open({py_config_path})); "
         if req.n_concurrent:
             patch_script += f"c['n_concurrent_trials'] = {req.n_concurrent}; "
-        if req.server_url:
-            url_literal = json.dumps(req.server_url.rstrip("/"))
-            patch_script += (
-                "envs = c.get('agents', [{}])[0].get('env', {}); "
-                f"[envs.__setitem__(k, {url_literal} + '/v1') for k in list(envs) if 'BASE_URL' in k]; "
-                f"[envs.__setitem__(k, {url_literal}) for k in list(envs) if k == 'ANTHROPIC_BASE_URL']; "
-            )
         if req.model_name:
             patch_script += f"c['agents'][0]['model_name'] = {json.dumps(req.model_name)}; "
-        patch_script += f"json.dump(c, open('{job_dir}/config.json', 'w'), indent=2)"
+        patch_script += f"json.dump(c, open({py_config_path}, 'w'), indent=2)"
         patch_steps = f" && python3 -c {shlex.quote(patch_script)}"
+
+    if req.server_url:
+        new_host = urlparse(req.server_url.rstrip("/")).netloc
+        new_domain = ".".join(new_host.rsplit(".", 2)[-2:])
+        replace_lines = [
+            "import os, json, re",
+            f"job_dir = {json.dumps(py_job_dir)}",
+            f"new_host = {json.dumps(new_host)}",
+            f"new_domain = {json.dumps(new_domain)}",
+            "config_path = os.path.join(job_dir, 'config.json')",
+            "if not os.path.exists(config_path): exit(0)",
+            "with open(config_path) as f: c = json.load(f)",
+            "envs = c.get('agents', [{}])[0].get('env', {})",
+            "hosts = set()",
+            "for v in envs.values():",
+            "    if not isinstance(v, str): continue",
+            "    for m in re.finditer('https?://([^\"\\\\s,}/]+)', v):",
+            "        hosts.add(m.group(1).split('/')[0])",
+            "hosts = [h for h in hosts if h != new_host and h.endswith(new_domain)]",
+            "if not hosts: exit(0)",
+            "for root, dirs, files in os.walk(job_dir):",
+            "    for file in files:",
+            "        if not file.endswith('.json'): continue",
+            "        path = os.path.join(root, file)",
+            "        with open(path, 'r') as f: content = f.read()",
+            "        for h in hosts: content = content.replace(h, new_host)",
+            "        with open(path, 'w') as f: f.write(content)",
+        ]
+        replace_script = "\n".join(replace_lines)
+        patch_steps += f" && python3 -c {shlex.quote(replace_script)}"
+
+        new_url = json.dumps(req.server_url.rstrip("/"))
+        mount_regen_lines = [
+            "import json",
+            f"c = json.load(open('{job_dir}/config.json'))",
+            "agent = c.get('agents', [{}])[0]",
+            "mounts = c.get('environment', {}).get('mounts', [])",
+            "name = agent.get('name', '')",
+            "for m in mounts:",
+            "    src, tgt = m.get('source',''), m.get('target','')",
+            "    if name == 'pi' and 'models.json' in tgt:",
+            f"        json.dump({{'providers': {{'vllm': {{'baseUrl': {new_url} + '/v1', 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{{'id': agent.get('model_name',''), 'name': agent.get('model_name',''), 'contextWindow': 262000}}]}}}}}}, open(src, 'w'))",
+            "    elif name == 'codex' and 'config.toml' in tgt:",
+            f"        open(src, 'w').write('[api]\\nbase_url = ' + {new_url} + '\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"' + agent.get('model_name','') + '\"\\n')",
+        ]
+        mount_regen_script = "\n".join(mount_regen_lines)
+        patch_steps += f" && python3 -c {shlex.quote(mount_regen_script)}"
 
     before_step = ""
     if req.before_script:
