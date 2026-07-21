@@ -57,10 +57,7 @@ class ResumeJobRequest(BaseModel):
         default_factory=list,
         description="Error types to retry (e.g. RuntimeError). Empty = retry all errors",
     )
-    n_concurrent: Optional[int] = Field(None, description="Override concurrency for retry")
-    server_url: Optional[str] = Field(None, description="Override model server URL")
-    model_name: Optional[str] = Field(None, description="Override model name")
-    before_script: Optional[str] = Field(None, description="Script to run before harbor resume")
+    server_url: Optional[str] = Field(None, description="New model server URL (replaces old URL across all job files)")
 
 
 class CreateJobResponse(BaseModel):
@@ -503,21 +500,9 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
 
     filter_flags = "".join(f" -f {shlex.quote(t)}" for t in req.filter_error_types)
     job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
-
     py_job_dir = f"/app/jobs/{original_job_name}"
 
-    patch_steps = ""
-    if req.n_concurrent or req.model_name:
-        py_config_path = json.dumps(f"{py_job_dir}/config.json")
-        patch_script = "import json; "
-        patch_script += f"c = json.load(open({py_config_path})); "
-        if req.n_concurrent:
-            patch_script += f"c['n_concurrent_trials'] = {req.n_concurrent}; "
-        if req.model_name:
-            patch_script += f"c['agents'][0]['model_name'] = {json.dumps(req.model_name)}; "
-        patch_script += f"json.dump(c, open({py_config_path}, 'w'), indent=2)"
-        patch_steps = f" && python3 -c {shlex.quote(patch_script)}"
-
+    url_replace_step = ""
     if req.server_url:
         new_host = urlparse(req.server_url.rstrip("/")).netloc
         new_domain = ".".join(new_host.rsplit(".", 2)[-2:])
@@ -537,78 +522,28 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
             "        hosts.add(m.group(1).split('/')[0])",
             "hosts = [h for h in hosts if h != new_host and h.endswith(new_domain)]",
             "if not hosts: exit(0)",
+            "replaced = 0",
             "for root, dirs, files in os.walk(job_dir):",
             "    for file in files:",
             "        if not file.endswith('.json'): continue",
             "        path = os.path.join(root, file)",
             "        with open(path, 'r') as f: content = f.read()",
+            "        orig = content",
             "        for h in hosts: content = content.replace(h, new_host)",
-            "        with open(path, 'w') as f: f.write(content)",
+            "        if content != orig:",
+            "            with open(path, 'w') as f: f.write(content)",
+            "            replaced += 1",
+            "print(f'Replaced URL in {replaced} files')",
         ]
         replace_script = "\n".join(replace_lines)
-        patch_steps += f" && python3 -c {shlex.quote(replace_script)}"
-
-        new_url = json.dumps(req.server_url.rstrip("/"))
-        mount_regen_lines = [
-            "import json",
-            f"c = json.load(open('{job_dir}/config.json'))",
-            "agent = c.get('agents', [{}])[0]",
-            "mounts = c.get('environment', {}).get('mounts', [])",
-            "name = agent.get('name', '')",
-            "for m in mounts:",
-            "    src, tgt = m.get('source',''), m.get('target','')",
-            "    if name == 'pi' and 'models.json' in tgt:",
-            f"        json.dump({{'providers': {{'vllm': {{'baseUrl': {new_url} + '/v1', 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{{'id': agent.get('model_name',''), 'name': agent.get('model_name',''), 'contextWindow': 262000}}]}}}}}}, open(src, 'w'))",
-            "    elif name == 'codex' and 'config.toml' in tgt:",
-            f"        open(src, 'w').write('[api]\\nbase_url = ' + {new_url} + '\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"' + agent.get('model_name','') + '\"\\n')",
-        ]
-        mount_regen_script = "\n".join(mount_regen_lines)
-        patch_steps += f" && python3 -c {shlex.quote(mount_regen_script)}"
-
-    # Pre-delete errored trial dirs so harbor resume sees them as missing and reruns them.
-    # Without this, repeated resumes are a no-op because harbor considers trials with
-    # result.json (even errored ones) as "completed" and skips them.
-    if req.filter_error_types:
-        filter_list = json.dumps(req.filter_error_types)
-    else:
-        filter_list = "None"
-    predelete_lines = [
-        "import json, shutil, os",
-        f"job_dir = {json.dumps(f'/app/jobs/{original_job_name}')}",
-        f"filter_types = {filter_list}",
-        "deleted = 0",
-        "for d in os.listdir(job_dir):",
-        "    trial_dir = os.path.join(job_dir, d)",
-        "    if not os.path.isdir(trial_dir): continue",
-        "    rf = os.path.join(trial_dir, 'result.json')",
-        "    if not os.path.isfile(rf): continue",
-        "    try: r = json.load(open(rf))",
-        "    except: continue",
-        "    exc = r.get('exception_info')",
-        "    if exc is None: continue",
-        "    etype = exc.get('exception_type', '')",
-        "    if filter_types is None or etype in filter_types:",
-        "        shutil.rmtree(trial_dir)",
-        "        deleted += 1",
-        "print(f'Pre-deleted {deleted} errored trial(s)')",
-    ]
-    predelete_script = "\n".join(predelete_lines)
-    predelete_step = f" && python3 -c {shlex.quote(predelete_script)}"
-
-    before_step = ""
-    if req.before_script:
-        before_step = f" && {req.before_script}"
+        url_replace_step = f" && python3 -c {shlex.quote(replace_script)}"
 
     shell_command = (
         "mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
         f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
-        f"{patch_steps}"
-        f"{predelete_step}"
-        f"{before_step}"
+        f"{url_replace_step}"
         f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
-        f" ; RESUME_EXIT=$?"
         f" ; mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
-        f" ; exit $RESUME_EXIT"
     )
 
     command = ["sh", "-c", shell_command]
