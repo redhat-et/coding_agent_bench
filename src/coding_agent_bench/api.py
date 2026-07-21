@@ -539,6 +539,23 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         )
         patch_steps += f" && {url_replace}"
 
+        new_url = json.dumps(req.server_url.rstrip("/"))
+        mount_regen_lines = [
+            "import json",
+            f"c = json.load(open('{job_dir}/config.json'))",
+            "agent = c.get('agents', [{}])[0]",
+            "mounts = c.get('environment', {}).get('mounts', [])",
+            "name = agent.get('name', '')",
+            "for m in mounts:",
+            "    src, tgt = m.get('source',''), m.get('target','')",
+            "    if name == 'pi' and 'models.json' in tgt:",
+            f"        json.dump({{'providers': {{'vllm': {{'baseUrl': {new_url} + '/v1', 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{{'id': agent.get('model_name',''), 'name': agent.get('model_name',''), 'contextWindow': 262000}}]}}}}}}, open(src, 'w'))",
+            "    elif name == 'codex' and 'config.toml' in tgt:",
+            f"        open(src, 'w').write('[api]\\nbase_url = ' + {new_url} + '\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"' + agent.get('model_name','') + '\"\\n')",
+        ]
+        mount_regen_script = "\n".join(mount_regen_lines)
+        patch_steps += f" && python3 -c {shlex.quote(mount_regen_script)}"
+
     before_step = ""
     if req.before_script:
         before_step = f" && {req.before_script}"
