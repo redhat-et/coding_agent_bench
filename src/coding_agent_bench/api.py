@@ -565,6 +565,36 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         mount_regen_script = "\n".join(mount_regen_lines)
         patch_steps += f" && python3 -c {shlex.quote(mount_regen_script)}"
 
+    # Pre-delete errored trial dirs so harbor resume sees them as missing and reruns them.
+    # Without this, repeated resumes are a no-op because harbor considers trials with
+    # result.json (even errored ones) as "completed" and skips them.
+    if req.filter_error_types:
+        filter_list = json.dumps(req.filter_error_types)
+    else:
+        filter_list = "None"
+    predelete_lines = [
+        "import json, shutil, os",
+        f"job_dir = {json.dumps(f'/app/jobs/{original_job_name}')}",
+        f"filter_types = {filter_list}",
+        "deleted = 0",
+        "for d in os.listdir(job_dir):",
+        "    trial_dir = os.path.join(job_dir, d)",
+        "    if not os.path.isdir(trial_dir): continue",
+        "    rf = os.path.join(trial_dir, 'result.json')",
+        "    if not os.path.isfile(rf): continue",
+        "    try: r = json.load(open(rf))",
+        "    except: continue",
+        "    exc = r.get('exception_info')",
+        "    if exc is None: continue",
+        "    etype = exc.get('exception_type', '')",
+        "    if filter_types is None or etype in filter_types:",
+        "        shutil.rmtree(trial_dir)",
+        "        deleted += 1",
+        "print(f'Pre-deleted {deleted} errored trial(s)')",
+    ]
+    predelete_script = "\n".join(predelete_lines)
+    predelete_step = f" && python3 -c {shlex.quote(predelete_script)}"
+
     before_step = ""
     if req.before_script:
         before_step = f" && {req.before_script}"
@@ -573,9 +603,12 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         "mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
         f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
         f"{patch_steps}"
+        f"{predelete_step}"
         f"{before_step}"
         f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
+        f" ; RESUME_EXIT=$?"
         f" ; mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
+        f" ; exit $RESUME_EXIT"
     )
 
     command = ["sh", "-c", shell_command]
