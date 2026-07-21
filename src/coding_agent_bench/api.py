@@ -57,6 +57,9 @@ class ResumeJobRequest(BaseModel):
         description="Error types to retry (e.g. RuntimeError). Empty = retry all errors",
     )
     n_concurrent: Optional[int] = Field(None, description="Override concurrency for retry")
+    server_url: Optional[str] = Field(None, description="Override model server URL")
+    model_name: Optional[str] = Field(None, description="Override model name")
+    before_script: Optional[str] = Field(None, description="Script to run before harbor resume")
 
 
 class CreateJobResponse(BaseModel):
@@ -498,13 +501,37 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     resume_job_name = f"{original_job_name}--resume"
 
     filter_flags = "".join(f" -f {shlex.quote(t)}" for t in req.filter_error_types)
-    concurrent_flag = f" --n-concurrent {req.n_concurrent}" if req.n_concurrent else ""
+    job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
+
+    patch_steps = ""
+    if req.n_concurrent or req.server_url or req.model_name:
+        patch_script = "import json; "
+        patch_script += f"c = json.load(open('{job_dir}/config.json')); "
+        if req.n_concurrent:
+            patch_script += f"c['n_concurrent_trials'] = {req.n_concurrent}; "
+        if req.server_url:
+            url_literal = json.dumps(req.server_url.rstrip("/"))
+            patch_script += (
+                "envs = c.get('agents', [{}])[0].get('env', {}); "
+                f"[envs.__setitem__(k, {url_literal} + '/v1') for k in list(envs) if 'BASE_URL' in k]; "
+                f"[envs.__setitem__(k, {url_literal}) for k in list(envs) if k == 'ANTHROPIC_BASE_URL']; "
+            )
+        if req.model_name:
+            patch_script += f"c['agents'][0]['model_name'] = {json.dumps(req.model_name)}; "
+        patch_script += f"json.dump(c, open('{job_dir}/config.json', 'w'), indent=2)"
+        patch_steps = f" && python3 -c {shlex.quote(patch_script)}"
+
+    before_step = ""
+    if req.before_script:
+        before_step = f" && {req.before_script}"
 
     shell_command = (
         "mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
-        f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ /app/jobs/{shlex.quote(original_job_name)}/"
-        f" && uv run --no-sync --no-cache harbor jobs resume -p /app/jobs/{shlex.quote(original_job_name)}{filter_flags}{concurrent_flag}"
-        f" ; mc cp --recursive /app/jobs/{shlex.quote(original_job_name)}/ minio/results/{shlex.quote(original_job_name)}/"
+        f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
+        f"{patch_steps}"
+        f"{before_step}"
+        f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
+        f" ; mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
     )
 
     command = ["sh", "-c", shell_command]
