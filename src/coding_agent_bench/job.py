@@ -49,6 +49,9 @@ class OpenshiftJob:
                                 "imagePullPolicy": "Always",
                                 "command": ["sh", "-c"],
                                 "args": [shell_command],
+                                "env": [
+                                    {"name": "HOME", "value": "/tmp"},
+                                ],
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-minio"}}
