@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 USER root
 
-RUN mkdir -p /app /home/harbor && chown 1001:1001 /app /home/harbor
+RUN mkdir -p /app /home/harbor/.cache && chown -R 1001:1001 /app /home/harbor
 WORKDIR /app
 ENV HOME=/home/harbor
 
