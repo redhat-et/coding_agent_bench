@@ -504,40 +504,49 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     filter_flags = "".join(f" -f {shlex.quote(t)}" for t in req.filter_error_types)
     job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
 
+    py_job_dir = f"/app/jobs/{original_job_name}"
+
     patch_steps = ""
     if req.n_concurrent or req.model_name:
+        py_config_path = json.dumps(f"{py_job_dir}/config.json")
         patch_script = "import json; "
-        patch_script += f"c = json.load(open('{job_dir}/config.json')); "
+        patch_script += f"c = json.load(open({py_config_path})); "
         if req.n_concurrent:
             patch_script += f"c['n_concurrent_trials'] = {req.n_concurrent}; "
         if req.model_name:
             patch_script += f"c['agents'][0]['model_name'] = {json.dumps(req.model_name)}; "
-        patch_script += f"json.dump(c, open('{job_dir}/config.json', 'w'), indent=2)"
+        patch_script += f"json.dump(c, open({py_config_path}, 'w'), indent=2)"
         patch_steps = f" && python3 -c {shlex.quote(patch_script)}"
 
     if req.server_url:
         new_host = urlparse(req.server_url.rstrip("/")).netloc
         new_domain = ".".join(new_host.rsplit(".", 2)[-2:])
-        extract_lines = [
-            "import json, re",
-            f"c = json.load(open('{job_dir}/config.json'))",
+        replace_lines = [
+            "import os, json, re",
+            f"job_dir = {json.dumps(py_job_dir)}",
+            f"new_host = {json.dumps(new_host)}",
+            f"new_domain = {json.dumps(new_domain)}",
+            "config_path = os.path.join(job_dir, 'config.json')",
+            "if not os.path.exists(config_path): exit(0)",
+            "with open(config_path) as f: c = json.load(f)",
             "envs = c.get('agents', [{}])[0].get('env', {})",
             "hosts = set()",
             "for v in envs.values():",
             "    if not isinstance(v, str): continue",
             "    for m in re.finditer('https?://([^\"\\\\s,}/]+)', v):",
             "        hosts.add(m.group(1).split('/')[0])",
-            f"print(' '.join(h for h in hosts if h != '{new_host}' and h.endswith('{new_domain}')))",
+            "hosts = [h for h in hosts if h != new_host and h.endswith(new_domain)]",
+            "if not hosts: exit(0)",
+            "for root, dirs, files in os.walk(job_dir):",
+            "    for file in files:",
+            "        if not file.endswith('.json'): continue",
+            "        path = os.path.join(root, file)",
+            "        with open(path, 'r') as f: content = f.read()",
+            "        for h in hosts: content = content.replace(h, new_host)",
+            "        with open(path, 'w') as f: f.write(content)",
         ]
-        extract_script = "\n".join(extract_lines)
-        url_replace = (
-            f"OLD_HOSTS=$(python3 -c {shlex.quote(extract_script)})"
-            f" && for H in $OLD_HOSTS; do"
-            f" find {job_dir} -name '*.json'"
-            f" -exec sed -i \"s|$H|{new_host}|g\" {{}} +;"
-            f" done"
-        )
-        patch_steps += f" && {url_replace}"
+        replace_script = "\n".join(replace_lines)
+        patch_steps += f" && python3 -c {shlex.quote(replace_script)}"
 
     before_step = ""
     if req.before_script:
