@@ -19,6 +19,7 @@ import shlex
 import sqlite3
 import uuid
 import html
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -504,22 +505,39 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
 
     patch_steps = ""
-    if req.n_concurrent or req.server_url or req.model_name:
+    if req.n_concurrent or req.model_name:
         patch_script = "import json; "
         patch_script += f"c = json.load(open('{job_dir}/config.json')); "
         if req.n_concurrent:
             patch_script += f"c['n_concurrent_trials'] = {req.n_concurrent}; "
-        if req.server_url:
-            url_literal = json.dumps(req.server_url.rstrip("/"))
-            patch_script += (
-                "envs = c.get('agents', [{}])[0].get('env', {}); "
-                f"[envs.__setitem__(k, {url_literal} + '/v1') for k in list(envs) if 'BASE_URL' in k]; "
-                f"[envs.__setitem__(k, {url_literal}) for k in list(envs) if k == 'ANTHROPIC_BASE_URL']; "
-            )
         if req.model_name:
             patch_script += f"c['agents'][0]['model_name'] = {json.dumps(req.model_name)}; "
         patch_script += f"json.dump(c, open('{job_dir}/config.json', 'w'), indent=2)"
         patch_steps = f" && python3 -c {shlex.quote(patch_script)}"
+
+    if req.server_url:
+        new_host = urlparse(req.server_url.rstrip("/")).netloc
+        new_domain = ".".join(new_host.rsplit(".", 2)[-2:])
+        extract_lines = [
+            "import json, re",
+            f"c = json.load(open('{job_dir}/config.json'))",
+            "envs = c.get('agents', [{}])[0].get('env', {})",
+            "hosts = set()",
+            "for v in envs.values():",
+            "    if not isinstance(v, str): continue",
+            "    for m in re.finditer('https?://([^\"\\\\s,}/]+)', v):",
+            "        hosts.add(m.group(1).split('/')[0])",
+            f"print(' '.join(h for h in hosts if h != '{new_host}' and h.endswith('{new_domain}')))",
+        ]
+        extract_script = "\n".join(extract_lines)
+        url_replace = (
+            f"OLD_HOSTS=$(python3 -c {shlex.quote(extract_script)})"
+            f" && for H in $OLD_HOSTS; do"
+            f" find {job_dir} -name '*.json'"
+            f" -exec sed -i \"s|$H|{new_host}|g\" {{}} +;"
+            f" done"
+        )
+        patch_steps += f" && {url_replace}"
 
     before_step = ""
     if req.before_script:
