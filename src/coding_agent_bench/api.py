@@ -521,19 +521,32 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
             "    for m in re.finditer('https?://([^\"\\\\s,}/]+)', v):",
             "        hosts.add(m.group(1).split('/')[0])",
             "hosts = [h for h in hosts if h != new_host and h.endswith(new_domain)]",
-            "if not hosts: exit(0)",
             "replaced = 0",
-            "for root, dirs, files in os.walk(job_dir):",
-            "    for file in files:",
-            "        if not file.endswith('.json'): continue",
-            "        path = os.path.join(root, file)",
-            "        with open(path, 'r') as f: content = f.read()",
-            "        orig = content",
-            "        for h in hosts: content = content.replace(h, new_host)",
-            "        if content != orig:",
-            "            with open(path, 'w') as f: f.write(content)",
-            "            replaced += 1",
+            "if hosts:",
+            "    for root, dirs, files in os.walk(job_dir):",
+            "        for file in files:",
+            "            if not file.endswith('.json'): continue",
+            "            path = os.path.join(root, file)",
+            "            with open(path, 'r') as f: content = f.read()",
+            "            orig = content",
+            "            for h in hosts: content = content.replace(h, new_host)",
+            "            if content != orig:",
+            "                with open(path, 'w') as f: f.write(content)",
+            "                replaced += 1",
             "print(f'Replaced URL in {replaced} files')",
+            "# Regenerate Pi/Codex mount files with new URL",
+            f"server_url = {json.dumps(req.server_url)}",
+            "agent = c.get('agents', [{}])[0]",
+            "model_name = agent.get('model_name', '')",
+            "mounts = c.get('environment', {}).get('mounts', [])",
+            "for m in mounts:",
+            "    src, tgt = m.get('source',''), m.get('target','')",
+            "    if agent.get('name') == 'pi' and 'models.json' in tgt:",
+            "        json.dump({'providers': {'vllm': {'baseUrl': server_url, 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{'id': model_name, 'name': model_name}]}}}, open(src, 'w'))",
+            "        print('Regenerated Pi models.json')",
+            "    if agent.get('name') == 'codex' and 'config.toml' in tgt:",
+            "        open(src, 'w').write(f'[api]\\nbase_url = \"{server_url}\"\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"{model_name}\"\\n')",
+            "        print('Regenerated Codex config.toml')",
         ]
         replace_script = "\n".join(replace_lines)
         url_replace_step = f" && python3 -c {shlex.quote(replace_script)}"
@@ -543,7 +556,8 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
         f"{url_replace_step}"
         f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
-        f" ; mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
+        f" ; mc rm --recursive --force minio/results/{shlex.quote(original_job_name)}/"
+        f" && mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
     )
 
     command = ["sh", "-c", shell_command]
