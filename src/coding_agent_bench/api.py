@@ -534,13 +534,19 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
             "                with open(path, 'w') as f: f.write(content)",
             "                replaced += 1",
             "print(f'Replaced URL in {replaced} files')",
-            "# Regenerate Pi mount file with new URL",
+            "# Regenerate Pi/Codex mount files with new URL",
+            f"server_url = {json.dumps(req.server_url)}",
             "agent = c.get('agents', [{}])[0]",
+            "model_name = agent.get('model_name', '')",
             "mounts = c.get('environment', {}).get('mounts', [])",
             "for m in mounts:",
             "    src, tgt = m.get('source',''), m.get('target','')",
-            f"    if agent.get('name') == 'pi' and 'models.json' in tgt: json.dump({{'providers': {{'vllm': {{'baseUrl': 'https://' + new_host + '/v1', 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{{'id': agent.get('model_name',''), 'name': agent.get('model_name',''), 'contextWindow': 262000}}]}}}}}}, open(src, 'w')); print('Regenerated Pi models.json')",
-            f"    if agent.get('name') == 'codex' and 'config.toml' in tgt: open(src, 'w').write('[api]\\nbase_url = \"https://' + new_host + '\"\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"' + agent.get('model_name','') + '\"\\n'); print('Regenerated Codex config.toml')",
+            "    if agent.get('name') == 'pi' and 'models.json' in tgt:",
+            "        json.dump({'providers': {'vllm': {'baseUrl': server_url, 'api': 'openai-completions', 'apiKey': 'NONE', 'models': [{'id': model_name, 'name': model_name}]}}}, open(src, 'w'))",
+            "        print('Regenerated Pi models.json')",
+            "    if agent.get('name') == 'codex' and 'config.toml' in tgt:",
+            "        open(src, 'w').write(f'[api]\\nbase_url = \"{server_url}\"\\napi_key = \"sk-no-key\"\\n[model]\\nmodel_id = \"{model_name}\"\\n')",
+            "        print('Regenerated Codex config.toml')",
         ]
         replace_script = "\n".join(replace_lines)
         url_replace_step = f" && python3 -c {shlex.quote(replace_script)}"
@@ -550,7 +556,8 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
         f"{url_replace_step}"
         f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
-        f" ; mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
+        f" ; mc rm --recursive --force minio/results/{shlex.quote(original_job_name)}/"
+        f" && mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
     )
 
     command = ["sh", "-c", shell_command]
