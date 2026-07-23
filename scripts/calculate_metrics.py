@@ -4,7 +4,7 @@ import argparse
 from pydantic import BaseModel, computed_field
 from datetime import datetime
 
-GPU_COST_USD_PER_SECOND = 4 / 3600
+DEFAULT_GPU_COST_USD_PER_HOUR = 4
 
 
 class Metrics(BaseModel):
@@ -52,6 +52,14 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("job_dir", type=Path)
     parser.add_argument("--num-gpus", type=int, default=None)
+    def _positive_float(value):
+        f = float(value)
+        import math
+        if f < 0 or not math.isfinite(f):  # reject negative, NaN, and inf
+            raise argparse.ArgumentTypeError(f"must be a non-negative number, got {value}")
+        return f
+    parser.add_argument("--gpu-cost-per-hour", type=_positive_float, default=DEFAULT_GPU_COST_USD_PER_HOUR,
+                        help=f"Cost per GPU per hour in USD (default: ${DEFAULT_GPU_COST_USD_PER_HOUR})")
     parser.add_argument("--report", action="store_true")
     args = parser.parse_args()
     return args
@@ -64,7 +72,7 @@ def determine_format(job_dir: Path):
     return "legacy"
 
 
-def compute_metrics_legacy(job_dir: Path, num_gpus: int = None):
+def compute_metrics_legacy(job_dir: Path, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
 
     job_result_path = job_dir / "result.json"
     job_result = json.loads(job_result_path.read_text())
@@ -138,7 +146,7 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int = None):
             raise ValueError(
                 "'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results."
             )
-        cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
+        cost = round(agent_time * gpu_cost_per_hour * num_gpus / n_concurrent / 3600, 2)
 
     metrics = Metrics(
         n_tasks=job_result["n_total_trials"],
@@ -155,7 +163,7 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int = None):
     return metrics
 
 
-def compute_metrics_latest(job_dir: Path, num_gpus: int = None):
+def compute_metrics_latest(job_dir: Path, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
 
     job_result_path = job_dir / "result.json"
     job_result = json.loads(job_result_path.read_text())
@@ -206,7 +214,7 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int = None):
             raise ValueError(
                 "'--num-gpus' must be specified when 'stats.cost_usd' is missing from job results."
             )
-        cost = round(agent_time * GPU_COST_USD_PER_SECOND * num_gpus / n_concurrent, 2)
+        cost = round(agent_time * gpu_cost_per_hour * num_gpus / n_concurrent / 3600, 2)
 
     metrics = Metrics(
         n_tasks=job_result["n_total_trials"],
@@ -228,7 +236,7 @@ def format_time(seconds: int):
     m, s = divmod(m, 60)
     return f"{h:02d}h {m:02d}m {s:02d}s"
 
-def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
+def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
     report_template_path = Path(__file__).parent / "templates" / "report_template.md"
     report_template = report_template_path.read_text()
     
@@ -255,7 +263,7 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None):
     agent_time = format_time(metrics.agent_time_seconds // n_concurrent)
     
     # Show GPU calculation
-    gpu_snippet = f"($4 / GPU / hr * {num_gpus} GPU * {agent_time})" if num_gpus else "" 
+    gpu_snippet = f"(${gpu_cost_per_hour} / GPU / hr * {num_gpus} GPU * {agent_time})" if num_gpus else ""
     
     # Create report
     report = report_template.format(
@@ -287,21 +295,22 @@ def main():
     args = parse_args()
     job_dir = args.job_dir
     num_gpus = args.num_gpus
+    gpu_cost_per_hour = args.gpu_cost_per_hour
 
     # Determine job format
     job_format = determine_format(job_dir)
 
     # Compute metrics
     if job_format == "legacy":
-        metrics = compute_metrics_legacy(job_dir, num_gpus)
+        metrics = compute_metrics_legacy(job_dir, num_gpus, gpu_cost_per_hour)
     elif job_format == "latest":
-        metrics = compute_metrics_latest(job_dir, num_gpus)
+        metrics = compute_metrics_latest(job_dir, num_gpus, gpu_cost_per_hour)
 
     print(metrics.model_dump_json(indent=4))
     
     # Create the job report
     if args.report:
-        create_job_report(job_dir, metrics, num_gpus)
+        create_job_report(job_dir, metrics, num_gpus, gpu_cost_per_hour)
 
 if __name__ == "__main__":
     main()
