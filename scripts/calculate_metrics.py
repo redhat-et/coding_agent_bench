@@ -52,7 +52,13 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("job_dir", type=Path)
     parser.add_argument("--num-gpus", type=int, default=None)
-    parser.add_argument("--gpu-cost-per-hour", type=float, default=DEFAULT_GPU_COST_USD_PER_HOUR,
+    def _positive_float(value):
+        f = float(value)
+        import math
+        if f < 0 or not math.isfinite(f):  # reject negative, NaN, and inf
+            raise argparse.ArgumentTypeError(f"must be a non-negative number, got {value}")
+        return f
+    parser.add_argument("--gpu-cost-per-hour", type=_positive_float, default=DEFAULT_GPU_COST_USD_PER_HOUR,
                         help=f"Cost per GPU per hour in USD (default: ${DEFAULT_GPU_COST_USD_PER_HOUR})")
     parser.add_argument("--report", action="store_true")
     args = parser.parse_args()
