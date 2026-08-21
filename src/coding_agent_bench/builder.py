@@ -20,6 +20,14 @@ class SupportedAgent(str, Enum):
 
 
 class HarborCommandBuilder:
+    DEFAULT_MAX_RETRIES = 1
+    DEFAULT_RETRY_INCLUDE = [
+        "AgentTimeoutError",
+        "NonZeroAgentExitCodeError",
+        "ApiRateLimitError",
+        "ApiUsageLimitError",
+    ]
+
     def __init__(self):
         self.jobs_dir = Path(os.getcwd()) / "jobs"
 
@@ -36,6 +44,8 @@ class HarborCommandBuilder:
         n_tasks: int = None,
         job_name: str = None,
         agent_version: str = None,
+        max_retries: int = None,
+        retry_include: list[str] = None,
         **kwargs,
     ) -> list[str]:
         args = []
@@ -92,6 +102,13 @@ class HarborCommandBuilder:
         if job_name is not None:
             args += ["--job-name", job_name]
 
+        # Add retry configuration
+        retries = max_retries if max_retries is not None else self.DEFAULT_MAX_RETRIES
+        includes = retry_include if retry_include is not None else self.DEFAULT_RETRY_INCLUDE
+        args += ["--max-retries", str(retries)]
+        for exc in includes:
+            args += ["--retry-include", exc]
+
         # Execute the job
         cmd = ["harbor", "run", "--debug", *args]
 
@@ -110,6 +127,8 @@ class HarborCommandBuilder:
         model_max_len: int = 262000,
         job_name: str = "default",
         agent_version: str = None,
+        max_retries: int = None,
+        retry_include: list[str] = None,
         **kwargs,
     ) -> tuple[list[str], Path]:
         """
@@ -142,6 +161,8 @@ class HarborCommandBuilder:
             n_tasks=n_tasks,
             job_name=job_name,
             agent_version=agent_version,
+            max_retries=max_retries,
+            retry_include=retry_include,
         )
 
         job_path = self.jobs_dir / job_name

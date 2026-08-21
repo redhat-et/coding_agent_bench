@@ -51,6 +51,12 @@ def run(
     agent_version: Annotated[
         Optional[str], typer.Option(help="Pin agent to a specific version (overrides agent_versions.toml)")
     ] = None,
+    max_retries: Annotated[
+        Optional[int], typer.Option(help="Max retry attempts per task (default: 1)")
+    ] = None,
+    retry_include: Annotated[
+        Optional[list[str]], typer.Option(help="Error types to retry (repeatable)")
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
@@ -100,6 +106,8 @@ def run(
             model_max_len=model_max_len,
             job_name=job_name,
             agent_version=agent_version,
+            max_retries=max_retries,
+            retry_include=retry_include,
         )
         typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
 

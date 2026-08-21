@@ -241,6 +241,8 @@ class CreateJobRequest(BaseModel):
     model_max_len: int = Field(262000, description="Maximum model context length in tokens")
     before_script: Optional[str] = Field(None, description="Script to run before harbor job execution")
     agent_version: Optional[str] = Field(None, description="Pin agent to a specific version (overrides default)")
+    max_retries: Optional[int] = Field(None, description="Max retry attempts per task (default: 1)")
+    retry_include: Optional[list[str]] = Field(None, description="Error types to retry (default: AgentTimeoutError, NonZeroAgentExitCodeError, ApiRateLimitError, ApiUsageLimitError)")
 
 
 class ResumeJobRequest(BaseModel):
@@ -746,6 +748,11 @@ def build_cli_command(req: CreateJobRequest):
         command += ["--before-script", req.before_script]
     if req.agent_version:
         command += ["--agent-version", req.agent_version]
+    if req.max_retries is not None:
+        command += ["--max-retries", str(req.max_retries)]
+    if req.retry_include is not None:
+        for exc in req.retry_include:
+            command += ["--retry-include", exc]
 
     return command
 
