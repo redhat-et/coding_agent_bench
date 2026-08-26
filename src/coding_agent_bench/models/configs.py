@@ -1,5 +1,19 @@
 from coding_agent_bench.models.base import ModelConfig
+
+class Qwen_Qwen3_8_27B(ModelConfig):
     
+    name = "Qwen/Qwen3.8-27B"
+    model_max_len = 262144
+    args = [
+        "--model", "Qwen/Qwen3.8-27B" ,
+        "--max-model-len", "262144" ,
+        "--kv-cache-dtype", "fp8" ,
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "qwen3_coder" ,
+        "--reasoning-parser", "qwen3" ,
+        "--mm-encoder-tp-mode", "data",
+    ]
+
 class RedHatAI_gemma_4_31B_it_FP8_block(ModelConfig):
     
     name = "RedHatAI/gemma-4-31B-it-FP8-block"
