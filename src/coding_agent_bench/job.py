@@ -30,7 +30,22 @@ class OpenshiftJob:
         self._job_name = job_name
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
 
-    def _resume_job_spec(self, shell_command: str) -> dict:
+    @staticmethod
+    def _env_from(include_openai: bool) -> list[dict]:
+        env_from = [{"secretRef": {"name": "harbor-minio"}}]
+        if include_openai:
+            env_from.append(
+                {
+                    "secretRef": {
+                        "name": "openai-api-key",
+                    }
+                }
+            )
+        return env_from
+
+    def _resume_job_spec(
+        self, shell_command: str, include_openai: bool = False
+    ) -> dict:
         """Build a pod spec for a resume job with a raw shell command."""
         return {
             "apiVersion": "batch/v1",
@@ -53,9 +68,7 @@ class OpenshiftJob:
                                     {"name": "HOME", "value": "/tmp"},
                                 ],
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
-                                "envFrom": [
-                                    {"secretRef": {"name": "harbor-minio"}}
-                                ],
+                                "envFrom": self._env_from(include_openai),
                             }
                         ],
                     }
@@ -63,7 +76,12 @@ class OpenshiftJob:
             },
         }
 
-    def _job_spec(self, command: list[str], before_script: list[str] = None) -> dict:
+    def _job_spec(
+        self,
+        command: list[str],
+        before_script: list[str] = None,
+        include_openai: bool = False,
+    ) -> dict:
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -89,9 +107,7 @@ class OpenshiftJob:
                                     + " && mc cp --recursive /app/jobs/ minio/results/"
                                 ],
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
-                                "envFrom": [
-                                    {"secretRef": {"name": "harbor-minio"}}
-                                ],
+                                "envFrom": self._env_from(include_openai),
                             }
                         ],
                     }
@@ -278,7 +294,11 @@ class OpenshiftJob:
         )
 
     async def run_async(self, command: list[str], before_script: list[str] = None):
-        job_spec = self._job_spec(command, before_script)
+        include_openai = any(
+            command[index:index + 2] == ["--model-provider", "openai"]
+            for index in range(len(command) - 1)
+        ) or "--model-provider=openai" in command
+        job_spec = self._job_spec(command, before_script, include_openai)
         job_json = json.dumps(job_spec)
 
         try:

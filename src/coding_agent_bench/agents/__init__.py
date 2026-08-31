@@ -1,4 +1,4 @@
-from coding_agent_bench.agents.base import AgentConfig
+from coding_agent_bench.agents.base import AgentConfig, ModelProvider
 from coding_agent_bench.agents.configs import (
     ClaudeCodeAgentConfig,
     CodexAgentConfig,
@@ -28,3 +28,11 @@ def get_agent_config(name: str) -> AgentConfig:
             f"Unsupported agent type '{name}'. Choose from: {list(AGENT_REGISTRY.keys())}"
         )
     return config
+
+
+__all__ = [
+    "AGENT_CONFIGS",
+    "AGENT_REGISTRY",
+    "ModelProvider",
+    "get_agent_config",
+]

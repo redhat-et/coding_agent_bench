@@ -126,6 +126,26 @@ uv run coding-agent-bench run \
     --server-url <server-url>
 ```
 
+OpenAI-compatible endpoints are the default provider and require
+`--server-url`. To use OpenAI directly, set `OPENAI_API_KEY`, select the
+`openai` provider, and omit `--server-url`:
+
+```sh
+export OPENAI_API_KEY=<your-openai-api-key>
+uv run coding-agent-bench run \
+    --agent codex \
+    --dataset scale-ai/swe-bench-pro \
+    --model-name gpt-5 \
+    --model-provider openai
+```
+
+Native OpenAI is supported by Codex, OpenClaw, OpenCode, and Pi. Claude Code
+does not support OpenAI, and Oracle does not use a model provider. The key must
+be visible to the process launching Harbor; do not pass it through Harbor's
+`--ae` option because that would serialize the credential into job metadata.
+`--model-max-len` only configures OpenAI-compatible endpoints; native OpenAI
+uses each agent's built-in model metadata.
+
 For example, to run `swe-bench/swe-bench-verified` in Claude Code against a self-hosted model:
 
 ```sh
@@ -192,7 +212,21 @@ sequenceDiagram
       API_KEY: <your-api-key>
     type: Opaque
     ```
-5. Create the queue service:
+5. To run jobs against OpenAI, create an `openai-api-key` secret. This is not
+   required for OpenAI-compatible endpoints:
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: openai-api-key
+    stringData:
+      OPENAI_API_KEY: <your-openai-api-key>
+    type: Opaque
+    ```
+    ```sh
+    oc apply -f openai-api-key.yml
+    ```
+6. Create the queue service:
     ```sh
     oc apply -f deploy/job-queue-service.yml
     ```
@@ -216,6 +250,13 @@ Queue up a new benchmark task:
 
 ```sh
 curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "test", "agent": "pi", "dataset": "swe-bench/swe-bench-verified", "model_name": "qwen3.6-27b", "server_url": "<server-url>", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
+```
+
+For OpenAI, select the provider and omit `server_url`. The queue service reads
+the credential from the `openai-api-key` secret:
+
+```sh
+curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "openai-test", "agent": "codex", "dataset": "swe-bench/swe-bench-verified", "model_name": "gpt-5", "model_provider": "openai", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
 ```
 
 ```json

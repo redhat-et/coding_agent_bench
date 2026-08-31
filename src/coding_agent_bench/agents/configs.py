@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
+from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult, ModelProvider
 from coding_agent_bench.helpers.codex import codex_create_toml
 
 
@@ -11,8 +11,10 @@ class OracleAgentConfig(AgentConfig):
 
     name = "oracle"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
-        return AgentConfigResult(model=kwargs["model_name"])
+    def configure(
+        self, model_provider: ModelProvider, model_name: str, **kwargs
+    ) -> AgentConfigResult:
+        return AgentConfigResult(model=model_name)
 
 
 class ClaudeCodeAgentConfig(AgentConfig):
@@ -20,8 +22,9 @@ class ClaudeCodeAgentConfig(AgentConfig):
 
     name = "claude-code"
     version = "2.1.220"
+    supported_model_providers = frozenset({ModelProvider.OPENAI_COMPATIBLE})
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         agent_env = {
@@ -41,7 +44,7 @@ class CodexAgentConfig(AgentConfig):
     name = "codex"
     version = "0.145.0"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
 
@@ -63,6 +66,12 @@ class CodexAgentConfig(AgentConfig):
             mounts=mounts,
         )
 
+    def _configure_openai(self, **kwargs) -> AgentConfigResult:
+        return AgentConfigResult(
+            model="openai/" + kwargs["model_name"],
+            required_host_env=("OPENAI_API_KEY",),
+        )
+
 
 class OpenClawAgentConfig(AgentConfig):
     """OpenClaw agent. Configures OpenAI-compatible API env vars."""
@@ -70,7 +79,7 @@ class OpenClawAgentConfig(AgentConfig):
     name = "openclaw"
     version = "2026.6.1"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         agent_env = {
@@ -79,6 +88,12 @@ class OpenClawAgentConfig(AgentConfig):
         }
         return AgentConfigResult(model="vllm/" + model_name, agent_env=agent_env)
 
+    def _configure_openai(self, **kwargs) -> AgentConfigResult:
+        return AgentConfigResult(
+            model="openai/" + kwargs["model_name"],
+            required_host_env=("OPENAI_API_KEY",),
+        )
+
 
 class OpenCodeAgentConfig(AgentConfig):
     """OpenCode agent. Builds a JSON config with vLLM provider and context/output limits."""
@@ -86,7 +101,7 @@ class OpenCodeAgentConfig(AgentConfig):
     name = "opencode"
     version = "1.18.1"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
@@ -117,13 +132,19 @@ class OpenCodeAgentConfig(AgentConfig):
         }
         return AgentConfigResult(model=model, agent_env=agent_env)
 
+    def _configure_openai(self, **kwargs) -> AgentConfigResult:
+        return AgentConfigResult(
+            model="openai/" + kwargs["model_name"],
+            required_host_env=("OPENAI_API_KEY",),
+        )
+
 
 class OpenHandsSdkAgentConfig(AgentConfig):
     """OpenHands agent. Sets environment variables for a vLLM provider."""
     
     name = "openhands-sdk"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
 
@@ -146,7 +167,7 @@ class PiAgentConfig(AgentConfig):
     name = "pi"
     version = "0.73.1"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
@@ -183,3 +204,9 @@ class PiAgentConfig(AgentConfig):
 
         agent_env = {"PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": "/root/.pi/agent"}
         return AgentConfigResult(model="vllm/" + model_name, agent_env=agent_env, mounts=mounts)
+
+    def _configure_openai(self, **kwargs) -> AgentConfigResult:
+        return AgentConfigResult(
+            model="openai/" + kwargs["model_name"],
+            required_host_env=("OPENAI_API_KEY",),
+        )
