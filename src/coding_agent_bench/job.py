@@ -37,6 +37,7 @@ class OpenshiftJob:
             "kind": "Job",
             "metadata": {"name": self._pod_name, "labels": {"app": "harbor"}},
             "spec": {
+                "backoffLimit": 0,
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
@@ -51,6 +52,7 @@ class OpenshiftJob:
                                 "args": [shell_command],
                                 "env": [
                                     {"name": "HOME", "value": "/tmp"},
+                                    {"name": "HARBOR_PARENT", "value": self._pod_name},
                                 ],
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
@@ -90,6 +92,7 @@ class OpenshiftJob:
             "kind": "Job",
             "metadata": {"name": self._pod_name, "labels": {"app": "harbor"}},
             "spec": {
+                "backoffLimit": 0,
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
@@ -113,6 +116,9 @@ class OpenshiftJob:
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-minio"}}
+                                ],
+                                "env": [
+                                    {"name": "HARBOR_PARENT", "value": self._pod_name},
                                 ],
                             }
                         ],
@@ -144,7 +150,7 @@ class OpenshiftJob:
                 )
             else:
                 stdout_bytes, stderr_bytes = await process.communicate(input=stdin_data)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             process.terminate()
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -153,10 +159,9 @@ class OpenshiftJob:
             except asyncio.TimeoutError:
                 process.kill()
                 stdout_bytes, stderr_bytes = await process.communicate()
-            raise RuntimeError(
-                f"oc command timed out after {timeout_sec} seconds: "
-                f"{' '.join(full_command)}"
-            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise RuntimeError(f"oc command timed out after {timeout_sec} seconds: {' '.join(full_command)}")
 
         stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else None
         stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else None
@@ -171,6 +176,24 @@ class OpenshiftJob:
             )
 
         return stdout, stderr
+
+    async def _get_job(self) -> dict | None:
+        """Return the OpenShift Job resource, or None when it does not exist."""
+        try:
+            stdout, _ = await self._run_oc_command(
+                ["get", f"job/{self._pod_name}", "-o", "json"],
+                timeout_sec=30,
+            )
+        except RuntimeError as exc:
+            if "notfound" in str(exc).lower() or "not found" in str(exc).lower():
+                return None
+            raise
+        if not stdout:
+            raise RuntimeError(f"oc returned no data for job/{self._pod_name}")
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"oc returned invalid JSON for job/{self._pod_name}") from exc
 
     async def _signal_job_pod(self) -> None:
         """Send SIGTERM to the harbor process inside the job pod so it
