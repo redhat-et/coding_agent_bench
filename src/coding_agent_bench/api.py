@@ -208,8 +208,7 @@ class NebiusOrchestrator:
         """Restore tracking for the deterministic instance used by a running job."""
         instance_name = self._pick_instance_name()
         if not await self._manager.instance_exists(instance_name):
-            logger.warning(f"Nebius instance {instance_name} is missing for recovered job")
-            return instance_name
+            raise RuntimeError(f"Nebius instance {instance_name} is missing for recovered job")
         self._instances[instance_name] = NebiusInstanceState(
             instance_name=instance_name,
             gpu_config=gpu_config,
@@ -217,6 +216,15 @@ class NebiusOrchestrator:
             job_running=True,
         )
         return instance_name
+
+    async def delete_recovered_instance(self) -> None:
+        """Delete the deterministic VM left behind by an interrupted terminal transition."""
+        async with self._lock:
+            instance_name = self._pick_instance_name()
+            if await self._manager.instance_exists(instance_name):
+                logger.info(f"Deleting recovered nebius instance {instance_name}")
+                await self._manager.delete_instance(instance_name)
+            self._instances.pop(instance_name, None)
 
     async def idle_cleanup_loop(self):
         """Periodically delete idle instances and evict stale entries."""
@@ -428,7 +436,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         background_tasks.append(asyncio.create_task(_nebius.idle_cleanup_loop()))
         logger.info("Nebius orchestrator initialized")
 
-    await _restore_jobs()
+    has_recoverable_nebius = await _restore_jobs()
+    if _nebius is not None and not has_recoverable_nebius:
+        background_tasks.append(asyncio.create_task(_delete_recovered_nebius("startup")))
     worker_task = asyncio.create_task(_worker())
     cleanup_task = asyncio.create_task(_build_pod_cleanup_loop())
     yield
@@ -567,55 +577,43 @@ async def _retry_terminal_job(
         await asyncio.sleep(5)
 
 
-async def _restore_jobs() -> None:
-    """Rebuild the in-memory dispatcher state from SQLite and OpenShift."""
-    recovered: list[QueuedJob] = []
-    waiting: list[QueuedJob] = []
+async def _delete_recovered_nebius(job_id: str) -> None:
+    """Retry deletion so a recovered terminal transition cannot leak its VM."""
+    assert _nebius is not None
+    while True:
+        try:
+            await _nebius.delete_recovered_instance()
+            return
+        except Exception:
+            logger.exception(f"Unable to delete recovered Nebius instance for {job_id}; retrying")
+            await asyncio.sleep(5)
+
+
+async def _restore_jobs() -> bool:
+    """Rebuild the dispatcher without making startup depend on OpenShift."""
     _job_event.clear()
+    _job_queue.clear()
+    has_recoverable_nebius = False
     for row in job_store.list_recoverable():
-        job_id = row["job_id"]
-        queued = QueuedJob(
-            job_id,
+        has_recoverable_nebius |= _parse_nebius_url(row["server_url"]) is not None
+        _job_queue.append(QueuedJob(
+            row["job_id"],
             json.loads(row["command"]),
             row["server_url"],
             row["model_name"],
-        )
-        oj = OpenshiftJob(job_name=job_id)
-        existing = await oj._get_job()
-
-        if row["status"] in (JobStatus.COMPLETING.value, JobStatus.FAILING.value):
-            final_status = JobStatus.COMPLETED if row["status"] == JobStatus.COMPLETING.value else JobStatus.FAILED
-            if not await _finish_terminal_job(job_id, oj, final_status, error=row["error"]):
-                raise RuntimeError(f"Terminal cleanup is still pending for {job_id}")
-        elif row["status"] == JobStatus.CANCELLING.value:
-            if not await _finish_cancellation(job_id, oj, signal=existing is not None):
-                raise RuntimeError(f"Cancellation cleanup is still pending for {job_id}")
-        elif existing is not None:
-            recovered.append(queued._replace(adopt_existing=True))
-        elif row["status"] == JobStatus.RUNNING.value:
-            if not await _finish_terminal_job(
-                job_id,
-                oj,
-                JobStatus.FAILED,
-                error="OpenShift Job missing after server restart",
-            ):
-                raise RuntimeError(f"Missing workload cleanup is still pending for {job_id}")
-        else:
-            waiting.append(queued)
-
-    _job_queue.clear()
-    _job_queue.extend(recovered)
-    _job_queue.extend(waiting)
+            adopt_existing=True,
+        ))
     if _job_queue:
-        logger.info(f"Recovered {len(recovered)} active and {len(waiting)} queued jobs")
+        logger.info(f"Recovered {len(_job_queue)} non-terminal jobs")
         _job_event.set()
+    return has_recoverable_nebius
 
 
 async def _run_job(job_id: str, command: list[str], adopt_existing: bool = False, openrouter: bool = False):
     """Run and monitor an Openshift Job."""
     global _active_job
 
-    oj = OpenshiftJob(job_name=job_id)
+    oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
     task = asyncio.current_task()
     assert task is not None
     _active_job = (job_id, task, oj)
@@ -633,8 +631,23 @@ async def _run_job(job_id: str, command: list[str], adopt_existing: bool = False
             )
             job_store.update_status(job_id, JobStatus.RUNNING)
             await oj._wait_for_job_pod_ready()
-        elif job_store.get(job_id)["status"] == JobStatus.QUEUED.value:
-            job_store.update_status(job_id, JobStatus.RUNNING)
+        else:
+            if job_store.get(job_id)["status"] == JobStatus.QUEUED.value:
+                job_store.update_status(job_id, JobStatus.RUNNING)
+            while True:
+                try:
+                    existing = await oj._get_job()
+                    break
+                except Exception:
+                    logger.exception(f"Unable to inspect recovered OpenShift Job {job_id}; retrying")
+                    await asyncio.sleep(5)
+            conditions = {
+                condition.get("type")
+                for condition in (existing or {}).get("status", {}).get("conditions", [])
+                if condition.get("status") == "True"
+            }
+            if not conditions.intersection({"Complete", "Failed"}):
+                await oj._wait_for_job_pod_ready()
 
         consecutive_missing = 0
         max_missing = 6  # 6 polls × 5s = 30s before declaring pod gone
@@ -723,18 +736,63 @@ async def _process_queued_job(queued: QueuedJob) -> None:
     job_id, command, server_url, model_name, adopt_existing = queued
     task = asyncio.current_task()
     assert task is not None
-    oj = OpenshiftJob(job_name=job_id)
+    oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
     _active_job = (job_id, task, oj)
 
     model_config: ModelConfig | None = None
     nebius_instance_name: str | None = None
     try:
         nebius_gpu_config = _parse_nebius_url(server_url)
+        row = job_store.get(job_id)
+        if not row:
+            return
+
+        if row["status"] in (JobStatus.COMPLETING.value, JobStatus.FAILING.value):
+            final_status = JobStatus.COMPLETED if row["status"] == JobStatus.COMPLETING.value else JobStatus.FAILED
+            if nebius_gpu_config is not None and _nebius:
+                await _delete_recovered_nebius(job_id)
+            await _retry_terminal_job(job_id, oj, final_status, error=row["error"])
+            return
+
+        if row["status"] == JobStatus.CANCELLING.value:
+            if nebius_gpu_config is not None and _nebius:
+                await _delete_recovered_nebius(job_id)
+            await _retry_cancellation(job_id, oj)
+            return
+
+        if adopt_existing:
+            while True:
+                try:
+                    existing = await oj._get_job()
+                    break
+                except Exception:
+                    logger.exception(f"Unable to reconcile recovered OpenShift Job {job_id}; retrying")
+                    await asyncio.sleep(5)
+            if existing is None:
+                if row["status"] == JobStatus.RUNNING.value:
+                    if nebius_gpu_config is not None and _nebius:
+                        await _delete_recovered_nebius(job_id)
+                    await _retry_terminal_job(
+                        job_id,
+                        oj,
+                        JobStatus.FAILED,
+                        error="OpenShift Job missing after server restart",
+                    )
+                    return
+                adopt_existing = False
+
         if adopt_existing and nebius_gpu_config is not None and _nebius:
             try:
                 nebius_instance_name = await _nebius.adopt_running_instance(model_name, nebius_gpu_config)
-            except Exception:
+            except Exception as e:
                 logger.exception(f"Failed to restore Nebius tracking for job {job_id}")
+                await _retry_terminal_job(
+                    job_id,
+                    oj,
+                    JobStatus.FAILED,
+                    error=str(e),
+                )
+                return
         elif nebius_gpu_config is not None and _nebius:
             try:
                 nebius_instance_name, real_url = await _nebius.acquire_instance(model_name, gpu_config=nebius_gpu_config)
@@ -769,6 +827,8 @@ async def _process_queued_job(queued: QueuedJob) -> None:
     except asyncio.CancelledError:
         if _shutting_down:
             raise
+        if _parse_nebius_url(server_url) is not None and _nebius:
+            await _delete_recovered_nebius(job_id)
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
     finally:
@@ -787,19 +847,29 @@ async def _worker():
             _reorder_queue_for_nebius()
             job_id, command, server_url, model_name, adopt_existing = _job_queue.pop(0)
             row = job_store.get(job_id)
-            recoverable_statuses = (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
+            recoverable_statuses = (
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
+                JobStatus.COMPLETING.value,
+                JobStatus.FAILING.value,
+                JobStatus.CANCELLING.value,
+            )
             if not row or (adopt_existing and row["status"] not in recoverable_statuses):
                 continue
             if not adopt_existing and row["status"] != JobStatus.QUEUED.value:
                 continue
             processing_task = asyncio.create_task(_process_queued_job(QueuedJob(job_id, command, server_url, model_name, adopt_existing)))
-            _active_job = (job_id, processing_task, OpenshiftJob(job_name=job_id))
+            _active_job = (
+                job_id,
+                processing_task,
+                OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing),
+            )
             try:
                 await processing_task
             except asyncio.CancelledError:
                 if _shutting_down:
                     raise
-                oj = OpenshiftJob(job_name=job_id)
+                oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
                 if not await _finish_cancellation(job_id, oj, signal=False):
                     await _retry_cancellation(job_id, oj)
             finally:
@@ -830,7 +900,12 @@ async def ui():
             rows = f'<tr><td colspan="{len(columns)}">No jobs</td></tr>'
         return f"<h2>{title}</h2><table><tr>{header}</tr>{rows}</table>"
 
-    running = job_store.list(JobStatus.RUNNING) + job_store.list(JobStatus.CANCELLING)
+    running = (
+        job_store.list(JobStatus.RUNNING)
+        + job_store.list(JobStatus.COMPLETING)
+        + job_store.list(JobStatus.FAILING)
+        + job_store.list(JobStatus.CANCELLING)
+    )
     queued = job_store.list(JobStatus.QUEUED)
     completed = job_store.list(JobStatus.COMPLETED) + job_store.list(JobStatus.FAILED) + job_store.list(JobStatus.CANCELLED)
     completed.reverse()
@@ -1046,6 +1121,9 @@ async def delete_job(job_id: str):
     if not job_row:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    if job_row["status"] == JobStatus.CANCELLING.value:
+        return {"message": "Job cancelling", "job_id": job_id}
+
     if job_row["status"] in (
         JobStatus.COMPLETING,
         JobStatus.COMPLETED,
@@ -1055,12 +1133,23 @@ async def delete_job(job_id: str):
     ):
         raise HTTPException(status_code=400, detail=f"Job already {job_row['status']}")
 
-    # Remove from queue if still waiting
+    # Remove from the queue only when the persisted job has never started.
     for i, queued in enumerate(_job_queue):
         if queued.job_id == job_id:
-            _job_queue.pop(i)
-            job_store.update_status(job_id, JobStatus.CANCELLED)
-            return {"message": "Job cancelled", "job_id": job_id}
+            if (
+                job_row["status"] == JobStatus.QUEUED.value
+                and not queued.adopt_existing
+            ):
+                _job_queue.pop(i)
+                job_store.update_status(job_id, JobStatus.CANCELLED)
+                return {"message": "Job cancelled", "job_id": job_id}
+            if job_row["status"] in (
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
+            ):
+                job_store.update_status(job_id, JobStatus.CANCELLING)
+            _job_event.set()
+            return {"message": "Job cancelling", "job_id": job_id}
 
     # Cancel the actively running job
     if _active_job and _active_job[0] == job_id:
@@ -1120,6 +1209,20 @@ def _build_url_replace_shell_step(server_url: str, py_job_dir: str) -> str:
     return f" && python3 -c {shlex.quote(replace_script)}"
 
 
+def _build_parent_env_shell_step(py_job_dir: str) -> str:
+    """Update a resumed Harbor config so new task pods retain parent ownership."""
+    lines = [
+        "import json, os",
+        f"path = {json.dumps(f'{py_job_dir}/config.json')}",
+        "with open(path) as f: config = json.load(f)",
+        "kwargs = config.setdefault('environment', {}).setdefault('kwargs', {})",
+        "env = kwargs.setdefault('persistent_env', {})",
+        "env['HARBOR_PARENT'] = os.environ['HARBOR_PARENT']",
+        "with open(path, 'w') as f: json.dump(config, f)",
+    ]
+    return f" && python3 -c {shlex.quote(chr(10).join(lines))}"
+
+
 @router.post("/jobs/{job_id}/resume")
 async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     """Resume a completed/failed job by retrying errored tasks via harbor jobs resume."""
@@ -1165,6 +1268,7 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     shell_command = (
         "mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
         f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
+        f"{_build_parent_env_shell_step(py_job_dir)}"
         f"{url_replace_step}"
         f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
         f" ; mc rm --recursive --force minio/results/{shlex.quote(original_job_name)}/"

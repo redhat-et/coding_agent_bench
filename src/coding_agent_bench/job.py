@@ -26,9 +26,10 @@ class OpenshiftJob:
                 "Please run 'oc login' and try again."
             )
 
-    def __init__(self, job_name: str):
+    def __init__(self, job_name: str, clean_legacy_pods: bool = False):
         self._job_name = job_name
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
+        self._clean_legacy_pods = clean_legacy_pods
 
     def _resume_job_spec(self, shell_command: str) -> dict:
         """Build a pod spec for a resume job with a raw shell command."""
@@ -212,7 +213,16 @@ class OpenshiftJob:
             return
 
         await self._run_oc_command(
-            ["exec", pod_name, "--", "kill", "-TERM", "1"],
+            [
+                "exec", pod_name, "--", "sh", "-c",
+                "for f in /proc/[0-9]*/cmdline; do "
+                "pid=${f#/proc/}; pid=${pid%/cmdline}; "
+                "[ \"$pid\" = 1 ] && continue; "
+                "[ \"$pid\" = \"$$\" ] && continue; "
+                "cmd=$(tr '\\0' ' ' < \"$f\" 2>/dev/null) || continue; "
+                "case \"$cmd\" in *'harbor run'*|*'harbor jobs resume'*) "
+                "kill -TERM \"$pid\" 2>/dev/null || true;; esac; done",
+            ],
             check=False,
         )
 
@@ -230,9 +240,30 @@ class OpenshiftJob:
             await asyncio.sleep(2)
 
     async def _delete_harbor_pods(self):
-        """Delete all pods spawned by harbor that are associated with this job."""
+        """Delete task pods whose environment identifies this parent Job."""
+        stdout, _ = await self._run_oc_command(
+            ["get", "pods", "--selector=app=harbor,harbor-session", "-o", "json"],
+            timeout_sec=60,
+        )
+        pods = json.loads(stdout or "{}").get("items", [])
+        pod_names = []
+        for pod in pods:
+            env = [
+                item
+                for container in pod.get("spec", {}).get("containers", [])
+                for item in container.get("env", [])
+            ]
+            has_parent = any(item.get("name") == "HARBOR_PARENT" for item in env)
+            if any(
+                item.get("name") == "HARBOR_PARENT"
+                and item.get("value") == self._pod_name
+                for item in env
+            ) or (self._clean_legacy_pods and not has_parent):
+                pod_names.append(pod["metadata"]["name"])
+        if not pod_names:
+            return
         await self._run_oc_command(
-            ["delete", "pods", f"--selector=harbor-parent={self._pod_name}", "--ignore-not-found"],
+            ["delete", "pods", *pod_names, "--ignore-not-found"],
             timeout_sec=60,
         )
 
