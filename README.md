@@ -43,7 +43,6 @@ Reproducible benchmarks for coding agents and models using Harbor
   - [Run Tasks in Openshift (Orchestrate Locally)](#run-tasks-in-openshift-orchestrate-locally)
   - [Run Tasks and Orchestrate in Openshift](#run-tasks-and-orchestrate-in-openshift)
 - [WIP](#wip)
-  - [Run with Podman](#run-with-podman)
   - [Run with Gemini and Gemini CLI](#run-with-gemini-and-gemini-cli)
   - [Run with vLLM and Gemini CLI](#run-with-vllm-and-gemini-cli)
 
@@ -607,7 +606,7 @@ oc apply -f deploy/harbor-task-sa.yml
 Then in your `harbor` command, add the flag:
 
 ```bash
---environment-import-path coding_agent_bench.harbor_envs.openshift:OpenshiftEnvironment
+--env openshift
 ```
 
 ### Run Tasks and Orchestrate in Openshift
@@ -645,17 +644,6 @@ uv run coding-agent-bench run \
 ```
 
 ## WIP
-
-### Run with Podman
-
-Requires `podman` on PATH with a running Podman machine.
-
-In your `harbor` command, add the flag:
-
-```bash
---environment-import-path coding_agent_bench.harbor_envs.podman:PodmanEnvironment
-```
-
 
 ### Run with Gemini and Gemini CLI
 
