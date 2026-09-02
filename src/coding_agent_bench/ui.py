@@ -94,13 +94,15 @@ function validateForm() {{
     const agent = document.getElementById('agent').value;
     const dataset = document.getElementById('dataset').value.trim();
     const modelName = document.getElementById('model_name').value;
+    const modelProvider = document.getElementById('model_provider').value;
     const serverUrl = document.getElementById('server_url').value.trim();
 
     if (!jobName) errors.push('Job name is required');
     if (!agent) errors.push('Agent is required');
     if (!dataset) errors.push('Dataset is required');
     if (!modelName) errors.push('Model name is required');
-    if (!serverUrl) errors.push('Server URL is required');
+    if (modelProvider === 'openai-compatible' && !serverUrl) errors.push('Server URL is required');
+    if (modelProvider !== 'openai-compatible' && serverUrl) errors.push('Server URL only applies to OpenAI-compatible providers');
 
     // Validate server_url format
     if (serverUrl) {{
@@ -155,9 +157,11 @@ async function submitJob(event) {{
         agent: document.getElementById('agent').value,
         dataset: document.getElementById('dataset').value.trim(),
         model_name: document.getElementById('model_name').value,
-        server_url: document.getElementById('server_url').value.trim(),
+        model_provider: document.getElementById('model_provider').value,
         n_concurrent: parseInt(document.getElementById('n_concurrent').value) || 1,
     }};
+    const serverUrl = document.getElementById('server_url').value.trim();
+    if (serverUrl) formData.server_url = serverUrl;
 
     // Advanced fields
     const datasetPattern = document.getElementById('dataset_pattern').value.trim();
@@ -257,14 +261,23 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
         </div>
         <div>
             <label for="model_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Model *</label>
-            <select id="model_name" name="model_name" required
+            <input id="model_name" name="model_name" list="model_options" required
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="Model name">
+            <datalist id="model_options">{model_options}</datalist>
+        </div>
+        <div>
+            <label for="model_provider" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Model Provider *</label>
+            <select id="model_provider" name="model_provider" required
                     style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                {model_options}
+                <option value="openai-compatible">OpenAI-compatible</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
             </select>
         </div>
         <div>
-            <label for="server_url" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Server URL *</label>
-            <input type="text" id="server_url" name="server_url" required
+            <label for="server_url" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Server URL</label>
+            <input type="text" id="server_url" name="server_url"
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
                    placeholder="http://localhost:8000">
             {nebius_help}

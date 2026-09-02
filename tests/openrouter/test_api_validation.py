@@ -2,11 +2,10 @@
 
 These exercise the full FastAPI app via TestClient rather than just the unit
 helpers in `providers.py` / `agents/configs.py`, to confirm `POST /jobs`
-actually returns clean 400s for the two openrouter validation cases handled
-in `create_job` (unsupported agent, missing OPENROUTER_API_KEY) instead of
-falling through to HarborCommandBuilder().build() (which would write the real
-key to disk for the `pi` agent — see providers.OPENROUTER_UNSUPPORTED_AGENTS
-and api.create_job).
+actually returns clean 400s for the two OpenRouter validation cases handled
+in `create_job` (unsupported agent and missing OPENROUTER_API_KEY) instead of
+falling through to HarborCommandBuilder().build(), which could write the real
+key to a generated agent configuration.
 
 Env vars that gate app import-time and lifespan behavior (JOB_STORE_PATH,
 API_KEY) must be set BEFORE `coding_agent_bench.api` is imported, since
@@ -27,9 +26,36 @@ os.environ.pop("NEBIUS_ENABLED", None)
 import pytest
 from fastapi.testclient import TestClient  # noqa: E402
 
-from coding_agent_bench.api import app  # noqa: E402
+from coding_agent_bench.api import CreateJobRequest, app, build_cli_command  # noqa: E402
+from coding_agent_bench.providers import ModelProvider  # noqa: E402
 
 HEADERS = {"X-API-Key": os.environ["API_KEY"]}
+
+
+def test_openai_cli_command_uses_provider_without_server_url():
+    request = CreateJobRequest(
+        job_name="openai-test",
+        agent="codex",
+        dataset="some-dataset",
+        model_name="gpt-5",
+        model_provider=ModelProvider.OPENAI,
+    )
+    command = build_cli_command(request)
+    assert command[command.index("--model-provider") + 1] == "openai"
+    assert "--server-url" not in command
+
+
+def test_openrouter_cli_command_uses_provider_without_server_url():
+    request = CreateJobRequest(
+        job_name="openrouter-test",
+        agent="codex",
+        dataset="some-dataset",
+        model_name="openai/gpt-5",
+        model_provider=ModelProvider.OPENROUTER,
+    )
+    command = build_cli_command(request)
+    assert command[command.index("--model-provider") + 1] == "openrouter"
+    assert "--server-url" not in command
 
 
 @pytest.fixture(scope="module")
@@ -54,7 +80,7 @@ def test_create_job_openrouter_unsupported_agent_returns_400(client, monkeypatch
             "agent": "oracle",
             "dataset": "some-dataset",
             "model_name": "openai/gpt-4o",
-            "server_url": "openrouter",
+            "model_provider": "openrouter",
         },
     )
     assert resp.status_code == 400, resp.text
@@ -71,7 +97,7 @@ def test_create_job_openrouter_missing_key_returns_400(client, monkeypatch):
             "agent": "codex",
             "dataset": "some-dataset",
             "model_name": "openai/gpt-4o",
-            "server_url": "openrouter",
+            "model_provider": "openrouter",
         },
     )
     assert resp.status_code == 400, resp.text
@@ -79,16 +105,14 @@ def test_create_job_openrouter_missing_key_returns_400(client, monkeypatch):
 
 
 def test_resume_openrouter_job_is_allowed(client, monkeypatch):
-    # Resuming an OpenRouter job works: the restored config already carries the
-    # OpenRouter URL and key, so no URL rewrite is needed (same as a static
-    # vLLM-route resume).
+    # Resuming an OpenRouter job restores its explicit provider and key.
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     from coding_agent_bench.api import JobStatus, job_store
 
     job_id = "resume-openrouter-test"
     job_store.insert(
         job_id, "or-job", "codex", "some-dataset", "openai/gpt-4o",
-        "openrouter", ["sh", "-c", "echo hi"],
+        ModelProvider.OPENROUTER, "", ["sh", "-c", "echo hi"],
     )
     job_store.update_status(job_id, JobStatus.COMPLETED)
 

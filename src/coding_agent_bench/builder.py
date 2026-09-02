@@ -6,7 +6,7 @@ import os
 
 from harbor.models.environment_type import EnvironmentType
 
-from coding_agent_bench.agents import get_agent_config
+from coding_agent_bench.agents import ModelProvider, get_agent_config
 
 
 class SupportedAgent(str, Enum):
@@ -113,8 +113,9 @@ class HarborCommandBuilder:
         agent: str,
         dataset: str,
         model_name: str,
-        server_url: str,
         environment: Literal["docker", "openshift"],
+        model_provider: ModelProvider = ModelProvider.OPENAI_COMPATIBLE,
+        server_url: str | None = None,
         dataset_pattern: str = None,
         n_concurrent: int = 1,
         n_tasks: int = None,
@@ -136,7 +137,25 @@ class HarborCommandBuilder:
             raise ValueError(f"Invalid environment: {environment}")
 
         agent_config = get_agent_config(agent)
+        try:
+            model_provider = ModelProvider(model_provider)
+        except ValueError:
+            supported = ", ".join(provider.value for provider in ModelProvider)
+            raise ValueError(
+                f"Unsupported model provider '{model_provider}'. Choose from: {supported}"
+            ) from None
+        if agent_config.name != "oracle":
+            if model_provider == ModelProvider.OPENAI_COMPATIBLE and not server_url:
+                raise ValueError(
+                    "server_url is required for OpenAI-compatible endpoints"
+                )
+            if model_provider == ModelProvider.OPENAI and server_url:
+                raise ValueError("server_url does not apply to the OpenAI provider")
+            if model_provider == ModelProvider.OPENROUTER and server_url:
+                raise ValueError("server_url does not apply to the OpenRouter provider")
+
         result = agent_config.configure(
+            model_provider=model_provider,
             model_name=model_name,
             server_url=server_url,
             model_max_len=model_max_len,

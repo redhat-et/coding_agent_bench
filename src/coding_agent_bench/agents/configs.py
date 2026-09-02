@@ -4,21 +4,21 @@ from pathlib import Path
 
 from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
 from coding_agent_bench.helpers.codex import codex_create_toml
-from coding_agent_bench.providers import (
-    OPENROUTER_API_KEY_ENV,
-    is_openrouter,
-    resolve_provider,
-)
+from coding_agent_bench.providers import ModelProvider
 
 
 class OracleAgentConfig(AgentConfig):
     """Non-LLM oracle agent. Passes the model through with no extra configuration."""
 
     name = "oracle"
+    supported_model_providers = frozenset(
+        {ModelProvider.OPENAI_COMPATIBLE, ModelProvider.OPENAI}
+    )
 
-    def configure(self, **kwargs) -> AgentConfigResult:
-        if is_openrouter(kwargs["server_url"]):
-            raise ValueError("oracle is a non-LLM agent and cannot use OpenRouter")
+    def configure(self, model_provider=ModelProvider.OPENAI_COMPATIBLE, **kwargs) -> AgentConfigResult:
+        model_provider = ModelProvider(model_provider)
+        if model_provider not in self.supported_model_providers:
+            raise ValueError(f"oracle cannot use {model_provider.value}")
         return AgentConfigResult(model=kwargs["model_name"])
 
 
@@ -27,23 +27,24 @@ class ClaudeCodeAgentConfig(AgentConfig):
 
     name = "claude-code"
     version = "2.1.220"
+    supported_model_providers = frozenset(
+        {ModelProvider.OPENAI_COMPATIBLE, ModelProvider.OPENROUTER}
+    )
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, provider, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
-        server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
         agent_env = {
-            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_BASE_URL": provider.base_url,
             "ANTHROPIC_MODEL": model_name,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": model_name,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": model_name,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": model_name,
         }
-        if api_key:
+        if provider.api_key:
             # OpenRouter's Claude Code integration expects a blank
             # ANTHROPIC_API_KEY and the key in ANTHROPIC_AUTH_TOKEN.
             agent_env["ANTHROPIC_API_KEY"] = ""
-            agent_env["ANTHROPIC_AUTH_TOKEN"] = api_key
+            agent_env["ANTHROPIC_AUTH_TOKEN"] = provider.api_key
         else:
             agent_env["ANTHROPIC_API_KEY"] = "sk-no-key-required"
         return AgentConfigResult(model=model_name, agent_env=agent_env)
@@ -55,17 +56,15 @@ class CodexAgentConfig(AgentConfig):
     name = "codex"
     version = "0.145.0"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, provider, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
-        server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
 
         outpath = Path("config.toml").absolute()
         codex_create_toml(
             model_name=model_name,
-            server_url=base_url,
+            server_url=provider.base_url,
             outpath=outpath,
-            openrouter=bool(api_key),
+            openrouter=provider.model_provider == ModelProvider.OPENROUTER,
         )
         print(f"Created config.toml at {outpath}")
 
@@ -78,14 +77,18 @@ class CodexAgentConfig(AgentConfig):
         ]
 
         agent_env = {"CODEX_HOME": "/root/.codex/"}
-        if api_key:
-            agent_env[OPENROUTER_API_KEY_ENV] = api_key
+        if provider.api_key:
+            agent_env[provider.api_key_env] = provider.api_key
 
         return AgentConfigResult(
             model="vllm/" + model_name,
             agent_env=agent_env,
             mounts=mounts,
         )
+
+    def _configure_openai(self, provider, **kwargs) -> AgentConfigResult:
+        # Harbor inherits OPENAI_API_KEY; agent_env would serialize it via --ae.
+        return AgentConfigResult(model="openai/" + kwargs["model_name"])
 
 
 class OpenClawAgentConfig(AgentConfig):
@@ -94,15 +97,17 @@ class OpenClawAgentConfig(AgentConfig):
     name = "openclaw"
     version = "2026.6.1"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, provider, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
-        server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
         agent_env = {
-            "OPENAI_BASE_URL": base_url.rstrip("/").removesuffix("/v1") + "/v1",
-            "OPENAI_API_KEY": api_key or "sk-no-key-required",
+            "OPENAI_BASE_URL": provider.base_url.rstrip("/").removesuffix("/v1") + "/v1",
+            "OPENAI_API_KEY": provider.api_key or "sk-no-key-required",
         }
         return AgentConfigResult(model="vllm/" + model_name, agent_env=agent_env)
+
+    def _configure_openai(self, provider, **kwargs) -> AgentConfigResult:
+        # Harbor inherits OPENAI_API_KEY; agent_env would serialize it via --ae.
+        return AgentConfigResult(model="openai/" + kwargs["model_name"])
 
 
 class OpenCodeAgentConfig(AgentConfig):
@@ -111,18 +116,16 @@ class OpenCodeAgentConfig(AgentConfig):
     name = "opencode"
     version = "1.18.1"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, provider, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
-        server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url)
 
         model = "vllm/" + model_name
         context_limit = int(model_max_len * 0.75)
         output_limit = int(model_max_len * 0.25)
-        options = {"baseURL": base_url.rstrip("/").removesuffix("/v1") + "/v1"}
-        if api_key:
-            options["apiKey"] = api_key
+        options = {"baseURL": provider.base_url.rstrip("/").removesuffix("/v1") + "/v1"}
+        if provider.api_key:
+            options["apiKey"] = provider.api_key
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model,
@@ -146,22 +149,26 @@ class OpenCodeAgentConfig(AgentConfig):
         }
         return AgentConfigResult(model=model, agent_env=agent_env)
 
+    def _configure_openai(self, provider, **kwargs) -> AgentConfigResult:
+        # Harbor inherits OPENAI_API_KEY; agent_env would serialize it via --ae.
+        return AgentConfigResult(model="openai/" + kwargs["model_name"])
+
 
 class OpenHandsSdkAgentConfig(AgentConfig):
     """OpenHands agent. Sets environment variables for a vLLM provider."""
     
     name = "openhands-sdk"
+    supported_model_providers = frozenset({ModelProvider.OPENAI_COMPATIBLE})
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, provider, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
-        server_url = kwargs["server_url"]
 
         # Set LLM API in host environment
         os.environ["LLM_API_KEY"] = "NONE"
         
         # Configure the environment
         model = "hosted_vllm/" + model_name
-        api_base = server_url.rstrip("/").removesuffix("/v1") + "/v1"
+        api_base = provider.base_url.rstrip("/").removesuffix("/v1") + "/v1"
 
         agent_env = {
             "HOSTED_VLLM_API_BASE": api_base,
@@ -175,18 +182,16 @@ class PiAgentConfig(AgentConfig):
     name = "pi"
     version = "0.73.1"
 
-    def configure(self, **kwargs) -> AgentConfigResult:
+    def _configure_openai_compatible(self, provider, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
-        server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url)
 
         models_json = {
             "providers": {
                 "vllm": {
-                    "baseUrl": base_url.rstrip("/").removesuffix("/v1") + "/v1",
+                    "baseUrl": provider.base_url.rstrip("/").removesuffix("/v1") + "/v1",
                     "api": "openai-completions",
-                    "apiKey": api_key or "NONE",
+                    "apiKey": provider.api_key or "NONE",
                     "models": [
                         {
                             "id": model_name,
@@ -213,3 +218,7 @@ class PiAgentConfig(AgentConfig):
 
         agent_env = {"PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": "/root/.pi/agent"}
         return AgentConfigResult(model="vllm/" + model_name, agent_env=agent_env, mounts=mounts)
+
+    def _configure_openai(self, provider, **kwargs) -> AgentConfigResult:
+        # Harbor inherits OPENAI_API_KEY; agent_env would serialize it via --ae.
+        return AgentConfigResult(model="openai/" + kwargs["model_name"])

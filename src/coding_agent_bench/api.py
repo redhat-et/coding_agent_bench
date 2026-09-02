@@ -14,10 +14,13 @@ from enum import Enum
 from pathlib import Path
 
 from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
-from coding_agent_bench.job import OpenshiftJob
+from coding_agent_bench.job import JobOptions, OpenshiftJob
 from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
-from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
+from coding_agent_bench.providers import (
+    ModelProvider,
+    resolve_provider,
+)
 from coding_agent_bench.agents import AGENT_REGISTRY
 from coding_agent_bench.ui import build_submit_form_html
 from coding_agent_bench import VERSION
@@ -43,6 +46,7 @@ class QueuedJob(NamedTuple):
     command: list[str]
     server_url: str
     model_name: str
+    model_provider: ModelProvider
 
 _job_queue: list[QueuedJob] = []
 _job_event = asyncio.Event()
@@ -53,9 +57,9 @@ _nebius: "NebiusOrchestrator | None" = None
 NEBIUS_PREFIX = "nebius-"
 
 
-def _parse_nebius_url(server_url: str) -> str | None:
+def _parse_nebius_url(server_url: str | None) -> str | None:
     """Return the resource config name if server_url is a nebius placeholder, else None."""
-    if server_url.startswith(NEBIUS_PREFIX):
+    if server_url and server_url.startswith(NEBIUS_PREFIX):
         return server_url[len(NEBIUS_PREFIX):]
     return None
 
@@ -238,7 +242,10 @@ class CreateJobRequest(BaseModel):
     agent: SupportedAgent = Field(..., description="Agent to use")
     dataset: str = Field(..., description="Dataset name or path")
     model_name: str = Field(..., description="Model name")
-    server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' (e.g. nebius-h200) for managed Nebius instances; or 'openrouter' to use OpenRouter (requires OPENROUTER_API_KEY on the server)")
+    model_provider: ModelProvider = Field(
+        ModelProvider.OPENAI_COMPATIBLE, description="Model API provider"
+    )
+    server_url: Optional[str] = Field(None, description="Model server URL for OpenAI-compatible endpoints, or 'nebius-<resource>' (e.g. nebius-h200) for managed Nebius instances")
     dataset_pattern: Optional[str] = Field(None, description="Pattern to filter dataset tasks")
     n_concurrent: int = Field(1, description="Number of concurrent tasks")
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
@@ -270,6 +277,7 @@ class JobResponse(BaseModel):
     agent: str
     dataset: str
     model_name: str
+    model_provider: ModelProvider
     server_url: str
     command: str
     status: JobStatus
@@ -299,6 +307,7 @@ class JobStore:
                 agent TEXT NOT NULL,
                 dataset TEXT NOT NULL,
                 model_name TEXT NOT NULL,
+                model_provider TEXT NOT NULL DEFAULT 'openai-compatible',
                 server_url TEXT NOT NULL DEFAULT '',
                 command TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'queued',
@@ -309,15 +318,20 @@ class JobStore:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "server_url" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN server_url TEXT NOT NULL DEFAULT ''")
+        if "model_provider" not in columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN model_provider TEXT NOT NULL "
+                "DEFAULT 'openai-compatible'"
+            )
         conn.commit()
         conn.close()
 
-    def insert(self, job_id: str, job_name: str, agent: str, dataset: str, model_name: str, server_url: str, command: list[str]):
+    def insert(self, job_id: str, job_name: str, agent: str, dataset: str, model_name: str, model_provider: ModelProvider, server_url: str, command: list[str]):
         """Add a new job to the tracking table."""
         conn = self._connect()
         conn.execute(
-            "INSERT INTO jobs (job_id, job_name, agent, dataset, model_name, server_url, command, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (job_id, job_name, agent, dataset, model_name, server_url, json.dumps(command), JobStatus.QUEUED.value),
+            "INSERT INTO jobs (job_id, job_name, agent, dataset, model_name, model_provider, server_url, command, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, job_name, agent, dataset, model_name, model_provider.value, server_url, json.dumps(command), JobStatus.QUEUED.value),
         )
         conn.commit()
         conn.close()
@@ -487,7 +501,7 @@ async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | 
     return "; ".join(errors) if errors else None
 
 
-async def _run_job(job_id: str, command: list[str], openrouter: bool = False):
+async def _run_job(job_id: str, command: list[str], options: JobOptions = JobOptions()):
     """Run and monitor an Openshift Job."""
     global _active_job
 
@@ -499,9 +513,9 @@ async def _run_job(job_id: str, command: list[str], openrouter: bool = False):
     try:
         is_resume = len(command) == 3 and command[0] == "sh" and command[1] == "-c"
         if is_resume:
-            job_spec = oj._resume_job_spec(command[2])
+            job_spec = oj._resume_job_spec(command[2], options=options)
         else:
-            job_spec = oj._job_spec(command, openrouter=openrouter)
+            job_spec = oj._job_spec(command, options=options)
         await oj._run_oc_command(
             ["apply", "-f", "-"],
             stdin_data=json.dumps(job_spec).encode(),
@@ -609,7 +623,7 @@ async def _worker():
         _job_event.clear()
         while _job_queue:
             _reorder_queue_for_nebius()
-            job_id, command, server_url, model_name = _job_queue.pop(0)
+            job_id, command, server_url, model_name, model_provider = _job_queue.pop(0)
             row = job_store.get(job_id)
             if not row or row["status"] != JobStatus.QUEUED.value:
                 continue
@@ -643,7 +657,11 @@ async def _worker():
             if "--model-max-len" not in command and model_config is not None:
                 command += ["--model-max-len", str(model_config.model_max_len)]
 
-            await _run_job(job_id, command, openrouter=is_openrouter(server_url))
+            await _run_job(
+                job_id,
+                command,
+                options=JobOptions(model_provider=model_provider),
+            )
 
             if nebius_instance_name and _nebius:
                 await _nebius.mark_job_completed(nebius_instance_name)
@@ -660,7 +678,7 @@ async def ui():
     Intentionally left accessible to unauthenticated users as it does not expose any secret information
     or allow users to modify any job.
     """
-    columns = ["job_id", "job_name", "agent", "dataset", "model_name", "server_url", "status", "error"]
+    columns = ["job_id", "job_name", "agent", "dataset", "model_name", "model_provider", "server_url", "status", "error"]
 
     def build_table(title: str, jobs: list[dict]) -> str:
         header = "".join(f"<th>{col}</th>" for col in columns)
@@ -787,9 +805,11 @@ def build_cli_command(req: CreateJobRequest):
         "--agent", req.agent,
         "--dataset", req.dataset,
         "--model-name", req.model_name,
-        "--server-url", req.server_url,
+        "--model-provider", req.model_provider.value,
         "--environment", "openshift",
     ]
+    if req.server_url:
+        command += ["--server-url", req.server_url]
     
     # Add optional parameters
     if req.dataset_pattern:
@@ -815,9 +835,21 @@ def build_cli_command(req: CreateJobRequest):
 @router.post("/jobs", response_model=CreateJobResponse)
 async def create_job(req: CreateJobRequest):
     """Create a new benchmark job."""
+    agent_config = AGENT_REGISTRY[req.agent.value]
+    if req.model_provider not in agent_config.supported_model_providers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"agent '{req.agent.value}' does not support {req.model_provider.value}",
+        )
+
+    if req.model_provider == ModelProvider.OPENAI and req.server_url:
+        raise HTTPException(status_code=400, detail="server_url does not apply to the OpenAI provider")
+
     # Skip harbor command validation for nebius jobs (server_url is a placeholder)
     nebius_gpu_config = _parse_nebius_url(req.server_url)
     if nebius_gpu_config is not None:
+        if req.model_provider != ModelProvider.OPENAI_COMPATIBLE:
+            raise HTTPException(status_code=400, detail="Nebius model servers require the openai-compatible provider")
         if not _nebius:
             raise HTTPException(status_code=400, detail="Nebius is not enabled on this server")
         if nebius_gpu_config not in RESOURCE_CONFIG_REGISTRY:
@@ -825,24 +857,29 @@ async def create_job(req: CreateJobRequest):
                 status_code=400,
                 detail=f"Unknown resource config '{nebius_gpu_config}'. Choose from: {', '.join(RESOURCE_CONFIG_REGISTRY)}",
             )
-    elif is_openrouter(req.server_url):
+    elif req.model_provider == ModelProvider.OPENROUTER:
         # Skip HarborCommandBuilder().build() for openrouter jobs: build() runs
         # each agent's configure(), and PiAgentConfig.configure() writes the
         # real OpenRouter key to models.json on the API host's CWD as a side
         # effect. Validate cheaply instead, deferring dataset-existence checks
         # to run time (same trade-off as the nebius branch above).
         try:
-            resolve_provider(req.server_url)
+            resolve_provider(req.server_url, req.model_provider)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        if req.agent.value in OPENROUTER_UNSUPPORTED_AGENTS:
-            raise HTTPException(status_code=400, detail=f"agent '{req.agent.value}' cannot use OpenRouter")
+    elif req.model_provider == ModelProvider.OPENAI:
+        if req.agent.value != "oracle":
+            try:
+                resolve_provider(req.server_url, req.model_provider)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
     else:
         try:
             HarborCommandBuilder().build(
                 agent=req.agent,
                 dataset=req.dataset,
                 model_name=req.model_name,
+                model_provider=req.model_provider,
                 server_url=req.server_url,
                 environment="openshift",
                 dataset_pattern=req.dataset_pattern,
@@ -859,8 +896,9 @@ async def create_job(req: CreateJobRequest):
 
     # Start the job
     job_id = str(uuid.uuid4())
-    job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, req.server_url, command)
-    _job_queue.append(QueuedJob(job_id, command, req.server_url, req.model_name))
+    server_url = req.server_url or ""
+    job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, req.model_provider, server_url, command)
+    _job_queue.append(QueuedJob(job_id, command, server_url, req.model_name, req.model_provider))
     _job_event.set()
 
     # Return a success response
@@ -974,10 +1012,28 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
 
     original_server_url = job_row.get("server_url", "")
     effective_server_url = req.server_url or original_server_url
+    model_provider = ModelProvider(job_row["model_provider"])
+
+    if model_provider == ModelProvider.OPENAI:
+        if req.server_url:
+            raise HTTPException(status_code=400, detail="server_url does not apply to the OpenAI provider")
+        try:
+            resolve_provider(None, model_provider)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if model_provider == ModelProvider.OPENROUTER:
+        if req.server_url:
+            raise HTTPException(status_code=400, detail="server_url does not apply to the OpenRouter provider")
+        try:
+            resolve_provider(None, model_provider)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # Validate nebius URLs the same way create_job does
     nebius_gpu_config = _parse_nebius_url(effective_server_url)
     if nebius_gpu_config is not None:
+        if model_provider != ModelProvider.OPENAI_COMPATIBLE:
+            raise HTTPException(status_code=400, detail="Nebius model servers require the openai-compatible provider")
         if not _nebius:
             raise HTTPException(status_code=400, detail="Nebius is not enabled on this server")
         if nebius_gpu_config not in RESOURCE_CONFIG_REGISTRY:
@@ -990,12 +1046,10 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
     py_job_dir = f"/app/jobs/{original_job_name}"
 
-    # URL replacement only applies to real, changing hostnames (e.g. a new
-    # nebius instance IP). It is skipped for nebius placeholders (deferred to
-    # the worker) and for the openrouter sentinel, whose URL is static and
-    # already baked into the restored config.
+    # URL replacement only applies to changing OpenAI-compatible endpoints.
+    # Nebius placeholders are resolved later by the worker.
     url_replace_step = ""
-    if req.server_url and nebius_gpu_config is None and not is_openrouter(req.server_url):
+    if model_provider == ModelProvider.OPENAI_COMPATIBLE and req.server_url and nebius_gpu_config is None:
         url_replace_step = _build_url_replace_shell_step(req.server_url, py_job_dir)
 
     shell_command = (
@@ -1008,11 +1062,12 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
     )
 
     command = ["sh", "-c", shell_command]
+    stored_server_url = effective_server_url or ""
     job_store.insert(
         resume_job_id, resume_job_name, job_row["agent"],
-        job_row["dataset"], job_row["model_name"], effective_server_url, command,
+        job_row["dataset"], job_row["model_name"], model_provider, stored_server_url, command,
     )
-    _job_queue.append(QueuedJob(resume_job_id, command, effective_server_url, job_row["model_name"]))
+    _job_queue.append(QueuedJob(resume_job_id, command, stored_server_url, job_row["model_name"], model_provider))
     _job_event.set()
 
     return {

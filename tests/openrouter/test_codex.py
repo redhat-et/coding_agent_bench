@@ -1,5 +1,6 @@
 from coding_agent_bench.agents.configs import CodexAgentConfig
 from coding_agent_bench.helpers.codex import codex_create_toml
+from coding_agent_bench.providers import ModelProvider
 
 
 def test_codex_toml_default_no_key(tmp_path):
@@ -29,7 +30,9 @@ def test_codex_agent_openrouter(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     result = CodexAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter"
+        model_provider=ModelProvider.OPENROUTER,
+        model_name="openai/gpt-4o",
+        server_url=None,
     )
     assert result.agent_env["OPENROUTER_API_KEY"] == "sk-or-test"
     content = (tmp_path / "config.toml").read_text()

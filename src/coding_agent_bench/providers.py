@@ -1,38 +1,83 @@
 import os
+from dataclasses import dataclass
+from enum import Enum
 
-OPENROUTER_SENTINEL = "openrouter"
+
+class ModelProvider(str, Enum):
+    OPENAI = "openai"
+    OPENROUTER = "openrouter"
+    OPENAI_COMPATIBLE = "openai-compatible"
+
 # Base URL without the /v1 suffix. Agents append /v1 as needed (openclaw,
 # opencode, pi, codex); claude-code uses the base as-is for ANTHROPIC_BASE_URL.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+OPENAI_BASE_URL = "https://api.openai.com"
 
-# Agents (SupportedAgent.value strings) that cannot use OpenRouter. This is
-# only a fast, request-time 400 for create_job's lightweight openrouter
-# validation branch; the authoritative guard lives in the agent's own
-# configure() (see OracleAgentConfig), which still raises ValueError at
-# build/run time regardless of this constant.
-OPENROUTER_UNSUPPORTED_AGENTS = frozenset({"oracle"})
-
-
-def is_openrouter(server_url: str) -> bool:
-    """Return True if server_url is the OpenRouter sentinel."""
-    return server_url == OPENROUTER_SENTINEL
+@dataclass(frozen=True)
+class ProviderConfig:
+    model_provider: ModelProvider
+    base_url: str | None
+    api_key: str | None
+    api_key_env: str | None
 
 
-def resolve_provider(server_url: str) -> tuple[str, str | None]:
-    """Resolve server_url to (base_url, api_key).
+PROVIDER_SECRETS = {
+    ModelProvider.OPENAI: (OPENAI_API_KEY_ENV, "openai-api-key"),
+    ModelProvider.OPENROUTER: (OPENROUTER_API_KEY_ENV, "openrouter-api-key"),
+}
 
-    For the "openrouter" sentinel, return the OpenRouter base URL and the key
-    from the OPENROUTER_API_KEY environment variable, raising ValueError if the
-    key is not set. For any other server_url, return (server_url, None) so
-    callers keep their existing no-auth behavior.
+
+def resolve_provider(
+    server_url: str | None,
+    model_provider: ModelProvider = ModelProvider.OPENAI_COMPATIBLE,
+) -> ProviderConfig:
+    """Resolve a model provider's endpoint and credentials.
+
+    The OpenAI and OpenRouter services use their canonical URLs. Custom
+    OpenAI-compatible providers require an explicit server URL.
     """
-    if is_openrouter(server_url):
+    model_provider = ModelProvider(model_provider)
+    if model_provider == ModelProvider.OPENAI:
+        if server_url:
+            raise ValueError("server_url does not apply to the OpenAI provider")
+        api_key = os.environ.get(OPENAI_API_KEY_ENV)
+        if not api_key:
+            raise ValueError(
+                f"{OPENAI_API_KEY_ENV} must be set when using the OpenAI provider"
+            )
+        return ProviderConfig(
+            model_provider=model_provider,
+            base_url=OPENAI_BASE_URL,
+            api_key=api_key,
+            api_key_env=OPENAI_API_KEY_ENV,
+        )
+
+    if model_provider == ModelProvider.OPENROUTER:
+        if server_url:
+            raise ValueError("server_url does not apply to the OpenRouter provider")
         api_key = os.environ.get(OPENROUTER_API_KEY_ENV)
         if not api_key:
             raise ValueError(
-                f"server_url '{OPENROUTER_SENTINEL}' requires the "
-                f"{OPENROUTER_API_KEY_ENV} environment variable to be set"
+                f"{OPENROUTER_API_KEY_ENV} must be set when using the OpenRouter provider"
             )
-        return OPENROUTER_BASE_URL, api_key
-    return server_url, None
+        return ProviderConfig(
+            model_provider=model_provider,
+            base_url=OPENROUTER_BASE_URL,
+            api_key=api_key,
+            api_key_env=OPENROUTER_API_KEY_ENV,
+        )
+
+    if not server_url:
+        raise ValueError("server_url is required for OpenAI-compatible endpoints")
+    if not server_url.startswith(("http://", "https://")):
+        raise ValueError(
+            "server_url must be an HTTP(S) URL for OpenAI-compatible endpoints"
+        )
+    return ProviderConfig(
+        model_provider=model_provider,
+        base_url=server_url,
+        api_key=None,
+        api_key_env=None,
+    )
