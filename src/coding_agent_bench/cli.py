@@ -7,9 +7,9 @@ import shlex
 
 import typer
 
+from coding_agent_bench.agents import ModelProvider
 from coding_agent_bench.builder import HarborCommandBuilder, SupportedAgent
-from coding_agent_bench.job import OpenshiftJob
-from coding_agent_bench.providers import is_openrouter
+from coding_agent_bench.job import JobOptions, OpenshiftJob
 from coding_agent_bench.manifest import deploy as deploy_model
 from coding_agent_bench.manifest import generate
 from coding_agent_bench.utils import cmd_to_string
@@ -25,7 +25,13 @@ def run(
     ],
     dataset: Annotated[str, typer.Option(help="Dataset name or path")],
     model_name: Annotated[str, typer.Option(help="Model name")],
-    server_url: Annotated[str, typer.Option(help="Model server URL")],
+    model_provider: Annotated[
+        ModelProvider, typer.Option(help="Model API provider")
+    ] = ModelProvider.OPENAI_COMPATIBLE,
+    server_url: Annotated[
+        Optional[str],
+        typer.Option(help="Model server URL for OpenAI-compatible endpoints"),
+    ] = None,
     environment: Annotated[
         str, typer.Option(help="Environment: docker or openshift")
     ] = "docker",
@@ -86,7 +92,11 @@ def run(
         
         # Create the job
         try:
-            job.run(command, _before_script, openrouter=is_openrouter(server_url))
+            job.run(
+                command,
+                _before_script,
+                options=JobOptions(model_provider=model_provider),
+            )
         except KeyboardInterrupt:
             typer.echo("\nInterrupted — cleaning up remote job...")
             job.cleanup()
@@ -99,6 +109,7 @@ def run(
             agent=agent,
             dataset=dataset,
             model_name=model_name,
+            model_provider=model_provider,
             server_url=server_url,
             environment=environment,
             dataset_pattern=dataset_pattern,

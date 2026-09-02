@@ -3,6 +3,14 @@ import shutil
 import subprocess
 import asyncio
 import json
+from dataclasses import dataclass
+
+from coding_agent_bench.providers import ModelProvider, PROVIDER_SECRETS
+
+
+@dataclass(frozen=True)
+class JobOptions:
+    model_provider: ModelProvider = ModelProvider.OPENAI_COMPATIBLE
 
 
 class OpenshiftJob:
@@ -30,7 +38,28 @@ class OpenshiftJob:
         self._job_name = job_name
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
 
-    def _resume_job_spec(self, shell_command: str) -> dict:
+    @staticmethod
+    def _provider_env(options: JobOptions) -> list[dict]:
+        secret = PROVIDER_SECRETS.get(options.model_provider)
+        if secret is None:
+            return []
+        env_name, secret_name = secret
+        return [
+            {
+                "name": env_name,
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": secret_name,
+                        "key": env_name,
+                        "optional": True,
+                    }
+                },
+            }
+        ]
+
+    def _resume_job_spec(
+        self, shell_command: str, options: JobOptions = JobOptions()
+    ) -> dict:
         """Build a pod spec for a resume job with a raw shell command."""
         return {
             "apiVersion": "batch/v1",
@@ -51,7 +80,7 @@ class OpenshiftJob:
                                 "args": [shell_command],
                                 "env": [
                                     {"name": "HOME", "value": "/tmp"},
-                                ],
+                                ] + self._provider_env(options),
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-minio"}}
@@ -67,24 +96,8 @@ class OpenshiftJob:
         self,
         command: list[str],
         before_script: list[str] = None,
-        openrouter: bool = False,
+        options: JobOptions = JobOptions(),
     ) -> dict:
-        # Only openrouter jobs need the OpenRouter key, so scope the secret to
-        # them rather than exposing it to every job pod.
-        env: list[dict] = []
-        if openrouter:
-            env.append(
-                {
-                    "name": "OPENROUTER_API_KEY",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": "openrouter-api-key",
-                            "key": "OPENROUTER_API_KEY",
-                            "optional": True,
-                        }
-                    },
-                }
-            )
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -109,7 +122,7 @@ class OpenshiftJob:
                                     + " && mc mb --ignore-existing minio/results"
                                     + " && mc cp --recursive /app/jobs/ minio/results/"
                                 ],
-                                "env": env,
+                                "env": self._provider_env(options),
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-minio"}}
@@ -303,9 +316,9 @@ class OpenshiftJob:
         self,
         command: list[str],
         before_script: list[str] = None,
-        openrouter: bool = False,
+        options: JobOptions = JobOptions(),
     ):
-        job_spec = self._job_spec(command, before_script, openrouter=openrouter)
+        job_spec = self._job_spec(command, before_script, options=options)
         job_json = json.dumps(job_spec)
 
         try:
@@ -327,11 +340,9 @@ class OpenshiftJob:
         self,
         command: list[str],
         before_script: list[str] = None,
-        openrouter: bool = False,
+        options: JobOptions = JobOptions(),
     ):
-        return asyncio.run(
-            self.run_async(command, before_script, openrouter=openrouter)
-        )
+        return asyncio.run(self.run_async(command, before_script, options=options))
 
     async def _cleanup_async(self):
         await self._signal_job_pod()

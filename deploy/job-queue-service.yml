@@ -58,6 +58,18 @@ spec:
         env:
         - name: JOB_STORE_PATH
           value: /app/data/jobs.db
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-api-key
+              key: OPENAI_API_KEY
+              optional: true
+        - name: OPENROUTER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openrouter-api-key
+              key: OPENROUTER_API_KEY
+              optional: true
         envFrom:
         - secretRef:
             name: job-queue-secret

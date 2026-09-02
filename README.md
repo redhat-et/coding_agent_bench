@@ -135,6 +135,33 @@ uv run coding-agent-bench run \
     --server-url http://my.server.url
 ```
 
+OpenAI-compatible endpoints are the default provider and require `--server-url`.
+To use OpenAI directly, set `OPENAI_API_KEY` in your environment, select the `openai` provider, and omit `--server-url`:
+
+```sh
+export OPENAI_API_KEY=<your-openai-api-key>
+uv run coding-agent-bench run \
+    --agent codex \
+    --dataset scale-ai/swe-bench-pro \
+    --model-name gpt-5 \
+    --model-provider openai
+```
+
+Native OpenAI is supported by Codex, OpenClaw, OpenCode, and Pi.
+Claude Code does not support OpenAI, and Oracle does not use a model provider.
+The key must be visible to the process launching Harbor; it is intentionally not passed in Harbor's `--ae` arguments because those are serialized into job metadata.
+
+OpenRouter is also selected explicitly and does not use `--server-url`:
+
+```sh
+export OPENROUTER_API_KEY=<your-openrouter-api-key>
+uv run coding-agent-bench run \
+    --agent codex \
+    --dataset scale-ai/swe-bench-pro \
+    --model-name openai/gpt-5 \
+    --model-provider openrouter
+```
+
 If you want to see a preview of Harbor command that would be run for a given set of arguments without actually running the job, add the `--dry-run` flag.
 
 > [!note]
@@ -195,7 +222,7 @@ sequenceDiagram
     ```sh
     oc apply -f deploy/job-queue-service.yml
     ```
-6. (Optional) To run jobs against OpenRouter (`server_url: openrouter`), create
+6. (Optional) To run jobs against OpenRouter (`model_provider: openrouter`), create
    an `openrouter-api-key` secret. Job pods mount it automatically (it is
    optional, so non-OpenRouter jobs are unaffected):
     ```yaml
@@ -207,10 +234,23 @@ sequenceDiagram
       OPENROUTER_API_KEY: <your-openrouter-api-key>
     type: Opaque
     ```
-    The queue service itself also needs `OPENROUTER_API_KEY` in its environment
-    to validate OpenRouter jobs at request time. Add it to `job-queue-secret`
-    (which the service already loads) or `envFrom` the `openrouter-api-key`
-    secret in `deploy/job-queue-service.yml`.
+    `deploy/job-queue-service.yml` loads this secret into the queue service,
+    and OpenRouter job pods reference the same secret automatically.
+
+7. (Optional) To run jobs against OpenAI-provided models, create an
+   `openai-api-key` secret. Submit these jobs with `model_provider: openai`;
+   they do not use `server_url`:
+   ```yaml
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: openai-api-key
+   stringData:
+     OPENAI_API_KEY: <your-openai-api-key>
+   type: Opaque
+   ```
+   `deploy/job-queue-service.yml` loads this secret into the queue service,
+   and OpenAI job pods reference the same secret automatically.
 
 Get the route for the deployed service:
 
@@ -231,6 +271,18 @@ Queue up a new benchmark task:
 
 ```sh
 curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "test", "agent": "pi", "dataset": "swe-bench/swe-bench-verified", "model_name": "qwen3.6-27b", "server_url": "<server-url>", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
+```
+
+For OpenRouter, set `model_provider` and omit `server_url`:
+
+```sh
+curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "openrouter-test", "agent": "codex", "dataset": "swe-bench/swe-bench-verified", "model_name": "openai/gpt-5", "model_provider": "openrouter", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
+```
+
+For OpenAI, set `model_provider` and omit `server_url`:
+
+```sh
+curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "openai-test", "agent": "codex", "dataset": "swe-bench/swe-bench-verified", "model_name": "gpt-5", "model_provider": "openai", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
 ```
 
 ```json
