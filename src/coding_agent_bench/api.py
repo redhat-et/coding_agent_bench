@@ -662,13 +662,18 @@ async def _run_job(job_id: str, command: list[str], adopt_existing: bool = False
         else:
             if job_store.get(job_id)["status"] == JobStatus.QUEUED.value:
                 job_store.update_status(job_id, JobStatus.RUNNING)
-            while True:
+            for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
                 try:
                     existing = await oj._get_job()
                     break
                 except Exception:
-                    logger.exception(f"Unable to inspect recovered OpenShift Job {job_id}; retrying")
-                    await asyncio.sleep(5)
+                    logger.exception(
+                        f"Unable to inspect recovered OpenShift Job {job_id} "
+                        f"(attempt {attempt}/{CLEANUP_MAX_ATTEMPTS})"
+                    )
+                    if attempt == CLEANUP_MAX_ATTEMPTS:
+                        raise
+                    await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
             conditions = {
                 condition.get("type")
                 for condition in (existing or {}).get("status", {}).get("conditions", [])
@@ -781,13 +786,22 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             return
 
         if adopt_existing:
-            while True:
+            for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
                 try:
                     existing = await oj._get_job()
                     break
-                except Exception:
-                    logger.exception(f"Unable to reconcile recovered OpenShift Job {job_id}; retrying")
-                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.exception(
+                        f"Unable to reconcile recovered OpenShift Job {job_id} "
+                        f"(attempt {attempt}/{CLEANUP_MAX_ATTEMPTS})"
+                    )
+                    if attempt < CLEANUP_MAX_ATTEMPTS:
+                        await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
+                        continue
+                    if nebius_gpu_config is not None and _nebius:
+                        await _delete_recovered_nebius(job_id)
+                    await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=str(e))
+                    return
             if existing is None:
                 if row["status"] == JobStatus.RUNNING.value:
                     if nebius_gpu_config is not None and _nebius:

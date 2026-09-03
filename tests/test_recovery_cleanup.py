@@ -89,3 +89,66 @@ def test_nebius_cleanup_stops_after_retry_limit(monkeypatch):
     asyncio.run(api._delete_recovered_nebius("job-1"))
 
     assert nebius.attempts == 2
+
+
+def test_run_job_stops_recovery_probe_after_retry_limit(monkeypatch):
+    from coding_agent_bench import api
+
+    disable_retry_delays(monkeypatch, api)
+    store = FakeJobStore(api.JobStatus.RUNNING)
+    monkeypatch.setattr(api, "job_store", store)
+
+    class Job:
+        attempts = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def _get_job(self):
+            type(self).attempts += 1
+            raise RuntimeError("unavailable")
+
+    terminal_errors = []
+
+    async def finish_terminal(_job_id, _job, _status, error=None):
+        terminal_errors.append(error)
+
+    monkeypatch.setattr(api, "OpenshiftJob", Job)
+    monkeypatch.setattr(api, "_retry_terminal_job", finish_terminal)
+
+    asyncio.run(api._run_job("job-1", [], adopt_existing=True))
+
+    assert Job.attempts == 2
+    assert terminal_errors == ["unavailable"]
+
+
+def test_process_queued_job_stops_recovery_probe_after_retry_limit(monkeypatch):
+    from coding_agent_bench import api
+
+    disable_retry_delays(monkeypatch, api)
+    store = FakeJobStore(api.JobStatus.RUNNING)
+    monkeypatch.setattr(api, "job_store", store)
+
+    class Job:
+        attempts = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def _get_job(self):
+            type(self).attempts += 1
+            raise RuntimeError("unavailable")
+
+    terminal_errors = []
+
+    async def finish_terminal(_job_id, _job, _status, error=None):
+        terminal_errors.append(error)
+
+    monkeypatch.setattr(api, "OpenshiftJob", Job)
+    monkeypatch.setattr(api, "_retry_terminal_job", finish_terminal)
+
+    queued = api.QueuedJob("job-1", [], "https://example.com", "model", True)
+    asyncio.run(api._process_queued_job(queued))
+
+    assert Job.attempts == 2
+    assert terminal_errors == ["unavailable"]
