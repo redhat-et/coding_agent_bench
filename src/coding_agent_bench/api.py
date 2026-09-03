@@ -206,16 +206,17 @@ class NebiusOrchestrator:
 
     async def adopt_running_instance(self, model_name: str, gpu_config: str) -> str:
         """Restore tracking for the deterministic instance used by a running job."""
-        instance_name = self._pick_instance_name()
-        if not await self._manager.instance_exists(instance_name):
-            raise RuntimeError(f"Nebius instance {instance_name} is missing for recovered job")
-        self._instances[instance_name] = NebiusInstanceState(
-            instance_name=instance_name,
-            gpu_config=gpu_config,
-            current_model=model_name,
-            job_running=True,
-        )
-        return instance_name
+        async with self._lock:
+            instance_name = self._pick_instance_name()
+            if not await self._manager.instance_exists(instance_name):
+                raise RuntimeError(f"Nebius instance {instance_name} is missing for recovered job")
+            self._instances[instance_name] = NebiusInstanceState(
+                instance_name=instance_name,
+                gpu_config=gpu_config,
+                current_model=model_name,
+                job_running=True,
+            )
+            return instance_name
 
     async def delete_recovered_instance(self) -> None:
         """Delete the deterministic VM left behind by an interrupted terminal transition."""
