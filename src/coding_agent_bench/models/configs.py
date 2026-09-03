@@ -14,6 +14,21 @@ class Qwen_Qwen3_8_27B(ModelConfig):
         "--mm-encoder-tp-mode", "data",
     ]
 
+
+class ZaiOrg_GLM_5_2_FP8(ModelConfig):
+
+    name = "zai-org/GLM-5.2-FP8"
+    model_max_len = 131072
+    args = [
+        "--model", "zai-org/GLM-5.2-FP8",
+        "--max-model-len", "131072",
+        "--kv-cache-dtype", "fp8",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "glm47",
+        "--reasoning-parser", "glm45",
+    ]
+
+
 class RedHatAI_gemma_4_31B_it_FP8_block(ModelConfig):
     
     name = "RedHatAI/gemma-4-31B-it-FP8-block"
