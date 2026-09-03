@@ -1,7 +1,5 @@
 import asyncio
 
-from coding_agent_bench import api
-
 
 class FakeJobStore:
     def __init__(self, status, error="cleanup failed: unavailable"):
@@ -14,7 +12,7 @@ class FakeJobStore:
         self.row = {"status": status.value, "error": error}
 
 
-def disable_retry_delays(monkeypatch):
+def disable_retry_delays(monkeypatch, api):
     async def no_sleep(_seconds):
         pass
 
@@ -23,7 +21,9 @@ def disable_retry_delays(monkeypatch):
 
 
 def test_terminal_cleanup_advances_queue_after_retry_limit(monkeypatch):
-    disable_retry_delays(monkeypatch)
+    from coding_agent_bench import api
+
+    disable_retry_delays(monkeypatch, api)
     store = FakeJobStore(api.JobStatus.FAILING)
     monkeypatch.setattr(api, "job_store", store)
 
@@ -48,7 +48,9 @@ def test_terminal_cleanup_advances_queue_after_retry_limit(monkeypatch):
 
 
 def test_cancellation_advances_queue_after_retry_limit(monkeypatch):
-    disable_retry_delays(monkeypatch)
+    from coding_agent_bench import api
+
+    disable_retry_delays(monkeypatch, api)
     store = FakeJobStore(api.JobStatus.CANCELLING)
     monkeypatch.setattr(api, "job_store", store)
 
@@ -70,7 +72,9 @@ def test_cancellation_advances_queue_after_retry_limit(monkeypatch):
 
 
 def test_nebius_cleanup_stops_after_retry_limit(monkeypatch):
-    disable_retry_delays(monkeypatch)
+    from coding_agent_bench import api
+
+    disable_retry_delays(monkeypatch, api)
 
     class Nebius:
         attempts = 0
