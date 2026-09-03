@@ -47,7 +47,7 @@ class QueuedJob(NamedTuple):
 
 _job_queue: list[QueuedJob] = []
 _job_event = asyncio.Event()
-_active_job: tuple[str, asyncio.Task, OpenshiftJob] | None = None
+_active_job: tuple[str, asyncio.Task] | None = None
 _shutting_down = False
 _nebius: "NebiusOrchestrator | None" = None
 
@@ -612,12 +612,7 @@ async def _restore_jobs() -> bool:
 
 async def _run_job(job_id: str, command: list[str], adopt_existing: bool = False, openrouter: bool = False):
     """Run and monitor an Openshift Job."""
-    global _active_job
-
     oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
-    task = asyncio.current_task()
-    assert task is not None
-    _active_job = (job_id, task, oj)
 
     try:
         if not adopt_existing:
@@ -699,9 +694,6 @@ async def _run_job(job_id: str, command: list[str], adopt_existing: bool = False
         error = str(e)
         await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=error)
 
-    finally:
-        _active_job = None
-
 
 def _reorder_queue_for_nebius():
     """Stable-sort the queue so nebius jobs that can reuse the current instance
@@ -732,13 +724,8 @@ def _reorder_queue_for_nebius():
 
 async def _process_queued_job(queued: QueuedJob) -> None:
     """Provision or adopt one queued job without risking the dispatcher task."""
-    global _active_job
-
     job_id, command, server_url, model_name, adopt_existing = queued
-    task = asyncio.current_task()
-    assert task is not None
     oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
-    _active_job = (job_id, task, oj)
 
     model_config: ModelConfig | None = None
     nebius_instance_name: str | None = None
@@ -832,9 +819,6 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             await _delete_recovered_nebius(job_id)
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
-    finally:
-        if _active_job and _active_job[0] == job_id:
-            _active_job = None
 
 
 async def _worker():
@@ -860,11 +844,7 @@ async def _worker():
             if not adopt_existing and row["status"] != JobStatus.QUEUED.value:
                 continue
             processing_task = asyncio.create_task(_process_queued_job(QueuedJob(job_id, command, server_url, model_name, adopt_existing)))
-            _active_job = (
-                job_id,
-                processing_task,
-                OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing),
-            )
+            _active_job = (job_id, processing_task)
             try:
                 await processing_task
             except asyncio.CancelledError:
