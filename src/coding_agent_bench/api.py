@@ -75,6 +75,8 @@ class JobStatus(str, Enum):
 
 
 NEBIUS_IDLE_TIMEOUT = int(os.environ.get("NEBIUS_IDLE_TIMEOUT_SECONDS", "600"))
+CLEANUP_MAX_ATTEMPTS = int(os.environ.get("CLEANUP_MAX_ATTEMPTS", "120"))
+CLEANUP_RETRY_INTERVAL_SECONDS = float(os.environ.get("CLEANUP_RETRY_INTERVAL_SECONDS", "5"))
 
 
 @dataclass
@@ -529,14 +531,25 @@ async def _finish_cancellation(job_id: str, oj: OpenshiftJob, signal: bool) -> b
 
 
 async def _retry_cancellation(job_id: str, oj: OpenshiftJob) -> None:
-    """Keep the serial queue blocked until an active workload is removed."""
-    while job_store.get(job_id)["status"] == JobStatus.CANCELLING.value:
-        await asyncio.sleep(5)
+    """Retry cancellation cleanup without blocking the serial queue forever."""
+    for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
+        if job_store.get(job_id)["status"] != JobStatus.CANCELLING.value:
+            return
+        await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
         try:
             existing = await oj._get_job()
             await _finish_cancellation(job_id, oj, signal=existing is not None)
         except Exception:
             logger.exception(f"Cancellation cleanup retry failed for {job_id}")
+        if job_store.get(job_id)["status"] != JobStatus.CANCELLING.value:
+            return
+        logger.warning(
+            f"Cancellation cleanup attempt {attempt}/{CLEANUP_MAX_ATTEMPTS} failed for {job_id}"
+        )
+
+    row = job_store.get(job_id)
+    logger.error(f"Cancellation cleanup exhausted for {job_id}; advancing the queue")
+    job_store.update_status(job_id, JobStatus.CANCELLED, error=row["error"])
 
 
 def _terminal_error(error: str | None) -> str | None:
@@ -573,21 +586,37 @@ async def _retry_terminal_job(
     final_status: JobStatus,
     error: str | None = None,
 ) -> None:
-    """Keep the serial queue blocked until terminal workload cleanup succeeds."""
-    while not await _finish_terminal_job(job_id, oj, final_status, error=error):
-        await asyncio.sleep(5)
+    """Retry terminal cleanup without blocking the serial queue forever."""
+    for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
+        if await _finish_terminal_job(job_id, oj, final_status, error=error):
+            return
+        logger.warning(
+            f"Terminal cleanup attempt {attempt}/{CLEANUP_MAX_ATTEMPTS} failed for {job_id}"
+        )
+        if attempt < CLEANUP_MAX_ATTEMPTS:
+            await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
+
+    row = job_store.get(job_id)
+    logger.error(f"Terminal cleanup exhausted for {job_id}; advancing the queue")
+    job_store.update_status(job_id, final_status, error=row["error"])
 
 
 async def _delete_recovered_nebius(job_id: str) -> None:
-    """Retry deletion so a recovered terminal transition cannot leak its VM."""
+    """Retry deletion without blocking recovery forever."""
     assert _nebius is not None
-    while True:
+    for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
         try:
             await _nebius.delete_recovered_instance()
             return
         except Exception:
-            logger.exception(f"Unable to delete recovered Nebius instance for {job_id}; retrying")
-            await asyncio.sleep(5)
+            logger.exception(
+                f"Unable to delete recovered Nebius instance for {job_id} "
+                f"(attempt {attempt}/{CLEANUP_MAX_ATTEMPTS})"
+            )
+            if attempt < CLEANUP_MAX_ATTEMPTS:
+                await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
+
+    logger.error(f"Nebius cleanup exhausted for {job_id}; advancing recovery")
 
 
 async def _restore_jobs() -> bool:
