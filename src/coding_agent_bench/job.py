@@ -74,7 +74,9 @@ class OpenshiftJob:
     ) -> dict:
         # Only openrouter jobs need the OpenRouter key, so scope the secret to
         # them rather than exposing it to every job pod.
-        env: list[dict] = []
+        env: list[dict] = [
+            {"name": "HARBOR_PARENT", "value": self._pod_name},
+        ]
         if openrouter:
             env.append(
                 {
@@ -117,9 +119,6 @@ class OpenshiftJob:
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-minio"}}
-                                ],
-                                "env": [
-                                    {"name": "HARBOR_PARENT", "value": self._pod_name},
                                 ],
                             }
                         ],
