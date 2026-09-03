@@ -254,11 +254,18 @@ class OpenshiftJob:
                 for item in container.get("env", [])
             ]
             has_parent = any(item.get("name") == "HARBOR_PARENT" for item in env)
-            if any(
+            matches_parent = any(
                 item.get("name") == "HARBOR_PARENT"
                 and item.get("value") == self._pod_name
                 for item in env
-            ) or (self._clean_legacy_pods and not has_parent):
+            )
+            labels = pod.get("metadata", {}).get("labels", {})
+            matches_legacy_parent = (
+                self._clean_legacy_pods
+                and not has_parent
+                and labels.get("harbor-parent") == self._pod_name
+            )
+            if matches_parent or matches_legacy_parent:
                 pod_names.append(pod["metadata"]["name"])
         if not pod_names:
             return
