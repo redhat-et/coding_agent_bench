@@ -152,3 +152,61 @@ def test_process_queued_job_stops_recovery_probe_after_retry_limit(monkeypatch):
 
     assert Job.attempts == 2
     assert terminal_errors == ["unavailable"]
+
+
+def test_cancelled_nebius_job_deletes_instance_instead_of_marking_idle(monkeypatch):
+    from coding_agent_bench import api
+
+    store = FakeJobStore(api.JobStatus.RUNNING)
+    monkeypatch.setattr(api, "job_store", store)
+    monkeypatch.setattr(api, "_shutting_down", False)
+
+    existing = {"status": {"conditions": []}}
+
+    class Job:
+        instances = 0
+
+        def __init__(self, **_kwargs):
+            self.instance = type(self).instances
+            type(self).instances += 1
+            self.calls = 0
+
+        async def _get_job(self):
+            self.calls += 1
+            if self.instance == 1 and self.calls == 2:
+                store.update_status("job-1", api.JobStatus.CANCELLING)
+                raise asyncio.CancelledError
+            return existing
+
+        async def _wait_for_job_pod_ready(self):
+            pass
+
+        async def _signal_job_pod(self):
+            pass
+
+        async def _delete_job(self):
+            pass
+
+    class Nebius:
+        deleted = 0
+        completed = 0
+
+        async def adopt_running_instance(self, _model_name, _gpu_config):
+            return "instance-1"
+
+        async def delete_recovered_instance(self):
+            self.deleted += 1
+
+        async def mark_job_completed(self, _instance_name):
+            self.completed += 1
+
+    nebius = Nebius()
+    monkeypatch.setattr(api, "OpenshiftJob", Job)
+    monkeypatch.setattr(api, "_nebius", nebius)
+
+    queued = api.QueuedJob("job-1", [], "nebius-gpu", "model", True)
+    asyncio.run(api._process_queued_job(queued))
+
+    assert nebius.deleted == 1
+    assert nebius.completed == 0
+    assert store.row["status"] == api.JobStatus.CANCELLED.value

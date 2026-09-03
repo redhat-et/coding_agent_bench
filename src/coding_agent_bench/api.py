@@ -726,6 +726,7 @@ async def _run_job(job_id: str, command: list[str], adopt_existing: bool = False
         if _shutting_down:
             raise
         await _finish_cancellation(job_id, oj, signal=True)
+        raise
 
     except Exception as e:
         error = str(e)
