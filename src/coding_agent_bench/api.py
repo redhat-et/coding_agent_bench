@@ -455,6 +455,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await task
         except asyncio.CancelledError:
             pass
+    # Do not delete Nebius instances here: OpenShift jobs survive queue restarts
+    # and the next queue process must be able to adopt their deterministic VM.
+    # Permanent decommissioning therefore requires external instance cleanup.
 
 
 app = FastAPI(lifespan=lifespan)
