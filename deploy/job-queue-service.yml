@@ -22,6 +22,9 @@ metadata:
     name: job-queue
     app: job-queue
 spec:
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: job-queue
@@ -33,6 +36,7 @@ spec:
         app: job-queue
         component: api
     spec:
+      terminationGracePeriodSeconds: 60
       serviceAccountName: harbor-orchestrator
       securityContext:
         fsGroup: 1001
@@ -45,9 +49,10 @@ spec:
             mkdir -p ~/.ssh && \
             ([ -f /app/data/nebius-ssh-key ] || ssh-keygen -t ed25519 -f /app/data/nebius-ssh-key -N "" -q) && \
             chmod 600 /app/data/nebius-ssh-key && \
-            NEBIUS_SSH_PUBLIC_KEY_PATH=/app/data/nebius-ssh-key.pub \
-            NEBIUS_SSH_PRIVATE_KEY_PATH=/app/data/nebius-ssh-key \
-            uv run uvicorn coding_agent_bench.api:app --host 0.0.0.0 --port 8443 \
+            exec env \
+              NEBIUS_SSH_PUBLIC_KEY_PATH=/app/data/nebius-ssh-key.pub \
+              NEBIUS_SSH_PRIVATE_KEY_PATH=/app/data/nebius-ssh-key \
+              uv run uvicorn coding_agent_bench.api:app --host 0.0.0.0 --port 8443 \
               --ssl-certfile /etc/job-queue/tls/tls.crt \
               --ssl-keyfile /etc/job-queue/tls/tls.key
         resources:

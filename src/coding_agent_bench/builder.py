@@ -81,6 +81,12 @@ class HarborCommandBuilder:
 
         # Add environment
         args += ["--env", environment]
+        harbor_parent = os.environ.get("HARBOR_PARENT")
+        if environment == "openshift" and harbor_parent:
+            args += [
+                "--ek",
+                f"persistent_env={json.dumps({'HARBOR_PARENT': harbor_parent})}",
+            ]
 
         # Add mounts
         if mounts is not None:

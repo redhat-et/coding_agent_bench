@@ -26,9 +26,10 @@ class OpenshiftJob:
                 "Please run 'oc login' and try again."
             )
 
-    def __init__(self, job_name: str):
+    def __init__(self, job_name: str, clean_legacy_pods: bool = False):
         self._job_name = job_name
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
+        self._clean_legacy_pods = clean_legacy_pods
 
     def _resume_job_spec(self, shell_command: str) -> dict:
         """Build a pod spec for a resume job with a raw shell command."""
@@ -37,6 +38,7 @@ class OpenshiftJob:
             "kind": "Job",
             "metadata": {"name": self._pod_name, "labels": {"app": "harbor"}},
             "spec": {
+                "backoffLimit": 0,
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
@@ -51,6 +53,7 @@ class OpenshiftJob:
                                 "args": [shell_command],
                                 "env": [
                                     {"name": "HOME", "value": "/tmp"},
+                                    {"name": "HARBOR_PARENT", "value": self._pod_name},
                                 ],
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
@@ -71,7 +74,9 @@ class OpenshiftJob:
     ) -> dict:
         # Only openrouter jobs need the OpenRouter key, so scope the secret to
         # them rather than exposing it to every job pod.
-        env: list[dict] = []
+        env: list[dict] = [
+            {"name": "HARBOR_PARENT", "value": self._pod_name},
+        ]
         if openrouter:
             env.append(
                 {
@@ -90,6 +95,7 @@ class OpenshiftJob:
             "kind": "Job",
             "metadata": {"name": self._pod_name, "labels": {"app": "harbor"}},
             "spec": {
+                "backoffLimit": 0,
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
@@ -144,7 +150,7 @@ class OpenshiftJob:
                 )
             else:
                 stdout_bytes, stderr_bytes = await process.communicate(input=stdin_data)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             process.terminate()
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -153,10 +159,9 @@ class OpenshiftJob:
             except asyncio.TimeoutError:
                 process.kill()
                 stdout_bytes, stderr_bytes = await process.communicate()
-            raise RuntimeError(
-                f"oc command timed out after {timeout_sec} seconds: "
-                f"{' '.join(full_command)}"
-            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise RuntimeError(f"oc command timed out after {timeout_sec} seconds: {' '.join(full_command)}")
 
         stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else None
         stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else None
@@ -171,6 +176,24 @@ class OpenshiftJob:
             )
 
         return stdout, stderr
+
+    async def _get_job(self) -> dict | None:
+        """Return the OpenShift Job resource, or None when it does not exist."""
+        try:
+            stdout, _ = await self._run_oc_command(
+                ["get", f"job/{self._pod_name}", "-o", "json"],
+                timeout_sec=30,
+            )
+        except RuntimeError as exc:
+            if "notfound" in str(exc).lower() or "not found" in str(exc).lower():
+                return None
+            raise
+        if not stdout:
+            raise RuntimeError(f"oc returned no data for job/{self._pod_name}")
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"oc returned invalid JSON for job/{self._pod_name}") from exc
 
     async def _signal_job_pod(self) -> None:
         """Send SIGTERM to the harbor process inside the job pod so it
@@ -189,7 +212,16 @@ class OpenshiftJob:
             return
 
         await self._run_oc_command(
-            ["exec", pod_name, "--", "kill", "-TERM", "1"],
+            [
+                "exec", pod_name, "--", "sh", "-c",
+                "for f in /proc/[0-9]*/cmdline; do "
+                "pid=${f#/proc/}; pid=${pid%/cmdline}; "
+                "[ \"$pid\" = 1 ] && continue; "
+                "[ \"$pid\" = \"$$\" ] && continue; "
+                "cmd=$(tr '\\0' ' ' < \"$f\" 2>/dev/null) || continue; "
+                "case \"$cmd\" in *'harbor run'*|*'harbor jobs resume'*) "
+                "kill -TERM \"$pid\" 2>/dev/null || true;; esac; done",
+            ],
             check=False,
         )
 
@@ -207,9 +239,37 @@ class OpenshiftJob:
             await asyncio.sleep(2)
 
     async def _delete_harbor_pods(self):
-        """Delete all pods spawned by harbor that are associated with this job."""
+        """Delete task pods whose environment identifies this parent Job."""
+        stdout, _ = await self._run_oc_command(
+            ["get", "pods", "--selector=app=harbor,harbor-session", "-o", "json"],
+            timeout_sec=60,
+        )
+        pods = json.loads(stdout or "{}").get("items", [])
+        pod_names = []
+        for pod in pods:
+            env = [
+                item
+                for container in pod.get("spec", {}).get("containers", [])
+                for item in container.get("env", [])
+            ]
+            has_parent = any(item.get("name") == "HARBOR_PARENT" for item in env)
+            matches_parent = any(
+                item.get("name") == "HARBOR_PARENT"
+                and item.get("value") == self._pod_name
+                for item in env
+            )
+            labels = pod.get("metadata", {}).get("labels", {})
+            matches_legacy_parent = (
+                self._clean_legacy_pods
+                and not has_parent
+                and labels.get("harbor-parent") == self._pod_name
+            )
+            if matches_parent or matches_legacy_parent:
+                pod_names.append(pod["metadata"]["name"])
+        if not pod_names:
+            return
         await self._run_oc_command(
-            ["delete", "pods", f"--selector=harbor-parent={self._pod_name}", "--ignore-not-found"],
+            ["delete", "pods", *pod_names, "--ignore-not-found"],
             timeout_sec=60,
         )
 
