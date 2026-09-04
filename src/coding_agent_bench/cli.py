@@ -12,7 +12,7 @@ from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.providers import is_openrouter
 from coding_agent_bench.manifest import deploy as deploy_model
 from coding_agent_bench.manifest import generate
-from coding_agent_bench.utils import cmd_to_string
+from coding_agent_bench.utils import cmd_to_string, validate_remote_skill_sources
 
 app = typer.Typer()
 
@@ -21,7 +21,7 @@ app = typer.Typer()
 def run(
     agent: Annotated[
         SupportedAgent,
-        typer.Option(help=f"Agent to use"),
+        typer.Option(help="Agent to use"),
     ],
     dataset: Annotated[str, typer.Option(help="Dataset name or path")],
     model_name: Annotated[str, typer.Option(help="Model name")],
@@ -58,6 +58,14 @@ def run(
     retry_include: Annotated[
         Optional[list[str]], typer.Option(help="Error types to retry (repeatable)")
     ] = None,
+    skills: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--skill",
+            "--skills",
+            help="Path or git source (org/name[@ref], URL) for skill directories. Can be used multiple times.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
@@ -69,6 +77,10 @@ def run(
     
     # If remote, run as a job
     if remote:
+        try:
+            validate_remote_skill_sources(skills)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--skill") from exc
         if dry_run:
             typer.echo("Error: Cannot use `--remote` with `--dry-run`. Dry run mode is not available on remote")
         typer.echo("Running job on remote server...")
@@ -109,6 +121,7 @@ def run(
             agent_version=agent_version,
             max_retries=max_retries,
             retry_include=retry_include,
+            skills=skills,
         )
         typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
 

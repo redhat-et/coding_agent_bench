@@ -20,6 +20,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [CLI Utility](#cli-utility)
   - [Prerequisites](#prerequisites)
   - [Run a Benchmark](#run-a-benchmark)
+  - [Use Agent Skills](#use-agent-skills)
 - [Queue Service](#queue-service)
   - [Set up the service](#set-up-the-service)
   - [Use the service](#use-the-service)
@@ -140,6 +141,44 @@ If you want to see a preview of Harbor command that would be run for a given set
 > [!note]
 > Additional configuration options are available, use `uv run coding-agent-bench run --help` to see them.
 
+### Use Agent Skills
+
+Pass one or more skill directories or Git sources with the repeatable `--skill`
+option (`--skills` is an alias). Harbor installs the resolved skills into the
+agent used by the benchmark.
+
+To test a skill from your local filesystem:
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-model \
+    --server-url http://my.server.url \
+    --skill ./my-skills
+```
+
+Git sources make skills easy to share and reproduce. Repeat the option to test
+multiple skill collections, for example Superpowers together with Caveman:
+
+```sh
+uv run coding-agent-bench run \
+    --agent claude-code \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-model \
+    --server-url http://my.server.url \
+    --skill obra/superpowers \
+    --skill juliusbrussee/caveman
+```
+
+Harbor accepts `org/name` and `org/name@ref` shorthand and HTTP(S) Git URLs.
+Repository shorthand loads skills from the repository's `skills/` directory.
+Use a full URL such as
+`https://github.com/org/repo/tree/<ref>/<subdir>` to select another directory.
+Pin a tag or named branch with `@ref` (or in the full URL) when comparing
+benchmark runs. Harbor resolves the reference to a commit and records that
+commit in the job lock file for reproducibility.
+
 ## Queue Service
 
 The queue service is a FastAPI application that can be deployed on OpenShift to queue and run benchmarks automatically.
@@ -181,7 +220,8 @@ sequenceDiagram
     oc apply -f deploy/harbor-orchestrator-sa.yml
     oc apply -f deploy/harbor-task-sa.yml
     ```
-4. Create a secret file named `job-queue-secret` with an `API_KEY` and apply it:
+4. Create a secret file named `job-queue-secret` with the queue service's
+   `API_KEY` and any queue or Nebius settings, then apply it:
     ```yaml
     apiVersion: v1
     kind: Secret
@@ -191,6 +231,19 @@ sequenceDiagram
       API_KEY: <your-api-key>
     type: Opaque
     ```
+   If the intake CronJob is deployed, create its separate poller secret:
+   ```yaml
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: intake-poller-secret
+   stringData:
+     JOB_QUEUE_URL: https://<queue-route-host>
+     GOOGLE_SHEET_ID: <sheet-id>
+     SENDER_EMAIL: ace-model-evals@redhat.com
+     AUTO_APPROVE: 'false'
+   type: Opaque
+   ```
 5. Create the queue service:
     ```sh
     oc apply -f deploy/job-queue-service.yml
@@ -212,11 +265,23 @@ sequenceDiagram
     (which the service already loads) or `envFrom` the `openrouter-api-key`
     secret in `deploy/job-queue-service.yml`.
 
+    The queue listens on HTTPS inside the cluster. OpenShift's service-serving
+    certificate operator creates the `job-queue-tls` Secret referenced by the
+    Deployment, and the Route uses re-encryption so traffic remains encrypted
+    from the router to the queue pod. Wait for that Secret to appear before
+    troubleshooting pod startup:
+    ```sh
+    oc get secret job-queue-tls
+    ```
+
 Get the route for the deployed service:
 
 ```sh
 oc get route job-queue-route --output jsonpath='{.spec.host}'
 ```
+
+Set `JOB_QUEUE_URL` in `intake-poller-secret` to this HTTPS route before
+applying `deploy/intake-cronjob.yml`.
 
 Check that the application is live by visiting the docs:
 
@@ -227,10 +292,15 @@ open $JOB_QUEUE_URL/docs
 
 ### Use the service
 
-Queue up a new benchmark task:
+Queue up a new benchmark task. Skills submitted to the queue must be public Git
+sources because the OpenShift job cannot access paths on the requestor's local
+filesystem:
 
 ```sh
-curl -X POST $JOB_QUEUE_URL/jobs -d '{"job_name": "test", "agent": "pi", "dataset": "swe-bench/swe-bench-verified", "model_name": "qwen3.6-27b", "server_url": "<server-url>", "n_tasks": 1}' -H "Content-Type: application/json" -H "X-API-Key: <your-api-key>"
+curl -X POST $JOB_QUEUE_URL/jobs \
+    -d '{"job_name": "test", "agent": "pi", "dataset": "swe-bench/swe-bench-verified", "model_name": "qwen3.6-27b", "server_url": "<server-url>", "n_tasks": 1, "skills": ["obra/superpowers@<ref>"]}' \
+    -H "Content-Type: application/json" \
+    -H "X-API-Key: <your-api-key>"
 ```
 
 ```json
@@ -639,6 +709,21 @@ uv run coding-agent-bench run \
     --dataset scale-ai/swe-bench-pro \
     --model-name my-model \
     --server-url http://my.server.url \
+    --remote \
+    --environment openshift
+```
+
+Skills used by a remote OpenShift Job must be public Git sources. Local paths
+are rejected because they are not available inside the orchestrator pod. The
+pod also needs outbound network access to the Git host.
+
+```bash
+uv run coding-agent-bench run \
+    --agent claude-code \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-model \
+    --server-url http://my.server.url \
+    --skill obra/superpowers@<ref> \
     --remote \
     --environment openshift
 ```
