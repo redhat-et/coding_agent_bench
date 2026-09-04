@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
+from coding_agent_bench.intake.validation import validate_server_url
 from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
@@ -56,9 +57,31 @@ NEBIUS_PREFIX = "nebius-"
 
 def _parse_nebius_url(server_url: str) -> str | None:
     """Return the resource config name if server_url is a nebius placeholder, else None."""
-    if server_url.startswith(NEBIUS_PREFIX):
-        return server_url[len(NEBIUS_PREFIX):]
+    if server_url.lower().startswith(NEBIUS_PREFIX):
+        return server_url[len(NEBIUS_PREFIX):].lower()
     return None
+
+
+def _worker_server_url_errors(
+    server_url: str,
+    managed_endpoint: bool = False,
+) -> list[str]:
+    """Revalidate a model endpoint immediately before creating its worker pod.
+
+    Intake validation protects the queue boundary, while this second check closes
+    the DNS-rebinding window between approval and execution. Managed Nebius
+    instances are returned as public HTTP endpoints by the provider, so their
+    generated IP endpoint is checked for public reachability without applying the
+    normal HTTPS-only requirement.
+    """
+    if not server_url or server_url.lower() == "openrouter":
+        return []
+    if managed_endpoint:
+        parsed = urlparse(server_url)
+        if parsed.hostname is None:
+            return ["Managed model endpoint has no hostname"]
+        return validate_server_url(server_url, require_https=False)
+    return validate_server_url(server_url)
 
 
 db_path = Path(os.environ.get("JOB_STORE_PATH", "jobs.db"))
@@ -95,6 +118,7 @@ class NebiusOrchestrator:
 
     def __init__(self, manager: NebiusInstanceManager, subnet_id: str,
                  instance_name_prefix: str, idle_timeout: int):
+        """Initialize the in-memory Nebius instance lifecycle tracker."""
         self._manager = manager
         self._subnet_id = subnet_id
         self._prefix = instance_name_prefix
@@ -186,12 +210,14 @@ class NebiusOrchestrator:
             return instance_name, server_url
 
     async def mark_job_started(self, instance_name: str):
+        """Mark a tracked Nebius instance as busy."""
         if instance_name not in self._instances:
             logger.warning(f"mark_job_started: instance {instance_name} already evicted")
             return
         self._instances[instance_name].job_running = True
 
     async def mark_job_completed(self, instance_name: str):
+        """Mark a tracked Nebius instance idle after a job completes."""
         state = self._instances.get(instance_name)
         if state is None:
             logger.warning(f"mark_job_completed: instance {instance_name} already evicted")
@@ -241,9 +267,9 @@ class CreateJobRequest(BaseModel):
     model_name: str = Field(..., description="Model name")
     server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' (e.g. nebius-h200) for managed Nebius instances; or 'openrouter' to use OpenRouter (requires OPENROUTER_API_KEY on the server)")
     dataset_pattern: Optional[str] = Field(None, description="Pattern to filter dataset tasks")
-    n_concurrent: int = Field(1, description="Number of concurrent tasks")
+    n_concurrent: int | None = Field(None, description="Number of concurrent tasks")
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
-    model_max_len: Optional[int] = Field(None, description="Maximum model context length in tokens")
+    model_max_len: int | None = Field(None, description="Maximum model context length in tokens")
     before_script: Optional[str] = Field(None, description="Script to run before harbor job execution")
     agent_version: Optional[str] = Field(None, description="Pin agent to a specific version (overrides default)")
     max_retries: Optional[int] = Field(None, description="Max retry attempts per task (default: 1)")
@@ -251,6 +277,11 @@ class CreateJobRequest(BaseModel):
     skills: list[str] = Field(
         default_factory=list,
         description="Public Git skill sources in org/name[@ref] or HTTP(S) URL form",
+    )
+    idempotency_key: Optional[str] = Field(
+        None,
+        max_length=256,
+        description="Stable key used to safely retry creation of the same job",
     )
 
 
@@ -279,6 +310,7 @@ class JobResponse(BaseModel):
     command: str
     status: JobStatus
     error: str | None = None
+    idempotency_key: str | None = None
 
 
 class JobStore:
@@ -307,25 +339,56 @@ class JobStore:
                 server_url TEXT NOT NULL DEFAULT '',
                 command TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'queued',
-                error TEXT
+                error TEXT,
+                idempotency_key TEXT
             )"""
         )
-        # Migrate: add server_url if upgrading from an older schema
+        # Migrate columns when upgrading from an older schema.
         columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "server_url" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN server_url TEXT NOT NULL DEFAULT ''")
-        conn.commit()
-        conn.close()
-
-    def insert(self, job_id: str, job_name: str, agent: str, dataset: str, model_name: str, server_url: str, command: list[str]):
-        """Add a new job to the tracking table."""
-        conn = self._connect()
+        if "idempotency_key" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT")
         conn.execute(
-            "INSERT INTO jobs (job_id, job_name, agent, dataset, model_name, server_url, command, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (job_id, job_name, agent, dataset, model_name, server_url, json.dumps(command), JobStatus.QUEUED.value),
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency_key "
+            "ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
         )
         conn.commit()
         conn.close()
+
+    def insert(
+        self,
+        job_id: str,
+        job_name: str,
+        agent: str,
+        dataset: str,
+        model_name: str,
+        server_url: str,
+        command: list[str],
+        idempotency_key: str | None = None,
+    ):
+        """Add a new job to the tracking table."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO jobs "
+                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    job_name,
+                    agent,
+                    dataset,
+                    model_name,
+                    server_url,
+                    json.dumps(command),
+                    JobStatus.QUEUED.value,
+                    idempotency_key,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def update_status(self, job_id: str, status: JobStatus, error: str | None = None):
         """Update the status of a job."""
@@ -341,6 +404,16 @@ class JobStore:
         """Get a job by id."""
         conn = self._connect()
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> dict | None:
+        """Return the job previously created with an idempotency key, if any."""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
         conn.close()
         return dict(row) if row else None
 
@@ -371,6 +444,7 @@ _api_key_header = APIKeyHeader(name="X-API-Key")
 
 
 async def _verify_api_key(key: str = Depends(_api_key_header)) -> str:
+    """Validate the API key supplied with an authenticated queue request."""
     expected = os.environ.get("API_KEY")
     if not expected:
         raise HTTPException(status_code=500, detail="API_KEY not configured")
@@ -381,6 +455,7 @@ async def _verify_api_key(key: str = Depends(_api_key_header)) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Start queue workers and cleanly stop them with the FastAPI application."""
     global _shutting_down, _nebius
     job_store.mark_orphaned()
 
@@ -492,9 +567,28 @@ async def _best_effort_cleanup(oj: OpenshiftJob, signal: bool = False) -> str | 
     return "; ".join(errors) if errors else None
 
 
-async def _run_job(job_id: str, command: list[str], openrouter: bool = False):
-    """Run and monitor an Openshift Job."""
+async def _run_job(
+    job_id: str,
+    command: list[str],
+    server_url: str | None = None,
+    managed_endpoint: bool = False,
+    openrouter: bool = False,
+):
+    """Validate, run, and monitor an OpenShift Job."""
     global _active_job
+
+    if server_url:
+        server_url_errors = _worker_server_url_errors(
+            server_url,
+            managed_endpoint=managed_endpoint,
+        )
+        if server_url_errors:
+            job_store.update_status(
+                job_id,
+                JobStatus.FAILED,
+                error="Server URL validation failed: " + "; ".join(server_url_errors),
+            )
+            return
 
     oj = OpenshiftJob(job_name=job_id)
     task = asyncio.current_task()
@@ -595,6 +689,7 @@ def _reorder_queue_for_nebius():
     current_model = states[0].current_model
 
     def _sort_key(item: QueuedJob):
+        """Rank a queued job by how efficiently it can reuse Nebius capacity."""
         gpu = _parse_nebius_url(item.server_url)
         if gpu is None:
             return 0  # non-nebius, keep in place
@@ -623,6 +718,15 @@ async def _worker():
             model_config: ModelConfig | None = None
             nebius_instance_name: str | None = None
             nebius_gpu_config = _parse_nebius_url(server_url)
+            job_server_url = server_url
+            managed_endpoint = False
+            if nebius_gpu_config is not None and not _nebius:
+                job_store.update_status(
+                    job_id,
+                    JobStatus.FAILED,
+                    error="Nebius is not enabled on this server",
+                )
+                continue
             if nebius_gpu_config is not None and _nebius:
                 try:
                     nebius_instance_name, real_url = await _nebius.acquire_instance(model_name, gpu_config=nebius_gpu_config)
@@ -637,6 +741,8 @@ async def _worker():
                         command[2] = command[2].replace(" && uv run", f"{step} && uv run", 1)
                     else:
                         command = [real_url if arg == server_url else arg for arg in command]
+                    job_server_url = real_url
+                    managed_endpoint = True
                     model_config = MODEL_REGISTRY.get(model_name)
                     await _nebius.mark_job_started(nebius_instance_name)
                 except Exception as e:
@@ -648,13 +754,20 @@ async def _worker():
             if "--model-max-len" not in command and model_config is not None:
                 command += ["--model-max-len", str(model_config.model_max_len)]
 
-            await _run_job(job_id, command, openrouter=is_openrouter(server_url))
+            await _run_job(
+                job_id,
+                command,
+                server_url=job_server_url,
+                managed_endpoint=managed_endpoint,
+                openrouter=is_openrouter(server_url),
+            )
 
             if nebius_instance_name and _nebius:
                 await _nebius.mark_job_completed(nebius_instance_name)
 
 @router.get("/")
 async def read_root():
+    """Return a lightweight health response for the queue API."""
     return {"message": "API is live."}
 
 @app.get("/ui", response_class=HTMLResponse)
@@ -668,6 +781,7 @@ async def ui():
     columns = ["job_id", "job_name", "agent", "dataset", "model_name", "server_url", "status", "error"]
 
     def build_table(title: str, jobs: list[dict]) -> str:
+        """Render one HTML job table for the unauthenticated status page."""
         header = "".join(f"<th>{col}</th>" for col in columns)
         rows = ""
         for job in jobs:
@@ -799,12 +913,16 @@ def build_cli_command(req: CreateJobRequest):
     # Add optional parameters
     if req.dataset_pattern:
         command += ["--dataset-pattern", req.dataset_pattern]
-    if req.n_concurrent:
+    if req.n_concurrent is not None:
         command += ["--n-concurrent", str(req.n_concurrent)]
-    if req.n_tasks:
+    if req.n_tasks is not None:
         command += ["--n-tasks", str(req.n_tasks)]
-    if req.model_max_len:
-        command += ["--model-max-len", str(req.model_max_len)]
+    model_max_len = req.model_max_len
+    if model_max_len is None:
+        model_config = MODEL_REGISTRY.get(req.model_name)
+        model_max_len = model_config.model_max_len if model_config else None
+    if model_max_len is not None:
+        command += ["--model-max-len", str(model_max_len)]
     if req.before_script:
         command += ["--before-script", req.before_script]
     if req.agent_version:
@@ -819,9 +937,47 @@ def build_cli_command(req: CreateJobRequest):
 
     return command
 
+
+def _job_create_response(row: dict, message: str) -> CreateJobResponse:
+    """Reconstruct a create response from a job persisted in the queue store."""
+    try:
+        command = json.loads(row["command"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        command = []
+    if not isinstance(command, list):
+        command = []
+    return CreateJobResponse(
+        message=message,
+        job_id=row["job_id"],
+        job_name=row["job_name"],
+        command=command,
+    )
+
+
 @router.post("/jobs", response_model=CreateJobResponse)
-async def create_job(req: CreateJobRequest):
+async def create_job(
+    req: CreateJobRequest,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+):
     """Create a new benchmark job."""
+    # FastAPI replaces the Header marker at request time; treating it as absent
+    # also keeps direct unit calls to this coroutine straightforward.
+    if not isinstance(idempotency_key_header, str):
+        idempotency_key_header = None
+    raw_idempotency_key = (
+        idempotency_key_header
+        if idempotency_key_header is not None
+        else req.idempotency_key
+    )
+    idempotency_key = raw_idempotency_key.strip() if raw_idempotency_key else None
+    if raw_idempotency_key is not None and not idempotency_key:
+        raise HTTPException(status_code=400, detail="Idempotency-Key must not be blank")
+
+    if idempotency_key:
+        existing = job_store.get_by_idempotency_key(idempotency_key)
+        if existing:
+            return _job_create_response(existing, message="Job already exists.")
+
     try:
         validate_remote_skill_sources(req.skills)
     except ValueError as e:
@@ -850,6 +1006,10 @@ async def create_job(req: CreateJobRequest):
         if req.agent.value in OPENROUTER_UNSUPPORTED_AGENTS:
             raise HTTPException(status_code=400, detail=f"agent '{req.agent.value}' cannot use OpenRouter")
     else:
+        if req.server_url.lower() != "openrouter":
+            server_url_errors = validate_server_url(req.server_url)
+            if server_url_errors:
+                raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
         try:
             HarborCommandBuilder().build(
                 agent=req.agent,
@@ -872,7 +1032,26 @@ async def create_job(req: CreateJobRequest):
 
     # Start the job
     job_id = str(uuid.uuid4())
-    job_store.insert(job_id, req.job_name, req.agent.value, req.dataset, req.model_name, req.server_url, command)
+    try:
+        job_store.insert(
+            job_id,
+            req.job_name,
+            req.agent.value,
+            req.dataset,
+            req.model_name,
+            req.server_url,
+            command,
+            idempotency_key=idempotency_key,
+        )
+    except sqlite3.IntegrityError:
+        # A concurrent retry may win the unique-key race between the lookup above
+        # and the insert. Return that request's original result without enqueuing a
+        # second job.
+        if idempotency_key:
+            existing = job_store.get_by_idempotency_key(idempotency_key)
+            if existing:
+                return _job_create_response(existing, message="Job already exists.")
+        raise HTTPException(status_code=409, detail="Job already exists")
     _job_queue.append(QueuedJob(job_id, command, req.server_url, req.model_name))
     _job_event.set()
 

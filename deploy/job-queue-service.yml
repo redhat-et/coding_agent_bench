@@ -47,7 +47,9 @@ spec:
             chmod 600 /app/data/nebius-ssh-key && \
             NEBIUS_SSH_PUBLIC_KEY_PATH=/app/data/nebius-ssh-key.pub \
             NEBIUS_SSH_PRIVATE_KEY_PATH=/app/data/nebius-ssh-key \
-            uv run uvicorn coding_agent_bench.api:app --host 0.0.0.0 --port 8000
+            uv run uvicorn coding_agent_bench.api:app --host 0.0.0.0 --port 8443 \
+              --ssl-certfile /etc/job-queue/tls/tls.crt \
+              --ssl-keyfile /etc/job-queue/tls/tls.key
         resources:
           requests:
             cpu: "1"
@@ -55,6 +57,14 @@ spec:
           limits:
             cpu: "1"
             memory: "1Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
         env:
         - name: JOB_STORE_PATH
           value: /app/data/jobs.db
@@ -62,16 +72,23 @@ spec:
         - secretRef:
             name: job-queue-secret
         ports:
-        - containerPort: 8000
-          name: http
+        - containerPort: 8443
+          name: https
         imagePullPolicy: Always
         volumeMounts:
         - mountPath: /app/data
           name: data
+        - mountPath: /etc/job-queue/tls
+          name: tls
+          readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: job-queue-pvc
+        - name: tls
+          secret:
+            secretName: job-queue-tls
+            defaultMode: 0440
       restartPolicy: Always
 --- 
 kind: Service
@@ -81,15 +98,17 @@ metadata:
   labels:
     app: job-queue
     component: api
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: job-queue-tls
 spec:
   selector:
     app: job-queue
     component: api
   type: ClusterIP
   ports:
-  - name: http
-    port: 80
-    targetPort: 8000
+  - name: https
+    port: 443
+    targetPort: 8443
     protocol: TCP
 ---
 apiVersion: route.openshift.io/v1
@@ -101,10 +120,10 @@ metadata:
     component: api
 spec:
   tls:
-    termination: edge
+    termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
   port:
-    targetPort: 8000
+    targetPort: https
   to:
     kind: Service
     name: job-queue-service

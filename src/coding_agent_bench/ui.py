@@ -14,22 +14,6 @@ def build_submit_form_html(
 ) -> str:
     """Build the HTML for the job submission form."""
 
-    # Build option lists for models and agents
-    model_options = "".join(
-        f'<option value="{html.escape(m)}">{html.escape(m)}</option>' for m in models
-    )
-    agent_options = "".join(
-        f'<option value="{html.escape(a)}">{html.escape(a)}</option>' for a in agents
-    )
-
-    # Build nebius options (only if enabled)
-    nebius_options = ""
-    if nebius_enabled:
-        nebius_options = "".join(
-            f'<option value="{NEBIUS_PREFIX}{html.escape(c)}">{html.escape(f"nebius-{c}")}</option>'
-            for c in nebius_configs
-        )
-
     # Define basic fields (always visible)
     basic_fields = _build_basic_fields_html(models, agents, nebius_enabled)
 
@@ -279,20 +263,7 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
 
 def _build_advanced_fields_html(nebius_configs: list[str], nebius_enabled: bool) -> str:
     """Build HTML for the optional/advanced form fields."""
-    nebius_options = ""
-    if nebius_enabled:
-        nebius_options = "".join(
-            f'<option value="{NEBIUS_PREFIX}{html.escape(c)}">{html.escape(f"nebius-{c}")}</option>'
-            for c in nebius_configs
-        )
-
-    nebius_advanced_help = ""
-    if nebius_enabled:
-        nebius_advanced_help = '<br><small style="color: #666;">Or use nebius-&lt;config&gt; (e.g., nebius-h200)</small>'
-    else:
-        nebius_advanced_help = '<br><small style="color: #999;">Nebius instances not enabled</small>'
-
-    return f"""
+    return """
         <div>
             <label for="dataset_pattern" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Dataset Pattern</label>
             <input type="text" id="dataset_pattern" name="dataset_pattern"

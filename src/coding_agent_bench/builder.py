@@ -4,8 +4,6 @@ import json
 from enum import Enum
 import os
 
-from harbor.models.environment_type import EnvironmentType
-
 from coding_agent_bench.agents import get_agent_config
 
 
@@ -29,6 +27,7 @@ class HarborCommandBuilder:
     ]
 
     def __init__(self):
+        """Initialize a builder rooted at the current process working directory."""
         self.jobs_dir = Path(os.getcwd()) / "jobs"
 
     def _build_command(
@@ -38,7 +37,7 @@ class HarborCommandBuilder:
         model: str,
         environment: Literal["docker", "openshift"],
         mounts: list[dict[str, str]] = None,
-        n_concurrent: int = 1,
+        n_concurrent: int | None = 1,
         agent_env: dict[str, Any] = None,
         task_include_pattern: str = None,
         n_tasks: int = None,
@@ -49,6 +48,7 @@ class HarborCommandBuilder:
         skills: list[str] = None,
         **kwargs,
     ) -> list[str]:
+        """Construct the Harbor CLI arguments for a configured benchmark run."""
         args = []
 
         # Add agent
@@ -90,8 +90,10 @@ class HarborCommandBuilder:
         for skill in skills or []:
             args += ["--skill", skill]
 
-        # Add number of concurrent tasks
-        args += ["--n-concurrent", str(n_concurrent)]
+        # Add number of concurrent tasks when explicitly requested. Omitting the
+        # flag lets the Harbor/queue defaults apply.
+        if n_concurrent is not None:
+            args += ["--n-concurrent", str(n_concurrent)]
 
         # Add total number of tasks
         if n_tasks is not None:
@@ -121,9 +123,9 @@ class HarborCommandBuilder:
         server_url: str,
         environment: Literal["docker", "openshift"],
         dataset_pattern: str = None,
-        n_concurrent: int = 1,
+        n_concurrent: int | None = 1,
         n_tasks: int = None,
-        model_max_len: int = 262000,
+        model_max_len: int | None = None,
         job_name: str = "default",
         agent_version: str = None,
         max_retries: int = None,
@@ -140,6 +142,14 @@ class HarborCommandBuilder:
         """
         if environment not in ["docker", "openshift"]:
             raise ValueError(f"Invalid environment: {environment}")
+
+        if model_max_len is None:
+            # Keep model-specific limits in the queue's ModelConfig registry rather
+            # than requiring every caller to duplicate them in its request.
+            from coding_agent_bench.models import MODEL_REGISTRY
+
+            model_config = MODEL_REGISTRY.get(model_name)
+            model_max_len = model_config.model_max_len if model_config else 262000
 
         agent_config = get_agent_config(agent)
         result = agent_config.configure(

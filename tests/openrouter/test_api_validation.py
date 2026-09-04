@@ -24,7 +24,7 @@ os.environ.setdefault("API_KEY", "test-api-key")
 os.environ.pop("OPENROUTER_API_KEY", None)
 os.environ.pop("NEBIUS_ENABLED", None)
 
-import pytest
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from coding_agent_bench.api import app  # noqa: E402
