@@ -6,6 +6,7 @@ from coding_agent_bench.models.configs import (
     RedHatAI_Mistral_Small_4_119B_2603_NVFP4,
     RedHatAI_NVIDIA_Nemotron_3_Super_120B_A12B_NVFP4,
     RedHatAI_Qwen3_6_27B_FP8,
+    ZaiOrg_GLM_5_2_FP8,
 )
 
 MODEL_CONFIGS: list[type[ModelConfig]] = [
@@ -15,6 +16,7 @@ MODEL_CONFIGS: list[type[ModelConfig]] = [
     RedHatAI_Mistral_Small_4_119B_2603_NVFP4,
     RedHatAI_NVIDIA_Nemotron_3_Super_120B_A12B_NVFP4,
     RedHatAI_Qwen3_6_27B_FP8,
+    ZaiOrg_GLM_5_2_FP8,
 ]
 
 MODEL_REGISTRY: dict[str, ModelConfig] = {cls.name: cls() for cls in MODEL_CONFIGS}
