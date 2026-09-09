@@ -132,6 +132,7 @@ class RedHatAI_DeepSeek_V4_Flash(ModelConfig):
     ]
     hardware_extra_args = {
         "gpu-b200-sxm": ["--moe-backend", "deep_gemm_mega_moe", "--attention_config.use_fp4_indexer_cache", "True"],
+        "gpu-b200-sxm-a": ["--moe-backend", "deep_gemm_mega_moe", "--attention_config.use_fp4_indexer_cache", "True"],
     }
 
 
@@ -156,6 +157,7 @@ class RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8(ModelConfig):
     ]
     hardware_extra_args = {
         "gpu-b200-sxm": ["--attention_config.use_fp4_indexer_cache", "True"],
+        "gpu-b200-sxm-a": ["--attention_config.use_fp4_indexer_cache", "True"],
     }
 
 
