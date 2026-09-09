@@ -113,7 +113,7 @@ class RedHatAI_GLM_5_2_FP8(ModelConfig):
 
 class RedHatAI_DeepSeek_V4_Flash(ModelConfig):
     # Verified: 8x H200 141GB, concurrency 9.91x at 1M context
-    # Note: --moe-backend deep_gemm_mega_moe is B200-only (SM100)
+    # B200: 14.02x at 1M with mega_moe + attention_config.use_fp4_indexer_cache
 
     name = "RedHatAI/DeepSeek-V4-Flash"
     image = "vllm/vllm-openai:v0.27.1"
@@ -130,11 +130,14 @@ class RedHatAI_DeepSeek_V4_Flash(ModelConfig):
         "--tool-call-parser", "deepseek_v4",
         "--reasoning-parser", "deepseek_v4",
     ]
+    hardware_extra_args = {
+        "gpu-b200-sxm": ["--moe-backend", "deep_gemm_mega_moe", "--attention_config.use_fp4_indexer_cache", "True"],
+    }
 
 
 class RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8(ModelConfig):
     # Verified: 8x H200 141GB, concurrency 9.81x at 1M context
-    # Note: Marlin FP4 fallback on H200 (no native SM100 FP4), similar concurrency to base
+    # B200: 13.60x at 1M with native FP4 + attention_config.use_fp4_indexer_cache. Marlin fallback on H200.
 
     name = "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8"
     image = "vllm/vllm-openai:v0.27.1"
@@ -151,10 +154,15 @@ class RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8(ModelConfig):
         "--tool-call-parser", "deepseek_v4",
         "--reasoning-parser", "deepseek_v4",
     ]
+    hardware_extra_args = {
+        "gpu-b200-sxm": ["--attention_config.use_fp4_indexer_cache", "True"],
+    }
 
 
 class RedHatAI_Inkling_Small(ModelConfig):
     # Verified: 8x H200 141GB, BF16, concurrency 13.22x at 1M context
+    # --tokenizer-mode inkling is a no-op (vLLM already defaults to it for this architecture)
+    # --kernel-config.enable_flashinfer_autotune=False breaks fp8 KV cache (AssertionError in FA4 kernel) — do not add
 
     name = "RedHatAI/Inkling-Small"
     image = "vllm/vllm-openai:v0.27.1"

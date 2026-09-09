@@ -429,8 +429,10 @@ class NebiusInstanceManager:
             else:
                 raise e
 
-        # Get the number of gpus from resources (e.g. 1gpu-16vcpu-200gb)
-        resources = instance_details.get("spec", {}).get("resources", {}).get("preset")
+        # Get the number of gpus and platform from resources (e.g. 1gpu-16vcpu-200gb)
+        spec_resources = instance_details.get("spec", {}).get("resources", {})
+        resources = spec_resources.get("preset")
+        platform = spec_resources.get("platform", "")
         if resources is None:
             raise ValueError("Unable to get resources from instance details")
         tensor_parallel_size = int(resources.split("-")[0].replace("gpu", ""))
@@ -449,6 +451,7 @@ class NebiusInstanceManager:
         ]
         docker_cmd += [model_config.image]
         docker_cmd += model_config.args + model_config.default_args
+        docker_cmd += model_config.hardware_extra_args.get(platform, [])
         docker_cmd += ["--tensor-parallel-size", str(tensor_parallel_size)]
 
         hf_token = os.environ.get("HF_TOKEN", "")
