@@ -22,7 +22,7 @@ spec:
           restartPolicy: Never
           containers:
           - name: poller
-            image: ghcr.io/redhat-et/coding_agent_bench:v0.2.1
+            image: ghcr.io/redhat-et/coding_agent_bench:v0.2.3
             imagePullPolicy: Always
             command: ["uv", "run", "python", "-m", "coding_agent_bench.intake.poller"]
             env:

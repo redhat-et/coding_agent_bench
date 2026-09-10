@@ -52,6 +52,23 @@ class BuilderSkillTests(unittest.TestCase):
         self.assertNotIn("--skill", command)
 
 
+class BuilderAgentKwargTests(unittest.TestCase):
+    def test_qwen38_build_passes_xhigh_effort_as_agent_kwarg(self):
+        command, _ = HarborCommandBuilder().build(
+            agent="claude-code",
+            dataset="example/dataset",
+            model_name="Qwen/Qwen3.8-27B",
+            server_url="http://vllm:8000",
+            environment="docker",
+        )
+
+        self.assertIn(
+            ["--ak", "reasoning_effort=xhigh"],
+            [command[index : index + 2] for index in range(len(command) - 1)],
+        )
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL=xhigh", command)
+
+
 class CliSkillTests(unittest.TestCase):
     def setUp(self):
         self.runner = CliRunner()

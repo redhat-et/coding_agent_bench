@@ -27,9 +27,23 @@ class B200(ResourceConfig):
     preset = "1gpu-20vcpu-224gb"
     additional_args = ["--preemptible-on-preemption", "stop", "--recovery-policy", "fail"]
     
+class B200A(ResourceConfig):
+    
+    name = "b200a"
+    platform = "gpu-b200-sxm-a"
+    preset = "1gpu-20vcpu-224gb"
+    additional_args = ["--preemptible-on-preemption", "stop", "--recovery-policy", "fail"]
+    
 class B200x8(ResourceConfig):
     
     name = "b200x8"
+    platform = "gpu-b200-sxm"
+    preset = "8gpu-160vcpu-1792gb"
+    additional_args = ["--preemptible-on-preemption", "stop", "--recovery-policy", "fail"]
+    
+class B200x8A(ResourceConfig):
+    
+    name = "b200x8a"
     platform = "gpu-b200-sxm"
     preset = "8gpu-160vcpu-1792gb"
     additional_args = ["--preemptible-on-preemption", "stop", "--recovery-policy", "fail"]
@@ -48,7 +62,9 @@ class H200x8(ResourceConfig):
 
 RESOURCE_CONFIGS: list[ResourceConfig] = [
     B200,
+    B200A,
     B200x8,
+    B200x8A,
     H200,
     H200x8,
 ]

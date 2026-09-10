@@ -10,6 +10,7 @@ class AgentConfigResult:
     model: str
     agent_env: dict[str, str] | None = None
     mounts: list[dict[str, Any]] | None = None
+    agent_kwargs: dict[str, Any] | None = None
 
 
 class AgentConfig(ABC):

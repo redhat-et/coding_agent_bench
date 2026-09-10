@@ -39,6 +39,7 @@ class HarborCommandBuilder:
         mounts: list[dict[str, str]] = None,
         n_concurrent: int | None = 1,
         agent_env: dict[str, Any] = None,
+        agent_kwargs: dict[str, Any] = None,
         task_include_pattern: str = None,
         n_tasks: int = None,
         job_name: str = None,
@@ -78,6 +79,11 @@ class HarborCommandBuilder:
         if agent_env is not None:
             for key, value in agent_env.items():
                 args += ["--ae", f"{key}={value}"]
+
+        # Add agent kwargs
+        if agent_kwargs is not None:
+            for key, value in agent_kwargs.items():
+                args += ["--ak", f"{key}={value}"]
 
         # Add environment
         args += ["--env", environment]
@@ -173,6 +179,7 @@ class HarborCommandBuilder:
             mounts=result.mounts,
             n_concurrent=n_concurrent,
             agent_env=result.agent_env,
+            agent_kwargs=result.agent_kwargs,
             task_include_pattern=dataset_pattern,
             n_tasks=n_tasks,
             job_name=job_name,
