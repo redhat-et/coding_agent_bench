@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import signal
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.providers import is_openrouter
 from coding_agent_bench.manifest import deploy as deploy_model
 from coding_agent_bench.manifest import generate
-from coding_agent_bench.utils import cmd_to_string, validate_remote_skill_sources
+from coding_agent_bench.utils import cmd_to_string, envs_to_export_lines, parse_envs, validate_remote_skill_sources
 
 app = typer.Typer()
 
@@ -66,6 +67,18 @@ def run(
             help="Path or git source (org/name[@ref], URL) for skill directories. Can be used multiple times.",
         ),
     ] = None,
+    agent_timeout_multiplier: Annotated[
+        Optional[float],
+        typer.Option(help="Multiplier for the task's agent execution timeout (Harbor's --agent-timeout-multiplier)"),
+    ] = None,
+    thinking: Annotated[
+        Optional[str],
+        typer.Option(help="Agent thinking/reasoning level, e.g. off, minimal, low, medium, high, xhigh (agent-dependent; passed as --ak thinking=<value>)"),
+    ] = None,
+    envs: Annotated[
+        Optional[str],
+        typer.Option(help="Extra environment variables for the harbor process, comma-separated key=value pairs (e.g. --envs FOO=bar,BAZ=qux)"),
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
@@ -74,6 +87,12 @@ def run(
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
+
+    try:
+        extra_envs = parse_envs(envs)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
     
     # If remote, run as a job
     if remote:
@@ -122,13 +141,19 @@ def run(
             max_retries=max_retries,
             retry_include=retry_include,
             skills=skills,
+            agent_timeout_multiplier=agent_timeout_multiplier,
+            thinking=thinking,
         )
-        typer.echo(f"Job command:\n{cmd_to_string(harbor_command)}\n")
+        preview = ""
+        if dry_run:
+            export_lines = envs_to_export_lines(extra_envs)
+            preview = f"{export_lines}\n" if export_lines else ""
+        typer.echo(f"Job command:\n{preview}{cmd_to_string(harbor_command)}\n")
 
         if dry_run:
             return
 
-        proc = subprocess.Popen(harbor_command)
+        proc = subprocess.Popen(harbor_command, env={**os.environ, **extra_envs})
         try:
             proc.wait()
         except KeyboardInterrupt:

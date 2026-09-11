@@ -43,6 +43,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [Run with Openshift](#run-with-openshift)
   - [Run Tasks in Openshift (Orchestrate Locally)](#run-tasks-in-openshift-orchestrate-locally)
   - [Run Tasks and Orchestrate in Openshift](#run-tasks-and-orchestrate-in-openshift)
+- [Debugging Runs](#debugging-runs)
 - [WIP](#wip)
   - [Run with Gemini and Gemini CLI](#run-with-gemini-and-gemini-cli)
   - [Run with vLLM and Gemini CLI](#run-with-vllm-and-gemini-cli)
@@ -727,6 +728,19 @@ uv run coding-agent-bench run \
     --remote \
     --environment openshift
 ```
+
+## Debugging Runs
+
+Each run leaves the agent's raw trajectory at `jobs/<job>/<scenario>/agent/<agent>.txt`
+(one JSON event per line). Render one readably by pointing at the scenario dir:
+
+```sh
+uv run scripts/manual/parse_agent_log.py jobs/<job-name>/<scenario>
+```
+
+Recognized logs: `claude-code.txt`, `opencode.txt`, `pi.txt`. Chain-of-thought is hidden
+by default (`--show-reasoning` to include it) and tool output is capped at 1000 chars
+(`--limit N`, `--limit 0` for everything).
 
 ## WIP
 
