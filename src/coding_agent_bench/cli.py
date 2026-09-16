@@ -75,6 +75,12 @@ def run(
         Optional[str],
         typer.Option(help="Agent thinking/reasoning level, e.g. off, minimal, low, medium, high, xhigh (agent-dependent; passed as --ak thinking=<value>)"),
     ] = None,
+    allow_agent_host: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            help="Allow hostname or IP/CIDR during agent execution only, extending the task's agent-phase network allowlist (Harbor's --allow-agent-host). Repeatable."
+        ),
+    ] = None,
     envs: Annotated[
         Optional[str],
         typer.Option(help="Extra environment variables for the harbor process, comma-separated key=value pairs (e.g. --envs FOO=bar,BAZ=qux)"),
@@ -143,6 +149,7 @@ def run(
             skills=skills,
             agent_timeout_multiplier=agent_timeout_multiplier,
             thinking=thinking,
+            allow_agent_host=allow_agent_host,
         )
         preview = ""
         if dry_run:
