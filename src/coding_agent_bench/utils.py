@@ -1,7 +1,10 @@
+import re
 import shlex
 from pathlib import Path
 
 from harbor.skills import resolve_repo_source
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def cmd_to_string(cmd: list[str]):
@@ -38,8 +41,10 @@ def parse_envs(envs: str | None) -> dict[str, str]:
             raise ValueError(f"Invalid --envs entry (expected key=value): {pair!r}")
         key, value = pair.split("=", 1)
         key = key.strip()
-        if not key:
-            raise ValueError(f"Invalid --envs entry (empty key): {pair!r}")
+        if not _ENV_KEY_RE.match(key):
+            raise ValueError(
+                f"Invalid --envs entry (variable name must match [A-Za-z_][A-Za-z0-9_]*): {pair!r}"
+            )
         parsed[key] = value
     return parsed
 
