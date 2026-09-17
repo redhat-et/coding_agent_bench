@@ -39,7 +39,7 @@ spec:
       terminationGracePeriodSeconds: 60
       serviceAccountName: harbor-orchestrator
       containers:
-      - image: ghcr.io/redhat-et/coding_agent_bench:v0.2.3
+      - image: ghcr.io/redhat-et/coding_agent_bench:v0.2.4
         name: job-queue
         command: ["/bin/sh", "-c"]
         args:

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
 from coding_agent_bench.intake.validation import validate_server_url
-from coding_agent_bench.job import OpenshiftJob
+from coding_agent_bench.job import OpenshiftJob, _build_logged_shell_step
 from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import validate_remote_skill_sources
@@ -747,7 +747,7 @@ async def _run_job(
 
     try:
         if not adopt_existing:
-            is_resume = len(command) == 3 and command[0] == "sh" and command[1] == "-c"
+            is_resume = len(command) == 3 and command[0] in ("sh", "bash") and command[1] == "-c"
             if is_resume:
                 job_spec = oj._resume_job_spec(command[2])
             else:
@@ -940,14 +940,16 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         elif nebius_gpu_config is not None and _nebius:
             try:
                 nebius_instance_name, real_url = await _nebius.acquire_instance(model_name, gpu_config=nebius_gpu_config)
-                is_resume = len(command) == 3 and command[0] == "sh" and command[1] == "-c"
+                is_resume = len(command) == 3 and command[0] in ("sh", "bash") and command[1] == "-c"
                 if is_resume:
                     job_name = row["job_name"]
                     orig_name = job_name.removesuffix("--resume")
                     py_job_dir = f"/app/jobs/{orig_name}"
                     step = _build_url_replace_shell_step(real_url, py_job_dir)
                     command = list(command)
-                    command[2] = command[2].replace(" && uv run", f"{step} && uv run", 1)
+                    # AWS also uses uv run: update URLs only after restoring the config.
+                    parent_step = _build_parent_env_shell_step(py_job_dir)
+                    command[2] = command[2].replace(parent_step, parent_step + step, 1)
                 else:
                     command = [real_url if arg == server_url else arg for arg in command]
                 job_server_url = real_url
@@ -1473,9 +1475,20 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
                 detail=f"Unknown resource config '{nebius_gpu_config}'. Choose from: {', '.join(RESOURCE_CONFIG_REGISTRY)}",
             )
 
-    filter_flags = "".join(f" -f {shlex.quote(t)}" for t in req.filter_error_types)
     job_dir = f"/app/jobs/{shlex.quote(original_job_name)}"
     py_job_dir = f"/app/jobs/{original_job_name}"
+    aws = "uv run --no-sync --no-cache aws --endpoint-url http://harbor-minio:9000"
+    results_uri = shlex.quote(f"s3://results/{original_job_name}/")
+    # A separate bucket keeps recovery snapshots out of results consumers' listings.
+    staging_root = f"s3://results-staging/{original_job_name}/{resume_job_id}"
+    original_uri = shlex.quote(f"{staging_root}/original/")
+    updated_uri = shlex.quote(f"{staging_root}/updated/")
+    resume_command = [
+        "uv", "run", "--no-sync", "--no-cache", "harbor", "jobs", "resume",
+        "-p", py_job_dir,
+    ]
+    for error_type in req.filter_error_types:
+        resume_command += ["-f", error_type]
 
     # URL replacement only applies to real, changing hostnames (e.g. a new
     # nebius instance IP). It is skipped for nebius placeholders (deferred to
@@ -1486,16 +1499,29 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         url_replace_step = _build_url_replace_shell_step(req.server_url, py_job_dir)
 
     shell_command = (
-        "mc alias set minio http://harbor-minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
-        f" && mc cp --recursive minio/results/{shlex.quote(original_job_name)}/ {job_dir}/"
+        "export AWS_ACCESS_KEY_ID=\"$MINIO_ROOT_USER\" "
+        "AWS_SECRET_ACCESS_KEY=\"$MINIO_ROOT_PASSWORD\" "
+        "AWS_DEFAULT_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true"
+        f" && {aws} s3 cp --recursive {results_uri} {job_dir}/"
         f"{_build_parent_env_shell_step(py_job_dir)}"
         f"{url_replace_step}"
-        f" && uv run --no-sync --no-cache harbor jobs resume -p {job_dir}{filter_flags}"
-        f" ; mc rm --recursive --force minio/results/{shlex.quote(original_job_name)}/"
-        f" && mc cp --recursive {job_dir}/ minio/results/{shlex.quote(original_job_name)}/"
+        f" && ({aws} s3api head-bucket --bucket results-staging >/dev/null 2>&1"
+        f" || {aws} s3 mb s3://results-staging"
+        f" || {aws} s3api head-bucket --bucket results-staging)"
+        # Preserve the original before Harbor removes/retries local trial files.
+        f" && {aws} s3 cp --recursive {results_uri} {original_uri}"
+        f" && printf 'complete\\n' | {aws} s3 cp - {shlex.quote(staging_root + '/original.complete')}"
+        " || exit $?; "
+        f"{_build_logged_shell_step(resume_command, py_job_dir)}"
+        # Never touch the canonical prefix until the entire updated upload succeeds.
+        f" {aws} s3 cp --recursive {job_dir}/ {updated_uri}"
+        f" && printf 'complete\\n' | {aws} s3 cp - {shlex.quote(staging_root + '/updated.complete')}"
+        f" && {aws} s3 sync --delete {updated_uri} {results_uri}"
+        # Keep both snapshots for recovery if promotion partially fails or is interrupted.
+        " || exit $?; exit \"$harbor_rc\""
     )
 
-    command = ["sh", "-c", shell_command]
+    command = ["bash", "-c", shell_command]
     job_store.insert(
         resume_job_id, resume_job_name, job_row["agent"],
         job_row["dataset"], job_row["model_name"], effective_server_url, command,

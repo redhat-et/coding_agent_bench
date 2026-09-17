@@ -1,8 +1,9 @@
 [tool.bumpversion]
-current_version = "0.2.3"
+current_version = "0.2.4"
 commit = true
 tag = true
 tag_name = "v{new_version}"
+pre_commit_hooks = ["uv lock"]
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"

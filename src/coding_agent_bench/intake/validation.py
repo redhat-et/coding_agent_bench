@@ -4,7 +4,7 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-from coding_agent_bench.intake.config import ALLOWED_AGENTS, ALLOWED_DATASETS
+from coding_agent_bench.intake.config import ALLOWED_AGENTS
 from coding_agent_bench.nebius_utils import RESOURCE_CONFIG_REGISTRY
 
 NEBIUS_PREFIX = "nebius-"
@@ -124,9 +124,8 @@ def validate_row(
         allowed = ", ".join(sorted(ALLOWED_AGENTS))
         errors.append(f"Unknown agent '{agent}'. Allowed: {allowed}")
 
-    if dataset not in ALLOWED_DATASETS:
-        allowed = ", ".join(sorted(ALLOWED_DATASETS))
-        errors.append(f"Unknown dataset '{dataset}'. Allowed: {allowed}")
+    if not dataset.strip():
+        errors.append("Dataset is empty")
 
     if not server_url:
         errors.append("Server URL is empty")

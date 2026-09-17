@@ -46,6 +46,9 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [WIP](#wip)
   - [Run with Gemini and Gemini CLI](#run-with-gemini-and-gemini-cli)
   - [Run with vLLM and Gemini CLI](#run-with-vllm-and-gemini-cli)
+- [Developers](#developers)
+  - [Bumping the Project Version](#bumping-the-project-version)
+  - [Deploying Changes](#deploying-changes)
 
 
 ## Leaderboards
@@ -747,3 +750,38 @@ harbor run --agent gemini-cli -d $BENCHMARK \
     --ae GEMINI_MODEL=$MODEL_NAME \
     -m $MODEL_NAME
 ```
+
+## Developers
+
+### Bumping the Project Version
+
+Version bumping is managed with `bump-my-version`.
+
+First, create a new release branch for your version (e.g. v1.2.3)
+
+```sh
+git checkout -b release/v1.2.3
+```
+
+Bump the major/minor/patch version with
+
+```sh
+bump-my-version bump <major/minor/patch>
+```
+
+Then push the changes to the remote repository
+
+```sh
+git push origin release/v1.2.3
+git push origin v1.2.3
+```
+
+Once merged, the CI will automatically build a new image tagged for the version and push it to GHCR.
+
+### Deploying Changes
+
+Three things need to happen before changes can be seen in the job queue service or other deployed resources:
+
+1. The changes need to be merged into the main branch
+2. The main branch needs to be [version bumped](#bumping-the-project-version), a PR created and merged, and an image for the new version successfully built
+3. The job queue service and other resources need to be manually redeployed

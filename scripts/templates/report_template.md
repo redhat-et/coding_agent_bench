@@ -2,6 +2,7 @@
 
 ## Benchmark
 
+**Run Date:** {run_date}  
 **Dataset:** [{dataset}](https://hub.harborframework.com/datasets/{dataset}/latest) ({num_tasks} tasks)  
 **Model:** {model}  
 **Harness:** {harness}  
@@ -10,29 +11,34 @@
 
 ## Results
 
-**Score:** {score}%    
-**Errors (Initial Run):** <TODO>  
+**Score:** {score}% ({score_string})   
+**Error Rate:** {error_rate}% ({error_string})  
 **Total Time:** {total_time}  
-**Agent Time:** {agent_time}  
-**Estimated Cost:** ${cost} {gpu_snippet}
+**Agent Time:** {agent_time} ({avg_agent_time_per_task} avg per task)  
+**Estimated Cost:** ${cost} {gpu_snippet} (${avg_cost_per_task} avg per task)  
+**Input Tokens:** {input_tokens} ({avg_input_per_task} avg per task)  
+**Output Tokens:** {output_tokens} ({avg_output_per_task} avg per task)  
+**Cache Hit Rate:** {cache_hit_rate}%
 
 ## vLLM Server Config
-
-**Manifest:** <TODO>  
+  
+**Container Image:** {vllm_image}
 **Hardware:** <TODO>  
-**Model Max Len:** <TODO>  
+**Model Max Len:** {vllm_max_model_len}  
 **Max Concurrency:** <TODO>  
-**Generation Config:**  
-- **Temperature:** <TODO>  
-- **Top p:** <TODO>  
-- **Top k:** <TODO>  
+
+**Command:**
+
+```bash
+{vllm_command}
+```
 
 ## Harbor Config
 
 **Command:**
 
 ```bash
-<TODO>
+{command}
 ```
 
 **`config.json`:**

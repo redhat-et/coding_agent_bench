@@ -39,8 +39,28 @@ var FORM_HEADER_MAP = {
   "Email": "Email Address",
 };
 
+// The form uses a follow-up question when the requester selects "Other".
+// Resolve those answers into the single Queue column consumed by the poller.
+var OTHER_MODEL_HEADER = "If Other, what model?";
+var OTHER_AGENT_HEADER = "If Other, what agent?";
+
 var FORM_RESPONSES_SHEET = "Form Responses 1";
 var QUEUE_SHEET = "Queue";
+
+function getSourceValue(srcRow, headerIndex, headerName) {
+  var index = headerIndex[headerName];
+  return index === undefined ? "" : srcRow[index];
+}
+
+function resolveOtherValue(srcRow, headerIndex, primaryHeader, otherHeader) {
+  var primaryValue = getSourceValue(srcRow, headerIndex, primaryHeader);
+  if (String(primaryValue).trim().toLowerCase() !== "other") {
+    return primaryValue;
+  }
+
+  var otherValue = getSourceValue(srcRow, headerIndex, otherHeader);
+  return String(otherValue).trim() ? otherValue : primaryValue;
+}
 
 function syncFormResponsesToQueue() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -79,9 +99,16 @@ function syncFormResponsesToQueue() {
     if (seen[ts]) continue;
 
     var outRow = QUEUE_HEADERS.map(function (col) {
+      if (col === "Agent") {
+        return resolveOtherValue(srcRow, headerIndex, "Agent", OTHER_AGENT_HEADER);
+      }
+      if (col === "Model Name") {
+        return resolveOtherValue(srcRow, headerIndex, "Model Name", OTHER_MODEL_HEADER);
+      }
+
       var srcHeader = FORM_HEADER_MAP[col];
       if (srcHeader && headerIndex[srcHeader] !== undefined) {
-        return srcRow[headerIndex[srcHeader]];
+        return getSourceValue(srcRow, headerIndex, srcHeader);
       }
       return "";  // Status / Job ID / Error / Notified* are managed by the poller
     });

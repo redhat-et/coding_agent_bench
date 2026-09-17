@@ -146,6 +146,8 @@ def run(
                     proc.wait()
             raise SystemExit(130)
         typer.echo(f"Job output dir: {job_dir}")
+        # The pod's logging/upload wrapper must observe Harbor's failure status.
+        raise typer.Exit(proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
 
 
 @app.command()

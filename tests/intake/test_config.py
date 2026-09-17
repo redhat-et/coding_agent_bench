@@ -1,6 +1,5 @@
 from coding_agent_bench.intake.config import (
     ALLOWED_AGENTS,
-    ALLOWED_DATASETS,
     AUTO_APPROVE,
     Column,
     Status,
@@ -24,12 +23,6 @@ def test_allowed_agents_matches_supported_agent_enum():
 
     enum_values = {a.value for a in SupportedAgent}
     assert ALLOWED_AGENTS == enum_values
-
-
-def test_allowed_datasets_is_nonempty_set():
-    """Ensure the intake dataset allowlist is populated."""
-    assert isinstance(ALLOWED_DATASETS, set)
-    assert len(ALLOWED_DATASETS) > 0
 
 
 def test_column_enum_has_all_columns():

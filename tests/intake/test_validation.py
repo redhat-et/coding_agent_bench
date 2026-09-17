@@ -24,15 +24,24 @@ def test_unknown_agent():
     assert "agent" in errors[0].lower()
 
 
-def test_unknown_dataset():
-    """Reject a dataset outside the supported intake set."""
+def test_dataset_is_not_restricted():
+    """Allow a non-empty dataset name for manual review."""
     errors = validate_row(
         agent="codex",
         dataset="fake-dataset-999",
         server_url="https://vllm.example.com",
     )
-    assert len(errors) == 1
-    assert "dataset" in errors[0].lower()
+    assert errors == []
+
+
+def test_empty_dataset():
+    """Reject a request without a dataset name."""
+    errors = validate_row(
+        agent="codex",
+        dataset=" ",
+        server_url="https://vllm.example.com",
+    )
+    assert errors == ["Dataset is empty"]
 
 
 def test_invalid_url_no_scheme():
@@ -102,7 +111,7 @@ def test_multiple_errors():
     """Report independent agent, dataset, and URL validation errors."""
     errors = validate_row(
         agent="bad-agent",
-        dataset="bad-dataset",
+        dataset="",
         server_url="not-a-url",
     )
     assert len(errors) == 3
