@@ -1,7 +1,10 @@
+import re
 import shlex
 from pathlib import Path
 
 from harbor.skills import resolve_repo_source
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def cmd_to_string(cmd: list[str]):
@@ -23,3 +26,29 @@ def validate_remote_skill_sources(skills: list[str] | None) -> None:
                 "Use org/name[@ref] or an HTTP(S) Git URL; local paths are "
                 "only supported for locally orchestrated runs."
             ) from exc
+
+
+def parse_envs(envs: str | None) -> dict[str, str]:
+    """Parse a comma-separated `key=value,key=value` string into a dict."""
+    if not envs:
+        return {}
+    parsed = {}
+    for pair in envs.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(f"Invalid --envs entry (expected key=value): {pair!r}")
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if not _ENV_KEY_RE.match(key):
+            raise ValueError(
+                f"Invalid --envs entry (variable name must match [A-Za-z_][A-Za-z0-9_]*): {pair!r}"
+            )
+        parsed[key] = value
+    return parsed
+
+
+def envs_to_export_lines(envs: dict[str, str]) -> str:
+    """Format env vars as `export KEY=VALUE` lines, for display purposes only."""
+    return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in envs.items())
