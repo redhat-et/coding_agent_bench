@@ -28,6 +28,20 @@ class Qwen_Qwen3_8_27B_FP8(ModelConfig):
         "--mm-encoder-tp-mode", "data",
     ]
 
+class RedHatAI_Qwen3_8_27B_INT4(ModelConfig):
+
+    name = "RedHatAI/Qwen3.8-27B-INT4"
+    model_max_len = 262144
+    args = [
+        "--model", "RedHatAI/Qwen3.8-27B-INT4",
+        "--max-model-len", "262144",
+        "--kv-cache-dtype", "fp8",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "qwen3_coder",
+        "--reasoning-parser", "qwen3",
+        "--mm-encoder-tp-mode", "data",
+    ]
+
 class RedHatAI_gemma_4_31B_it_FP8_block(ModelConfig):
     
     name = "RedHatAI/gemma-4-31B-it-FP8-block"

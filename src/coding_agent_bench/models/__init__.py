@@ -2,6 +2,7 @@ from coding_agent_bench.models.base import ModelConfig
 from coding_agent_bench.models.configs import (
     Qwen_Qwen3_8_27B,
     Qwen_Qwen3_8_27B_FP8,
+    RedHatAI_Qwen3_8_27B_INT4,
     RedHatAI_gemma_4_31B_it_FP8_block,
     RedHatAI_gpt_oss_120b,
     RedHatAI_Mistral_Small_4_119B_2603_NVFP4,
@@ -12,6 +13,7 @@ from coding_agent_bench.models.configs import (
 MODEL_CONFIGS: list[type[ModelConfig]] = [
     Qwen_Qwen3_8_27B,
     Qwen_Qwen3_8_27B_FP8,
+    RedHatAI_Qwen3_8_27B_INT4,
     RedHatAI_gemma_4_31B_it_FP8_block,
     RedHatAI_gpt_oss_120b,
     RedHatAI_Mistral_Small_4_119B_2603_NVFP4,
