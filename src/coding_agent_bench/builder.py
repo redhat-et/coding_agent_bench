@@ -47,6 +47,9 @@ class HarborCommandBuilder:
         max_retries: int = None,
         retry_include: list[str] = None,
         skills: list[str] = None,
+        agent_timeout_multiplier: float = None,
+        thinking: str = None,
+        allow_agent_host: list[str] = None,
         **kwargs,
     ) -> list[str]:
         """Construct the Harbor CLI arguments for a configured benchmark run."""
@@ -122,6 +125,19 @@ class HarborCommandBuilder:
         for exc in includes:
             args += ["--retry-include", exc]
 
+        # Add agent execution timeout multiplier
+        if agent_timeout_multiplier is not None:
+            args += ["--agent-timeout-multiplier", str(agent_timeout_multiplier)]
+
+        # Add agent thinking/reasoning level (agent-dependent kwarg, e.g. pi's --thinking)
+        if thinking is not None:
+            args += ["--ak", f"thinking={thinking}"]
+
+        # Extend the task's agent-phase network allowlist (e.g. for a model
+        # server host not already covered by the task's allowed_hosts).
+        for host in allow_agent_host or []:
+            args += ["--allow-agent-host", host]
+
         # Execute the job
         cmd = ["harbor", "run", "--debug", *args]
 
@@ -143,6 +159,9 @@ class HarborCommandBuilder:
         max_retries: int = None,
         retry_include: list[str] = None,
         skills: list[str] = None,
+        agent_timeout_multiplier: float = None,
+        thinking: str = None,
+        allow_agent_host: list[str] = None,
         **kwargs,
     ) -> tuple[list[str], Path]:
         """
@@ -187,6 +206,9 @@ class HarborCommandBuilder:
             max_retries=max_retries,
             retry_include=retry_include,
             skills=skills,
+            agent_timeout_multiplier=agent_timeout_multiplier,
+            thinking=thinking,
+            allow_agent_host=allow_agent_host,
         )
 
         job_path = self.jobs_dir / job_name
