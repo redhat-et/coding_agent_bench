@@ -769,14 +769,24 @@ Bump the major/minor/patch version with
 bump-my-version bump <major/minor/patch>
 ```
 
-Then push the changes to the remote repository
+Push the changes to the remote repository
 
 ```sh
 git push origin release/v1.2.3
+```
+
+After the release branch is merged into main, point the tag to the merged commit and push it:
+
+```sh
+git checkout main
+git pull --ff-only origin main
+git tag -f v1.2.3 HEAD
 git push origin v1.2.3
 ```
 
-Once merged, the CI will automatically build a new image tagged for the version and push it to GHCR.
+Once pushed, the CI will automatically build a new image tagged for the version and push it to GHCR.
+The tag push on `main` also publishes a GitHub release with automatically generated release notes.
+Re-running the workflow updates the existing release for that tag; tags on other branches are ignored.
 
 ### Deploying Changes
 
