@@ -777,6 +777,8 @@ git push origin v1.2.3
 ```
 
 Once merged, the CI will automatically build a new image tagged for the version and push it to GHCR.
+The tag push on `main` also publishes a GitHub release with automatically generated release notes.
+Re-running the workflow updates the existing release for that tag; tags on other branches are ignored.
 
 ### Deploying Changes
 
