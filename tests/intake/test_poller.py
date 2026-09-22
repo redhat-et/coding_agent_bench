@@ -127,9 +127,12 @@ def test_invalid_approved_row_marked_needs_review(mock_httpx, mock_email):
     sheets.update_cell.assert_any_call(1, Column.STATUS, Status.NEEDS_REVIEW.value)
 
 
+@patch("coding_agent_bench.intake.poller.send_queued_email")
 @patch("coding_agent_bench.intake.poller.httpx")
-def test_approved_row_with_existing_job_id_skips_resubmission(mock_httpx):
-    """Avoid resubmitting a row that already has a queue job ID."""
+def test_approved_row_with_existing_job_id_retries_pending_notification(
+    mock_httpx, mock_email
+):
+    """Avoid resubmission while retrying a queued email that previously failed."""
     sheets = MagicMock()
     sheets.get_all_rows.return_value = [
         _make_row(STATUS=Status.APPROVED.value, JOB_ID="uuid-existing"),
@@ -143,12 +146,47 @@ def test_approved_row_with_existing_job_id_skips_resubmission(mock_httpx):
     )
 
     mock_httpx.post.assert_not_called()
+    mock_email.assert_called_once_with(
+        "user@example.com",
+        "codex",
+        "swe-bench/swe-bench-verified",
+        "Qwen/Qwen3-32B",
+        "uuid-existing",
+        "bench@example.com",
+    )
+    sheets.update_cell.assert_any_call(1, Column.NOTIFIED_QUEUED, "TRUE")
+    sheets.update_cell.assert_any_call(1, Column.STATUS, Status.QUEUED.value)
+
+
+@patch("coding_agent_bench.intake.poller.send_queued_email")
+@patch("coding_agent_bench.intake.poller.httpx")
+def test_approved_row_with_notified_existing_job_skips_notification(mock_httpx, mock_email):
+    """Do not send a duplicate queued notification on later poller runs."""
+    sheets = MagicMock()
+    sheets.get_all_rows.return_value = [
+        _make_row(
+            STATUS=Status.APPROVED.value,
+            JOB_ID="uuid-existing",
+            NOTIFIED_QUEUED="TRUE",
+        ),
+    ]
+
+    process_rows(
+        sheets=sheets,
+        api_base_url="http://job-queue-service",
+        api_key="test-key",
+        sender_email="bench@example.com",
+    )
+
+    mock_httpx.post.assert_not_called()
+    mock_email.assert_not_called()
     sheets.update_cell.assert_called_once_with(1, Column.STATUS, Status.QUEUED.value)
 
 
+@patch("coding_agent_bench.intake.poller.send_queued_email")
 @patch("coding_agent_bench.intake.poller.send_completed_email")
 @patch("coding_agent_bench.intake.poller.httpx")
-def test_queued_row_updated_to_completed(mock_httpx, mock_email):
+def test_queued_row_updated_to_completed(mock_httpx, mock_email, mock_queued_email):
     """Move a queued row to completed and send its completion notification."""
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -176,12 +214,14 @@ def test_queued_row_updated_to_completed(mock_httpx, mock_email):
         sender_email="bench@example.com",
     )
 
+    mock_queued_email.assert_called_once()
     sheets.update_cell.assert_any_call(1, Column.STATUS, Status.COMPLETED.value)
 
 
+@patch("coding_agent_bench.intake.poller.send_queued_email")
 @patch("coding_agent_bench.intake.poller.send_failed_email")
 @patch("coding_agent_bench.intake.poller.httpx")
-def test_running_row_updated_to_failed(mock_httpx, mock_email):
+def test_running_row_updated_to_failed(mock_httpx, mock_email, mock_queued_email):
     """Move a running row to failed and send its failure notification."""
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -209,6 +249,7 @@ def test_running_row_updated_to_failed(mock_httpx, mock_email):
         sender_email="bench@example.com",
     )
 
+    mock_queued_email.assert_called_once()
     sheets.update_cell.assert_any_call(1, Column.STATUS, Status.FAILED.value)
 
 
@@ -232,9 +273,12 @@ def test_already_completed_row_is_skipped(mock_httpx):
     sheets.update_cell.assert_not_called()
 
 
+@patch("coding_agent_bench.intake.poller.send_queued_email")
 @patch("coding_agent_bench.intake.poller.send_completed_email")
 @patch("coding_agent_bench.intake.poller.httpx")
-def test_completed_row_with_pending_notification_is_retried(mock_httpx, mock_email):
+def test_completed_row_with_pending_notification_is_retried(
+    mock_httpx, mock_email, mock_queued_email
+):
     """Retry a completion email when the terminal status was saved first."""
     mock_response = MagicMock()
     mock_response.json.return_value = {"status": "completed"}
@@ -253,13 +297,18 @@ def test_completed_row_with_pending_notification_is_retried(mock_httpx, mock_ema
     )
 
     mock_httpx.get.assert_called_once()
+    mock_queued_email.assert_called_once()
     mock_email.assert_called_once()
-    sheets.update_cell.assert_called_once_with(1, Column.NOTIFIED_DONE, "TRUE")
+    sheets.update_cell.assert_any_call(1, Column.NOTIFIED_QUEUED, "TRUE")
+    sheets.update_cell.assert_any_call(1, Column.NOTIFIED_DONE, "TRUE")
 
 
+@patch("coding_agent_bench.intake.poller.send_queued_email")
 @patch("coding_agent_bench.intake.poller.send_failed_email")
 @patch("coding_agent_bench.intake.poller.httpx")
-def test_failed_row_with_pending_notification_is_retried(mock_httpx, mock_email):
+def test_failed_row_with_pending_notification_is_retried(
+    mock_httpx, mock_email, mock_queued_email
+):
     """Retry a failure email when the terminal status was saved first."""
     mock_response = MagicMock()
     mock_response.json.return_value = {"status": "failed", "error": "Pod crashed"}
@@ -282,8 +331,10 @@ def test_failed_row_with_pending_notification_is_retried(mock_httpx, mock_email)
     )
 
     mock_httpx.get.assert_called_once()
+    mock_queued_email.assert_called_once()
     mock_email.assert_called_once()
-    sheets.update_cell.assert_called_once_with(1, Column.NOTIFIED_DONE, "TRUE")
+    sheets.update_cell.assert_any_call(1, Column.NOTIFIED_QUEUED, "TRUE")
+    sheets.update_cell.assert_any_call(1, Column.NOTIFIED_DONE, "TRUE")
 
 
 def test_queue_verify_defaults_to_public_trust_store(monkeypatch):

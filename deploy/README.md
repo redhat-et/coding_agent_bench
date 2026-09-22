@@ -201,8 +201,7 @@ approval; the requester never needs to know that endpoint.
 
 **`intake-poller-google-sa`** — the Google service-account credential mounted
 at `/etc/google/service-account.json` for Sheets access. Notification email is
-sent through the internal SMTP relay, so no Gmail mailbox credential or
-domain-wide delegation is required.
+sent through the Google Workspace SMTP relay using IP allowlisting.
 
 ```yaml
 apiVersion: v1
@@ -214,10 +213,11 @@ stringData:
   service-account.json: <sa-file-content>
 ```
 
-The CronJob sends notifications through `smtp.corp.redhat.com` on port 25.
-Set `SMTP_HOST` and `SMTP_PORT` on the poller when a different internal relay
-is required. Set `SMTP_STARTTLS=true` when that relay requires STARTTLS. The
-configured `SENDER_EMAIL` must be an address permitted by the relay.
+The CronJob sends notifications through `smtp-relay.gmail.com` on port 587 with
+STARTTLS. Configure the Google Workspace SMTP relay to allow the cluster's
+egress IP. The configured `SENDER_EMAIL` must be an address permitted by the
+relay. To use another relay, set `SMTP_HOST`, `SMTP_PORT`, and
+`SMTP_STARTTLS` in the CronJob.
 
 Each submitted Queue row carries a deterministic idempotency key. If the
 CronJob is retried after a network timeout, the queue API returns the original

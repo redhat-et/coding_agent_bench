@@ -156,10 +156,10 @@ def _handle_new_row(
     dataset = row[Column.DATASET].strip()
     model_name = row[Column.MODEL_NAME].strip()
     server_url = row[Column.SERVER_URL].strip()
-    email = row[Column.EMAIL].strip()
 
     existing_job_id = row[Column.JOB_ID].strip()
     if existing_job_id:
+        _notify_queued_email_if_needed(sheets, row, row_num, existing_job_id, sender_email)
         sheets.update_cell(row_num, Column.STATUS, Status.QUEUED.value)
         return
 
@@ -192,8 +192,29 @@ def _handle_new_row(
     sheets.update_cell(row_num, Column.JOB_ID, job_id)
     sheets.update_cell(row_num, Column.STATUS, Status.QUEUED.value)
 
+    _notify_queued_email_if_needed(sheets, row, row_num, job_id, sender_email)
+
+
+def _notify_queued_email_if_needed(
+    sheets: SheetsClient,
+    row: list[str],
+    row_num: int,
+    job_id: str,
+    sender_email: str,
+) -> None:
+    """Send the queued notification once, retrying rows left pending by a failure."""
+    if row[Column.NOTIFIED_QUEUED].strip().upper() == "TRUE":
+        return
+
     try:
-        send_queued_email(email, agent, dataset, model_name, job_id, sender_email)
+        send_queued_email(
+            row[Column.EMAIL].strip(),
+            row[Column.AGENT].strip(),
+            row[Column.DATASET].strip(),
+            row[Column.MODEL_NAME].strip(),
+            job_id,
+            sender_email,
+        )
         sheets.update_cell(row_num, Column.NOTIFIED_QUEUED, "TRUE")
     except Exception:
         logger.exception("Failed to send queued email for row %d", row_num)
@@ -215,6 +236,8 @@ def _handle_inflight_row(
 
     if not job_id:
         return
+
+    _notify_queued_email_if_needed(sheets, row, row_num, job_id, sender_email)
 
     try:
         job_data = _check_job_status(api_base_url, api_key, job_id)

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from coding_agent_bench.intake.notify import (
     SMTP_DEFAULT_HOST,
     SMTP_DEFAULT_PORT,
+    SMTP_DEFAULT_STARTTLS,
     SMTP_TIMEOUT_SECONDS,
     send_queued_email,
     send_completed_email,
@@ -22,6 +23,8 @@ def _assert_default_smtp_connection(mock_smtp: MagicMock) -> MagicMock:
         timeout=SMTP_TIMEOUT_SECONDS,
     )
     server = _get_smtp_server(mock_smtp)
+    if SMTP_DEFAULT_STARTTLS:
+        server.starttls.assert_called_once_with()
     server.send_message.assert_called_once()
     return server
 

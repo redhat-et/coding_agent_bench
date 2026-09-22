@@ -2,24 +2,26 @@ import os
 import smtplib
 from email.message import EmailMessage
 
-SMTP_DEFAULT_HOST = "smtp.corp.redhat.com"
-SMTP_DEFAULT_PORT = 25
+SMTP_DEFAULT_HOST = "smtp-relay.gmail.com"
+SMTP_DEFAULT_PORT = 587
+SMTP_DEFAULT_STARTTLS = True
 SMTP_TIMEOUT_SECONDS = 30
 
 
 def _smtp_settings() -> tuple[str, int, bool]:
     """Read SMTP connection settings from the environment.
 
-    The default relay is reachable from the internal network and does not
-    require mailbox credentials. STARTTLS remains opt-in for environments
-    where the relay requires it.
+    The default relay is the Google Workspace submission endpoint. It is
+    reachable from the cluster over outbound SMTP submission, and STARTTLS
+    is enabled by default. The deployment uses Google Workspace IP
+    allowlisting instead of mailbox credentials.
     """
     host = os.environ.get("SMTP_HOST", SMTP_DEFAULT_HOST)
     try:
         port = int(os.environ.get("SMTP_PORT", str(SMTP_DEFAULT_PORT)))
     except ValueError as exc:
         raise ValueError("SMTP_PORT must be an integer") from exc
-    starttls = os.environ.get("SMTP_STARTTLS", "false").lower() in {
+    starttls = os.environ.get("SMTP_STARTTLS", str(SMTP_DEFAULT_STARTTLS).lower()).lower() in {
         "1",
         "true",
         "yes",
@@ -29,7 +31,7 @@ def _smtp_settings() -> tuple[str, int, bool]:
 
 
 def _send_email(sender: str, to: str, subject: str, body_text: str) -> None:
-    """Send a plain-text message through the internal SMTP relay."""
+    """Send a plain-text message through the configured SMTP relay."""
     message = EmailMessage()
     message["To"] = to
     message["From"] = sender

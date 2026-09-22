@@ -46,9 +46,11 @@ spec:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /etc/google/service-account.json
             - name: SMTP_HOST
-              value: smtp.corp.redhat.com
+              value: smtp-relay.gmail.com
             - name: SMTP_PORT
-              value: "25"
+              value: "587"
+            - name: SMTP_STARTTLS
+              value: "true"
             - name: GOOGLE_SHEET_ID
               valueFrom:
                 secretKeyRef:
