@@ -265,8 +265,10 @@ class NebiusInstanceManager:
                     "--id", instance_id,
                 ]
                 await self.exec(args)
-            else:
-                logger.info(f"Instance {instance_name} ({instance_id}) is {state}, waiting for RUNNING")
+                await self._wait_for_instance_state(instance_name, "RUNNING")
+                logger.info(f"Instance {instance_name} ({instance_id}) is now running")
+                return
+            logger.info(f"Instance {instance_name} ({instance_id}) is {state}, waiting for RUNNING")
             await self._wait_for_instance_state(instance_name, "RUNNING")
             logger.info(f"Instance {instance_name} ({instance_id}) is now running")
             return

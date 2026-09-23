@@ -17,15 +17,16 @@ record() {
     if [ "$FAIL_STAGE" = "$1" ]; then return 23; fi
 }
 before() { record before; }
-python3() {
-    case "$2" in
-        *new_host*) record url ;;
-        *) record parent ;;
-    esac
-}
 uv() {
     shift 3
     case "$1" in
+        python)
+            case "$4" in
+                parent) record parent ;;
+                endpoint) record url ;;
+                *) return 99 ;;
+            esac
+            ;;
         harbor)
             record harbor
             printf 'Harbor stdout\n'
@@ -124,7 +125,7 @@ def test_upload_runs_after_harbor_and_preserves_exit_status(
     if resume:
         command = enqueue_resume(queue_api).command[2]
         expected = [
-            "download", "parent", "head", "backup", "backup-marker",
+            "download", "parent", "url", "head", "backup", "backup-marker",
             "harbor", "upload", "upload-marker", "promote",
         ]
     else:
