@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
+from coding_agent_bench.agents.opencode import OpenCodeSubagentConfig
 from coding_agent_bench.helpers.codex import codex_create_toml
 from coding_agent_bench.models.configs import Qwen_Qwen3_8_27B, Qwen_Qwen3_8_27B_FP8
 from coding_agent_bench.providers import (
@@ -180,9 +181,47 @@ class OpenCodeAgentConfig(AgentConfig):
             },
         }
 
+        subagent = kwargs.get("opencode_subagent")
+        if subagent is not None:
+            subagent = OpenCodeSubagentConfig.model_validate(subagent)
+            reviewer_url, reviewer_key = resolve_provider(subagent.server_url or server_url)
+            reviewer_options = {
+                "baseURL": reviewer_url.rstrip("/").removesuffix("/v1") + "/v1"
+            }
+            if reviewer_key:
+                reviewer_options["apiKey"] = reviewer_key
+            # A separate provider preserves independent endpoints and limits,
+            # even when the primary and reviewer use the same model ID.
+            opencode_config["provider"]["reviewer"] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Reviewer",
+                "options": reviewer_options,
+                "models": {
+                    subagent.model_name: {
+                        "name": subagent.model_name,
+                        "limit": {
+                            "context": int(subagent.model_max_len * 0.75),
+                            "output": int(subagent.model_max_len * 0.25),
+                        },
+                    }
+                },
+            }
+            opencode_config["agent"] = {
+                "build": {"permission": {"task": {"reviewer": "allow"}}},
+                "reviewer": {
+                    "mode": "subagent",
+                    "model": "reviewer/" + subagent.model_name,
+                    "description": subagent.description,
+                    "prompt": subagent.prompt,
+                    "permission": {"edit": "deny", "bash": "deny", "task": "deny"},
+                },
+            }
+
         agent_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
         }
+        if subagent is not None and subagent.server_url is None:
+            agent_env["CAB_OPENCODE_SUBAGENT_INHERIT_ENDPOINT"] = "1"
         return AgentConfigResult(model=model, agent_env=agent_env)
 
 

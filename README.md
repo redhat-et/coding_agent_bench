@@ -509,6 +509,50 @@ harbor run --agent opencode -p $DATASET_DIR/swe-bench-verified \
     --ae "OPENCODE_CONFIG_CONTENT=$OPENCODE_CONFIG_CONTENT"
 ```
 
+#### Optional OpenCode reviewer
+
+OpenCode experiments accept an optional `opencode_subagent` object in the queue's
+`POST /jobs` JSON. See [the example experiment](examples/opencode-subagent.json).
+Replace its model names and endpoint URLs before submitting it:
+
+```sh
+curl -X POST "$API_URL/jobs" -H "X-API-Key: $API_KEY" \
+    -H 'Content-Type: application/json' --data-binary @examples/opencode-subagent.json
+```
+
+The equivalent CLI option is an inline JSON object:
+
+```sh
+coding-agent-bench run --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name Qwen/Qwen3.8-27B --server-url https://primary-model.example.com/v1 \
+    --opencode-subagent '{"model_name":"RedHatAI/gpt-oss-120b","server_url":"https://reviewer-model.example.com/v1","model_max_len":131072}'
+```
+
+`model_name` is required. `server_url` defaults to the primary endpoint; an explicit
+URL stays independent when the primary endpoint changes on resume. Either endpoint
+can use `openrouter`, requiring `OPENROUTER_API_KEY` in the execution environment
+(remote jobs receive the existing queue secret). Reviewer servers must already be
+available; this option does not provision a second model server.
+
+The reviewer endpoint's hostname is added to Harbor's agent-phase network
+allowlist; verifier access is unchanged. Inherited reviewer allowances follow
+primary endpoint changes on resume. Explicit reviewer URLs submitted through
+the queue must use HTTPS and resolve to public addresses, and are checked again
+before a new job is launched and before restored trials resume. Wildcard reviewer
+hostnames are rejected.
+
+`model_max_len` defaults to 262000 and uses the same 75% context / 25% output split
+as the primary. Optional `description` and `prompt` customize when to consult the
+reviewer and how it responds. OpenCode exposes the named `reviewer` through its
+Task tool and explicitly permits the default Build agent to invoke it. The reviewer
+can read code and return advice; edits, shell commands, and further delegation are
+disabled. Escalation is the primary model's decision, so a configured reviewer may
+not be called in every trial. See [OpenCode's agent documentation](https://opencode.ai/docs/agents/).
+
+Omitting this option preserves the existing generated configuration. Other
+harnesses reject this option.
+
 ### OpenHands vLLM
 
 Set the following variables in your environ:

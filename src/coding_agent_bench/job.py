@@ -8,6 +8,8 @@ import os
 import json
 
 from coding_agent_bench.preemption import PAUSE_REQUEST_PATH
+from coding_agent_bench.agents.opencode import OpenCodeSubagentConfig
+from coding_agent_bench.providers import is_openrouter
 
 
 DEFAULT_CODING_AGENT_BENCH_IMAGE = "ghcr.io/redhat-et/coding_agent_bench:v0.2.6"
@@ -121,6 +123,10 @@ class OpenshiftJob:
             {"name": "HARBOR_PARENT", "value": self._pod_name},
             {"name": "CAB_PAUSE_REQUEST_PATH", "value": PAUSE_REQUEST_PATH},
         ]
+        # The reviewer can use OpenRouter while the primary uses a local model.
+        reviewer = OpenCodeSubagentConfig.from_command(command)
+        if reviewer is not None and reviewer.server_url is not None:
+            openrouter = openrouter or is_openrouter(reviewer.server_url)
         if openrouter:
             env.append(
                 {
