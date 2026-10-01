@@ -9,7 +9,7 @@
 **Environment:** {environment}  
 **Job Name:** {job_name}  
 
-## Results
+## Results{results_suffix}
 
 **Score:** {score}% ({score_string})   
 **Error Rate:** {error_rate}% ({error_string})  
@@ -41,14 +41,8 @@
 {command}
 ```
 
-**`config.json`:**
-
-```json
-{config_json}
-```
+{config_section}
 
 ## `result.json`
 
-```json
-{result_json}
-```
+{result_section}

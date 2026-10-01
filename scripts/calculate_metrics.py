@@ -21,6 +21,12 @@ class Metrics(BaseModel):
     agent_time_seconds: int
     total_time_seconds: int
     cost_usd: float
+    # Optional concurrency-normalized wall-clock estimates, set when averaging
+    # runs that used different n_concurrent_trials settings. The base time
+    # fields stay on the summed-duration basis so per-task averages remain
+    # independent of concurrency.
+    wall_total_time_seconds: int | None = None
+    wall_agent_time_seconds: int | None = None
     
     @model_validator(mode="after")
     def missing_cost(self):
@@ -62,7 +68,8 @@ class Metrics(BaseModel):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("job_dir", type=Path)
+    parser.add_argument("job_dirs", type=Path, nargs="+",
+                        help="One or more Harbor job dirs; multiple runs are averaged")
     parser.add_argument("--num-gpus", type=int, default=None)
     def _positive_float(value):
         f = float(value)
@@ -84,6 +91,15 @@ def determine_format(job_dir: Path):
     return "legacy"
 
 
+def extract_score(job_result: dict, eval_name: str) -> float:
+    """Score metric: 'reward' (itbench-style) or 'mean' (legacy), mirroring aggregate_runs.py."""
+    metrics = job_result["stats"]["evals"][eval_name]["metrics"][0]
+    for key in ("reward", "mean"):
+        if key in metrics:
+            return float(metrics[key])
+    raise KeyError(f"No score metric found in eval '{eval_name}'; available keys: {sorted(metrics)}")
+
+
 def compute_metrics_legacy(job_dir: Path, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
 
     job_result_path = job_dir / "result.json"
@@ -94,7 +110,7 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int = None, gpu_cost_per_hou
 
     eval_name = list(job_result["stats"]["evals"].keys())[0]
     print(eval_name)
-    n_concurrent = job_config["n_concurrent_trials"]
+    n_concurrent = job_config.get("n_concurrent_trials", 1)
     task_results = [
         json.loads(p.read_text())
         for p in job_dir.rglob("result.json")
@@ -152,7 +168,7 @@ def compute_metrics_legacy(job_dir: Path, num_gpus: int = None, gpu_cost_per_hou
         )
     )
     total_tokens = n_input_tokens + n_cache_tokens + n_output_tokens
-    score = round(job_result["stats"]["evals"][eval_name]["metrics"][0]["mean"], 3)
+    score = round(extract_score(job_result, eval_name), 3)
     cost = job_result["stats"]["cost_usd"]
     if cost is None and num_gpus is None:
         raise ValueError(
@@ -188,7 +204,7 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int = None, gpu_cost_per_hou
 
     eval_name = list(job_result["stats"]["evals"].keys())[0]
     print(eval_name)
-    n_concurrent = job_config["n_concurrent_trials"]
+    n_concurrent = job_config.get("n_concurrent_trials", 1)
     task_results = [
         json.loads(p.read_text())
         for p in job_dir.rglob("result.json")
@@ -223,7 +239,7 @@ def compute_metrics_latest(job_dir: Path, num_gpus: int = None, gpu_cost_per_hou
         + job_result["stats"]["n_cache_tokens"]
         + job_result["stats"]["n_output_tokens"]
     )
-    score = round(job_result["stats"]["evals"][eval_name]["metrics"][0]["mean"], 3)
+    score = round(extract_score(job_result, eval_name), 3)
     cost = job_result["stats"]["cost_usd"]
     if cost is None and num_gpus is None:
         raise ValueError(
@@ -253,6 +269,45 @@ def format_time(seconds: int):
     m, s = divmod(m, 60)
     return f"{h:02d}h {m:02d}m {s:02d}s"
 
+def average_metrics(metrics_list: list[Metrics], concurrencies: list[int] | None = None) -> Metrics:
+    """Average metrics across multiple runs of the same benchmark/model/harness.
+
+    agent_time_seconds/total_time_seconds are averaged as recorded (summed
+    durations), keeping per-task averages concurrency-independent. When
+    concurrencies is given, wall_total_time_seconds/wall_agent_time_seconds
+    additionally carry the mean of per-run wall-clock estimates (each run's
+    sum divided by its own concurrency), correct even when runs used
+    different concurrency settings.
+    """
+    n_runs = len(metrics_list)
+
+    def mean_int(values: list[int]) -> int:
+        return int(round(sum(values) / n_runs))
+
+    wall_total = (
+        mean_int([m.total_time_seconds // c for m, c in zip(metrics_list, concurrencies)])
+        if concurrencies else None
+    )
+    wall_agent = (
+        mean_int([m.agent_time_seconds // c for m, c in zip(metrics_list, concurrencies)])
+        if concurrencies else None
+    )
+
+    return Metrics(
+        n_tasks=metrics_list[0].n_tasks,
+        n_errors=mean_int([m.n_errors for m in metrics_list]),
+        score=round(sum(m.score for m in metrics_list) / n_runs, 3),
+        n_input_tokens=mean_int([m.n_input_tokens for m in metrics_list]),
+        n_cache_tokens=mean_int([m.n_cache_tokens for m in metrics_list]),
+        n_output_tokens=mean_int([m.n_output_tokens for m in metrics_list]),
+        n_total_tokens=mean_int([m.n_total_tokens for m in metrics_list]),
+        agent_time_seconds=mean_int([m.agent_time_seconds for m in metrics_list]),
+        total_time_seconds=mean_int([m.total_time_seconds for m in metrics_list]),
+        cost_usd=round(sum(m.cost_usd for m in metrics_list) / n_runs, 2),
+        wall_total_time_seconds=wall_total,
+        wall_agent_time_seconds=wall_agent,
+    )
+
 def prettify_command(args: list[str]):
     """Prettify a shell command with line breaks for easier reading."""
     lines = []
@@ -270,34 +325,90 @@ def prettify_command(args: list[str]):
     pretty_command = " \\\n  ".join(lines)
     return pretty_command
 
-def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
+def _reward_outcome_counts(result_dict: dict) -> tuple[int, int, int] | None:
+    """(full, partial, zero) reward counts from a run's reward distribution.
+
+    Returns None when no reward distribution exists (legacy pass/fail
+    benchmarks keep the Success/Failed wording).
+    """
+    evals = result_dict.get("stats", {}).get("evals", {})
+    for eval_data in evals.values():
+        reward_stats = eval_data.get("reward_stats", {}).get("reward")
+        if not reward_stats:
+            continue
+        n_full = n_partial = n_zero = 0
+        for reward_str, task_ids in reward_stats.items():
+            reward = float(reward_str)
+            n = len(task_ids)
+            if reward >= 1.0:
+                n_full += n
+            elif reward > 0.0:
+                n_partial += n
+            else:
+                n_zero += n
+        return (n_full, n_partial, n_zero)
+    return None
+
+def _reward_outcome_string(result_dicts: list[dict], n_errors: int) -> str | None:
+    """Outcome counts across runs, averaged for multi-run reports.
+
+    Returns e.g. "18 Full Reward / 3 Partial Reward / 19 Zero Reward / 0 Errors"
+    (mean counts across runs, rounded), or None when no run has a reward
+    distribution.
+    """
+    all_counts = [_reward_outcome_counts(r) for r in result_dicts]
+    all_counts = [c for c in all_counts if c is not None]
+    if not all_counts:
+        return None
+    n_runs = len(all_counts)
+    n_full = round(sum(c[0] for c in all_counts) / n_runs)
+    n_partial = round(sum(c[1] for c in all_counts) / n_runs)
+    n_zero = round(sum(c[2] for c in all_counts) / n_runs)
+    return f"{n_full} Full Reward / {n_partial} Partial Reward / {n_zero} Zero Reward / {n_errors} Errors"
+
+def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
+    n_runs = len(job_dirs)
+    job_dir = job_dirs[0]
     report_template_path = Path(__file__).parent / "templates" / "report_template.md"
     report_template = report_template_path.read_text()
     
-    job_result_path = job_dir / "result.json"
-    result_json = job_result_path.read_text()
-    result_dict = json.loads(result_json)
+    # Per-run configs, results, and lock files (job_dirs are ordered by start time)
+    run_configs = [json.loads((d / "config.json").read_text()) for d in job_dirs]
+    run_results = [json.loads((d / "result.json").read_text()) for d in job_dirs]
+    run_locks = [json.loads((d / "lock.json").read_text()) for d in job_dirs]
 
-    job_config_path = job_dir / "config.json"
-    config_json = job_config_path.read_text()
-    config_dict = json.loads(config_json)
+    result_json = (job_dir / "result.json").read_text()
+    result_dict = run_results[0]
+
+    config_json = (job_dir / "config.json").read_text()
+    config_dict = run_configs[0]
     
-    lock_file_path = job_dir / "lock.json"
-    lock_json = lock_file_path.read_text()
-    lock_dict = json.loads(lock_json)
+    lock_dict = run_locks[0]
     
     # Parse job metadata
-    run_date = lock_dict["created_at"]
-    dataset = config_dict["datasets"][0]["name"] if config_dict["datasets"][0]["name"] is not None else config_dict["datasets"][0]["path"]
+    run_date = ", ".join(lock["created_at"] for lock in run_locks)
+    dataset = config_dict["datasets"][0].get("name") or config_dict["datasets"][0].get("path")
     dataset = "swe-bench/swe-bench-verified" if dataset == "datasets/swe-bench-verified" else dataset
     num_tasks = result_dict["n_total_trials"]
     environment = config_dict["environment"]["type"]
-    model = config_dict["agents"][0]["model_name"].replace("vllm/", "")
-    harness = config_dict["agents"][0]["name"]
-    job_name = config_dict["job_name"]
+    agent_config = config_dict["agents"][0]
+    model = (agent_config.get("model_name") or (agent_config.get("env") or {}).get("ANTHROPIC_MODEL") or "<TODO>").replace("vllm/", "")
+    harness = agent_config["name"]
+    job_name = ", ".join(c["job_name"] for c in run_configs)
 
-    # Create score string
-    score_string = f"{int(metrics.score * metrics.n_tasks)} Success / {int((1-metrics.score) * metrics.n_tasks) - metrics.n_errors} Failed / {metrics.n_errors} Errors"
+    # Results heading (marked as averaged when multiple runs)
+    results_suffix = f" (avg of {n_runs} runs)" if n_runs > 1 else ""
+
+    # Create score string. For reward-based benchmarks a task can score
+    # partial credit, so derive full/partial/zero-reward counts from the
+    # reward distribution when available instead of rounding score*n_tasks
+    # (which conflates partial credit with successes).
+    reward_string = _reward_outcome_string(run_results, metrics.n_errors)
+    if reward_string is not None:
+        score_string = reward_string
+    else:
+        n_success = round(metrics.score * metrics.n_tasks)
+        score_string = f"{n_success} Success / {metrics.n_tasks - n_success - metrics.n_errors} Failed / {metrics.n_errors} Errors"
     
     # Create errors string
     eval_name = list(result_dict["stats"]["evals"].keys())[0]
@@ -308,10 +419,21 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None, gpu
     invocation_command = lock_dict.get("invocation")
     command = prettify_command(invocation_command) if invocation_command else "<TODO>"
 
-    # Calculate time spent
-    n_concurrent = config_dict["n_concurrent_trials"]
-    total_time = format_time(metrics.total_time_seconds // n_concurrent)
-    agent_time = format_time(metrics.agent_time_seconds // n_concurrent)
+    # Calculate time spent. For a single run, the summed durations are divided
+    # by that run's concurrency. For averaged multi-run reports, prefer the
+    # per-run-normalized wall-clock estimates (each run divided by its own
+    # concurrency before averaging) when present.
+    n_concurrent = config_dict.get("n_concurrent_trials", 1)
+    total_time = format_time(
+        metrics.wall_total_time_seconds
+        if metrics.wall_total_time_seconds is not None
+        else metrics.total_time_seconds // n_concurrent
+    )
+    agent_time = format_time(
+        metrics.wall_agent_time_seconds
+        if metrics.wall_agent_time_seconds is not None
+        else metrics.agent_time_seconds // n_concurrent
+    )
     avg_agent_time_per_task = format_time(metrics.mean_agent_time_seconds_per_task)
 
     # Calculate Token Usage
@@ -335,6 +457,21 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None, gpu
         vllm_max_model_len = model_config.model_max_len
         vllm_command = ["vllm", "serve"] + model_config.args + model_config.default_args + ["--tensor-parallel-size", str(num_gpus)] if num_gpus else []
         vllm_command = prettify_command(vllm_command)
+    
+    # Build config/result sections: identical to the old single-run layout for 1 run,
+    # labeled "Run N" subsections (ordered by start time) for multiple runs
+    if n_runs == 1:
+        config_section = f"**`config.json`:**\n\n```json\n{config_json}\n```"
+        result_section = f"```json\n{result_json}\n```"
+    else:
+        config_section = "\n\n".join(
+            f"### Run {i + 1}: {run_configs[i]['job_name']}\n\n**`config.json`:**\n\n```json\n{(d / 'config.json').read_text()}\n```"
+            for i, d in enumerate(job_dirs)
+        )
+        result_section = "\n\n".join(
+            f"### Run {i + 1}: {run_configs[i]['job_name']}\n\n```json\n{(d / 'result.json').read_text()}\n```"
+            for i, d in enumerate(job_dirs)
+        )
     
     # Create report
     report = report_template.format(
@@ -364,8 +501,9 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None, gpu
         vllm_max_model_len=vllm_max_model_len,
         vllm_command=vllm_command,
         command=command,
-        config_json=config_json,
-        result_json=result_json,
+        config_section=config_section,
+        result_section=result_section,
+        results_suffix=results_suffix,
     )
     
     # Save report
@@ -377,26 +515,64 @@ def create_job_report(job_dir: Path, metrics: Metrics, num_gpus: int = None, gpu
     return report
 
 
+def run_identity(job_dir: Path) -> tuple:
+    """Identity of a run for averaging compatibility: dataset, model, harness."""
+    config = json.loads((job_dir / "config.json").read_text())
+    agent_config = config["agents"][0]
+    dataset = config["datasets"][0].get("name") or config["datasets"][0].get("path")
+    model = (agent_config.get("model_name") or (agent_config.get("env") or {}).get("ANTHROPIC_MODEL") or "").replace("vllm/", "")
+    harness = agent_config["name"]
+    return (dataset, model, harness)
+
 def main():
     args = parse_args()
-    job_dir = args.job_dir
     num_gpus = args.num_gpus
     gpu_cost_per_hour = args.gpu_cost_per_hour
 
-    # Determine job format
-    job_format = determine_format(job_dir)
+    # Order runs by start time (Run 1 = earliest)
+    job_dirs = sorted(
+        args.job_dirs,
+        key=lambda d: json.loads((d / "lock.json").read_text())["created_at"],
+    )
 
-    # Compute metrics
-    if job_format == "legacy":
-        metrics = compute_metrics_legacy(job_dir, num_gpus, gpu_cost_per_hour)
-    elif job_format == "latest":
-        metrics = compute_metrics_latest(job_dir, num_gpus, gpu_cost_per_hour)
+    # Compute metrics for each run
+    all_metrics = []
+    for job_dir in job_dirs:
+        job_format = determine_format(job_dir)
+        if job_format == "legacy":
+            m = compute_metrics_legacy(job_dir, num_gpus, gpu_cost_per_hour)
+        elif job_format == "latest":
+            m = compute_metrics_latest(job_dir, num_gpus, gpu_cost_per_hour)
+        print(f"run {job_dir.name}: score={m.score} errors={m.n_errors} cost=${m.cost_usd}")
+        all_metrics.append(m)
+
+    if any(m.n_tasks != all_metrics[0].n_tasks for m in all_metrics):
+        raise SystemExit("Inconsistent runs: differing n_tasks, refusing to average")
+
+    # Refuse to average runs of different benchmarks/models/harnesses
+    identities = {run_identity(d) for d in job_dirs}
+    if len(identities) > 1:
+        raise SystemExit(f"Inconsistent runs: differing dataset/model/harness {identities}, refusing to average")
+
+    # Per-run concurrency (config n_concurrent_trials, falling back to the lock file)
+    concurrencies = [
+        json.loads((d / "config.json").read_text()).get("n_concurrent_trials")
+        or json.loads((d / "lock.json").read_text()).get("n_concurrent_trials", 1)
+        for d in job_dirs
+    ]
+
+    # Average across runs when more than one is given. Concurrency per run is
+    # passed so wall-clock estimates normalize each run by its own setting.
+    if len(all_metrics) == 1:
+        metrics = all_metrics[0]
+    else:
+        metrics = average_metrics(all_metrics, concurrencies)
 
     print(metrics.model_dump_json(indent=4))
     
     # Create the job report
     if args.report:
-        create_job_report(job_dir, metrics, num_gpus, gpu_cost_per_hour)
+        create_job_report(job_dirs, metrics, num_gpus, gpu_cost_per_hour)
 
 if __name__ == "__main__":
     main()
