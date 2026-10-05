@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import NamedTuple, Optional
 
 import asyncio
@@ -21,6 +21,7 @@ from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import validate_remote_skill_sources
 from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
 from coding_agent_bench.agents import AGENT_REGISTRY
+from coding_agent_bench.agents.opencode import OpenCodeSubagentConfig
 from coding_agent_bench.ui import build_submit_form_html
 from coding_agent_bench import VERSION
 from coding_agent_bench.preemption import CANCELLED_ERROR_TYPE, PAUSE_PLUGIN
@@ -464,6 +465,16 @@ class CreateJobRequest(BaseModel):
     dataset: str = Field(..., description="Dataset name or path")
     model_name: str = Field(..., description="Model name")
     server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' (e.g. nebius-h200) for managed Nebius instances; or 'openrouter' to use OpenRouter (requires OPENROUTER_API_KEY on the server)")
+    opencode_subagent: OpenCodeSubagentConfig | None = Field(
+        None, description="Optional OpenCode reviewer with an independent model and endpoint"
+    )
+
+    @model_validator(mode="after")
+    def validate_subagent_harness(self):
+        if self.opencode_subagent is not None and self.agent != SupportedAgent.opencode:
+            raise ValueError("opencode_subagent is only supported for OpenCode")
+        return self
+
     dataset_pattern: Optional[str] = Field(None, description="Pattern to filter dataset tasks")
     n_concurrent: int | None = Field(None, description="Number of concurrent tasks")
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
@@ -1327,6 +1338,22 @@ async def _run_job(
             )
             return
 
+    if not adopt_existing:
+        try:
+            reviewer = OpenCodeSubagentConfig.from_command(command)
+            if reviewer is not None and reviewer.server_url and not is_openrouter(reviewer.server_url):
+                # Explicit reviewer URLs are user-supplied, even when the
+                # primary endpoint is managed. Keep the HTTPS/public-IP policy.
+                errors = validate_server_url(reviewer.server_url)
+                if errors:
+                    raise ValueError("; ".join(errors))
+        except ValueError as exc:
+            job_store.update_status(
+                job_id, JobStatus.FAILED,
+                error="Reviewer URL validation failed: " + str(exc),
+            )
+            return
+
     oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
 
     try:
@@ -1973,6 +2000,9 @@ def build_cli_command(req: CreateJobRequest):
     for skill in req.skills:
         command += ["--skill", skill]
 
+    if req.opencode_subagent is not None:
+        command += ["--opencode-subagent", req.opencode_subagent.model_dump_json()]
+
     return command
 
 
@@ -2021,6 +2051,18 @@ async def create_job(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    if req.opencode_subagent is not None and req.opencode_subagent.server_url:
+        reviewer_url = req.opencode_subagent.server_url
+        try:
+            if is_openrouter(reviewer_url):
+                resolve_provider(reviewer_url)
+            else:
+                errors = validate_server_url(reviewer_url)
+                if errors:
+                    raise ValueError("; ".join(errors))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Skip harbor command validation for nebius jobs (server_url is a placeholder)
     nebius_gpu_config = _parse_nebius_url(req.server_url)
     if nebius_gpu_config is not None:
@@ -2061,6 +2103,7 @@ async def create_job(
                 model_max_len=req.model_max_len,
                 job_name=req.job_name,
                 skills=req.skills,
+                opencode_subagent=req.opencode_subagent,
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))

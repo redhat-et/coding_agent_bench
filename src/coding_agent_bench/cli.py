@@ -9,6 +9,7 @@ import shlex
 import typer
 
 from coding_agent_bench.builder import HarborCommandBuilder, SupportedAgent
+from coding_agent_bench.agents.opencode import OpenCodeSubagentConfig
 from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.providers import is_openrouter
 from coding_agent_bench.manifest import deploy as deploy_model
@@ -88,11 +89,23 @@ def run(
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
     ] = False,
+    opencode_subagent: Annotated[
+        Optional[str], typer.Option(help="OpenCode reviewer configuration as a JSON object")
+    ] = None,
 ):
     """Run a benchmark with full Harbor configuration support."""
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
+
+    reviewer = None
+    if opencode_subagent is not None:
+        if agent != SupportedAgent.opencode:
+            raise typer.BadParameter("Subagent configuration is only supported for OpenCode")
+        try:
+            reviewer = OpenCodeSubagentConfig.model_validate_json(opencode_subagent)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--opencode-subagent") from exc
 
     try:
         extra_envs = parse_envs(envs)
@@ -150,6 +163,7 @@ def run(
             agent_timeout_multiplier=agent_timeout_multiplier,
             thinking=thinking,
             allow_agent_host=allow_agent_host,
+            opencode_subagent=reviewer,
         )
         preview = ""
         if dry_run:

@@ -1,0 +1,15 @@
+{
+  "job_name": "opencode-primary-with-reviewer",
+  "agent": "opencode",
+  "dataset": "swe-bench/swe-bench-verified",
+  "model_name": "Qwen/Qwen3.8-27B",
+  "server_url": "https://primary-model.example.com/v1",
+  "n_tasks": 1,
+  "opencode_subagent": {
+    "model_name": "RedHatAI/gpt-oss-120b",
+    "server_url": "https://reviewer-model.example.com/v1",
+    "model_max_len": 131072,
+    "description": "Consult this stronger reviewer when stuck or uncertain, or to review a proposed fix.",
+    "prompt": "Analyze the question and code. Identify mistakes and recommend concrete next steps. Return advice without modifying files."
+  }
+}

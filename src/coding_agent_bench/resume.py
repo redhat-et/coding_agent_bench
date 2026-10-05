@@ -7,6 +7,9 @@ from pathlib import Path
 import shlex
 from urllib.parse import urlsplit
 
+from coding_agent_bench.agents.opencode import OpenCodeSubagentConfig
+from coding_agent_bench.intake.validation import validate_server_url
+
 
 def is_resume_command(command: list[str]) -> bool:
     """Recognize the queue's shell-command representation of a resume."""
@@ -92,6 +95,9 @@ def _write_metadata(path: Path, document: dict) -> None:
 
 def update_parent(job_dir: Path, parent: str) -> None:
     """Update ownership in the job, saved trials, embedded configs, and locks."""
+    # This preparation step runs after restoration and before Harbor resumes
+    # trials. Reviewer endpoints are only available in the saved configuration.
+    _validate_opencode_reviewers(job_dir)
     for path in _metadata_files(job_dir):
         document = json.loads(path.read_text())
         before = json.dumps(document)
@@ -112,6 +118,37 @@ def _agents(config: dict):
     yield from config.get("agents") or []
 
 
+def _validate_opencode_reviewers(job_dir: Path) -> None:
+    """Recheck explicit reviewer URLs in every restored OpenCode configuration."""
+    validated = set()
+    for path in _metadata_files(job_dir):
+        for config in _config_documents(json.loads(path.read_text())):
+            for agent in _agents(config):
+                if agent.get("name") != "opencode":
+                    continue
+                env = agent.get("env") or {}
+                if env.get("CAB_OPENCODE_SUBAGENT_INHERIT_ENDPOINT") == "1":
+                    # Inherited URLs follow the separately validated primary;
+                    # a managed primary may be retargeted after this step.
+                    continue
+                content = env.get("OPENCODE_CONFIG_CONTENT")
+                if not content:
+                    continue
+                reviewer = json.loads(content).get("provider", {}).get("reviewer")
+                if reviewer is None:
+                    continue
+                endpoint = reviewer.get("options", {}).get("baseURL")
+                if not isinstance(endpoint, str) or not endpoint:
+                    raise ValueError("Restored OpenCode reviewer has no endpoint")
+                if endpoint in validated:
+                    continue
+                OpenCodeSubagentConfig.validate_endpoint(endpoint)
+                errors = validate_server_url(endpoint)
+                if errors:
+                    raise ValueError("Reviewer URL validation failed: " + "; ".join(errors))
+                validated.add(endpoint)
+
+
 def _update_agent_endpoint(agent: dict, server_url: str) -> None:
     env = agent.get("env") or {}
     base = server_url.rstrip("/")
@@ -124,6 +161,19 @@ def _update_agent_endpoint(agent: dict, server_url: str) -> None:
         provider = opencode.get("provider", {}).get("vllm")
         if provider is not None:
             provider.setdefault("options", {})["baseURL"] = api_base
+            if env.get("CAB_OPENCODE_SUBAGENT_INHERIT_ENDPOINT") == "1":
+                reviewer = opencode.get("provider", {}).get("reviewer")
+                if reviewer is not None:
+                    old_url = reviewer.get("options", {}).get("baseURL", "")
+                    old_host = urlsplit(old_url).hostname
+                    reviewer.setdefault("options", {})["baseURL"] = api_base
+                    # Retarget the inherited reviewer's agent-phase allowance
+                    # without widening access to other hosts or the verifier.
+                    hosts = agent.get("extra_allowed_hosts") or []
+                    agent["extra_allowed_hosts"] = list(dict.fromkeys([
+                        *(host for host in hosts if host != old_host),
+                        urlsplit(api_base).hostname,
+                    ]))
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode)
 
 
