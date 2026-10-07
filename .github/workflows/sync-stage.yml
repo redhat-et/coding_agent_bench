@@ -60,8 +60,7 @@ jobs:
               --state open \
               --json number \
               --jq '.[0].number')
+            gh pr merge "$pr_number" --auto --merge
           else
             echo "Sync pull request #$pr_number is already open."
           fi
-
-          gh pr merge "$pr_number" --auto --merge
