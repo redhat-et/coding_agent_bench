@@ -13,6 +13,7 @@ gpu-b200-sxm:
 | ---------------------------------------------------------------------------------------------------- | ------------ | -------- | --------------- |
 | [Qwen/Qwen3.8-27B](#qwenqwen38-27b)                                                                  | gpu-b200-sxm | FP8      | 12x             |
 | [Qwen/Qwen3.8-27B-FP8](#qwenqwen38-27b-fp8)                                                          | gpu-b200-sxm | FP8      | 15x             |
+| [RedHatAI/Qwen3.8-27B-INT4](#redhataiqwen38-27b-int4)                                                | gpu-b200-sxm | FP8      | 16.49x          |
 | [RedHatAI/Qwen3.6-27B-FP8](#redhataiqwen36-27b-fp8)                                                  | gpu-b200-sxm | FP8      | 29x             |
 | [RedHatAI/gemma-4-31B-it-FP8-block](#redhataigemma-4-31b-it-fp8-block)                               | gpu-b200-sxm | FP8      |                 |
 | [RedHatAI/Mistral-Small-4-119B-2603-NVFP4](#redhataimistral-small-4-119b-2603-nvfp4)                 | gpu-b200-sxm | auto     |                 |
@@ -54,6 +55,28 @@ sudo docker run --runtime nvidia --gpus all \
     --ipc=host \
     vllm/vllm-openai:v0.24.0 \
     --model Qwen/Qwen3.8-27B-FP8 \
+    --max-model-len 262144 \
+    --tensor-parallel-size 1 \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --mm-encoder-tp-mode data
+```
+
+### RedHatAI/Qwen3.8-27B-INT4
+
+```shell
+sudo docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:v0.24.0 \
+    --model RedHatAI/Qwen3.8-27B-INT4 \
     --max-model-len 262144 \
     --tensor-parallel-size 1 \
     --async-scheduling \
