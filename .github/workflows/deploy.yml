@@ -1,0 +1,81 @@
+name: Deploy to OpenShift
+
+on:
+  workflow_run:
+    workflows:
+      - Build and Push Container Image
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.head_branch == 'main' ||
+      github.event.workflow_run.head_branch == 'stage' ||
+      startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    environment: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && 'production' || 'stage' }}
+    env:
+      OVERLAY: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && 'prod' || 'stage' }}
+      NAMESPACE: ${{ (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) && vars.PROD_NAMESPACE || vars.STAGE_NAMESPACE }}
+      OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+      OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "latest"
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ env.OPENSHIFT_SERVER }}
+          openshift_token: ${{ env.OPENSHIFT_TOKEN }}
+          namespace: ${{ env.NAMESPACE }}
+
+      - name: Verify application Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "$NAMESPACE"
+          for secret in harbor-storage job-queue-secret; do
+            oc -n "$NAMESPACE" get secret "$secret" >/dev/null
+          done
+          if oc -n "$NAMESPACE" get secret intake-poller-secret >/dev/null 2>&1; then
+            for key in ALLOW_INSECURE_QUEUE_HTTP; do
+              test -n "$(oc -n "$NAMESPACE" get secret intake-poller-secret -o "jsonpath={.data.$key}")"
+            done
+          fi
+
+      - name: Apply storage
+        run: oc apply -k deploy/storage/overlays/$OVERLAY -n "$NAMESPACE"
+
+      - name: Wait for storage rollout
+        run: oc rollout status deployment/harbor-storage -n "$NAMESPACE" --timeout=10m
+
+      - name: Apply job queue
+        run: oc apply -k deploy/job-queue/overlays/$OVERLAY -n "$NAMESPACE"
+
+      - name: Restart stage job queue
+        if: env.OVERLAY == 'stage'
+        run: oc rollout restart deployment/job-queue -n "$NAMESPACE"
+
+      - name: Wait for job queue rollout
+        run: oc rollout status deployment/job-queue -n "$NAMESPACE" --timeout=10m
+
+      - name: Apply intake poller
+        run: |
+          if oc -n "$NAMESPACE" get secret intake-poller-secret >/dev/null 2>&1; then
+            oc apply -k deploy/intake-poller/overlays/$OVERLAY -n "$NAMESPACE"
+          fi

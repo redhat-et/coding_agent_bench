@@ -23,3 +23,10 @@ class AgentConfig(ABC):
     def configure(self, **kwargs) -> AgentConfigResult:
         """Return agent-specific model, env vars, and mounts. Receives all build() kwargs."""
         ...
+
+    def restore_mounts(self, config: dict[str, Any], server_url: str) -> None:
+        """Regenerate external bind-mounted config files after a job is restored.
+
+        Override this for agents whose configure() method creates mount sources
+        outside the Harbor job directory. Most agents need no restoration work.
+        """

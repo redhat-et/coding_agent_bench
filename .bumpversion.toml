@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "0.2.4"
+current_version = "0.2.8"
 commit = true
 tag = true
 tag_name = "v{new_version}"
@@ -11,11 +11,11 @@ search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
-filename = "deploy/job-queue-service.yml"
-search = "ghcr.io/redhat-et/coding_agent_bench:v{current_version}"
-replace = "ghcr.io/redhat-et/coding_agent_bench:v{new_version}"
+filename = "deploy/job-queue/overlays/prod/kustomization.yaml"
+search = "v{current_version}"
+replace = "v{new_version}"
 
 [[tool.bumpversion.files]]
-filename = "deploy/intake-cronjob.yml"
-search = "ghcr.io/redhat-et/coding_agent_bench:v{current_version}"
-replace = "ghcr.io/redhat-et/coding_agent_bench:v{new_version}"
+filename = "deploy/intake-poller/overlays/prod/kustomization.yaml"
+search = "v{current_version}"
+replace = "v{new_version}"

@@ -1,0 +1,18 @@
+resources:
+  # Orchestrator Pod SA
+  - ./orchestrator-sa.yaml
+  - ./orchestrator-role.yaml
+  - ./orchestrator-rolebinding.yaml
+  - ./orchestrator-anyuid.yaml
+  # Task Pod SA
+  - ./task-sa.yaml
+  - ./task-anyuid.yaml
+  # Job Queue
+  - ./pvc.yaml
+  - ./deployment.yaml
+  - ./service.yaml
+  - ./route.yaml
+
+labels:
+  - pairs:
+      app: job-queue

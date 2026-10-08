@@ -415,7 +415,7 @@ wheels = [
 
 [[package]]
 name = "coding-agent-bench"
-version = "0.2.4"
+version = "0.2.8"
 source = { editable = "." }
 dependencies = [
     { name = "awscli" },

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: harbor-storage
+    component: rustfs
+  name: harbor-storage
+spec:
+  ports:
+    - name: api
+      port: 9000
+      protocol: TCP
+      targetPort: api
+    - name: console
+      port: 9001
+      protocol: TCP
+      targetPort: console
+  selector:
+    app: harbor-storage
+    component: rustfs
+  type: ClusterIP

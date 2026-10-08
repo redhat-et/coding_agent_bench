@@ -1,0 +1,7 @@
+# -- Task SA: used by environment pods, only needs anyuid SCC to run as root.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-task
+  labels:
+    app: harbor

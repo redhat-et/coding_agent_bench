@@ -1,0 +1,19 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: job-queue-service
+  labels:
+    app: job-queue
+    component: api
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: job-queue-tls
+spec:
+  selector:
+    app: job-queue
+    component: api
+  type: ClusterIP
+  ports:
+  - name: https
+    port: 443
+    targetPort: 8443
+    protocol: TCP

@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/redhat-et/coding_agent_bench
+    newTag: v0.2.8
+
+replacements:
+  - source:
+      kind: Deployment
+      name: job-queue
+      fieldPath: spec.template.spec.containers.[name=job-queue].image
+    targets:
+      - select:
+          kind: Deployment
+          name: job-queue
+        fieldPaths:
+          - spec.template.spec.containers.[name=job-queue].env.[name=CODING_AGENT_BENCH_IMAGE].value
+
+replacements:
+  - source:
+      kind: Deployment
+      name: job-queue
+      fieldPath: spec.template.spec.containers.[name=job-queue].image
+    targets:
+      - select:
+          kind: Deployment
+          name: job-queue
+        fieldPaths:
+          - spec.template.spec.containers.[name=job-queue].env.[name=CODING_AGENT_BENCH_IMAGE].value
+
+patches:
+  - target:
+      kind: Deployment
+      name: job-queue
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: prod

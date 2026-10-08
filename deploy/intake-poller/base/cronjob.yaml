@@ -1,4 +1,3 @@
----
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -22,16 +21,18 @@ spec:
           restartPolicy: Never
           containers:
           - name: poller
-            image: ghcr.io/redhat-et/coding_agent_bench:v0.2.4
+            image: ghcr.io/redhat-et/coding_agent_bench:tag
             imagePullPolicy: Always
-            command: ["uv", "run", "python", "-m", "coding_agent_bench.intake.poller"]
+            # Run the venv's Python directly. `uv run` re-syncs the project into
+            # /app/.venv and writes a cache under $HOME at startup, both of which
+            # fail under OpenShift's arbitrary run-as UID (the image content is
+            # owned by 1001). The package is already installed in the image.
+            command: ["/app/.venv/bin/python", "-m", "coding_agent_bench.intake.poller"]
             env:
+            - name: ENVIRONMENT
+              value: stage
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /etc/google/service-account.json
-            - name: SMTP_HOST
-              value: smtp.corp.redhat.com
-            - name: SMTP_PORT
-              value: "25"
             - name: GOOGLE_SHEET_ID
               valueFrom:
                 secretKeyRef:
@@ -47,16 +48,21 @@ spec:
                 secretKeyRef:
                   name: job-queue-secret
                   key: API_KEY
-            - name: SENDER_EMAIL
-              valueFrom:
-                secretKeyRef:
-                  name: intake-poller-secret
-                  key: SENDER_EMAIL
             - name: AUTO_APPROVE
               valueFrom:
                 secretKeyRef:
                   name: intake-poller-secret
                   key: AUTO_APPROVE
+            - name: ALLOW_INSECURE_QUEUE_HTTP
+              valueFrom:
+                secretKeyRef:
+                  name: intake-poller-secret
+                  key: ALLOW_INSECURE_QUEUE_HTTP
+            # The queue is reached over its in-cluster service address, which
+            # presents an OpenShift service-serving cert. Trust its CA (injected
+            # into the mounted ConfigMap) so TLS verification succeeds.
+            - name: JOB_QUEUE_CA_BUNDLE
+              value: /etc/ssl/service-ca/service-ca.crt
             securityContext:
               runAsNonRoot: true
               allowPrivilegeEscalation: false
@@ -76,7 +82,16 @@ spec:
             - name: google-sa-key
               mountPath: /etc/google
               readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/service-ca
+              readOnly: true
           volumes:
           - name: google-sa-key
             secret:
-              secretName: intake-poller-google-sa
+              secretName: intake-poller-secret
+              items:
+                - key: service-account.json
+                  path: service-account.json
+          - name: service-ca
+            configMap:
+              name: intake-poller-ca

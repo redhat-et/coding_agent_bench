@@ -1,16 +1,7 @@
-# -- Task SA: used by environment pods, only needs anyuid SCC to run as root.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: harbor-task
-  labels:
-    app: harbor
----
-
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: harbor-task-anyuid
+  name: harbor-orchestrator-anyuid
   labels:
     app: harbor
 roleRef:
@@ -19,4 +10,4 @@ roleRef:
   name: system:openshift:scc:anyuid
 subjects:
   - kind: ServiceAccount
-    name: harbor-task
+    name: harbor-orchestrator

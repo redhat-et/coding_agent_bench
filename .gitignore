@@ -3,6 +3,10 @@ models.json
 config.toml
 data
 jobs.db
+deploy/storage/base/secret.yaml
+deploy/job-queue/base/secret.yaml
+deploy/job-queue/base/nebius-secret.yaml
+deploy/intake-poller/base/secret.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -194,7 +198,7 @@ cython_debug/
 #   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #   and can be added to the global gitignore or merged into this file.  For a more nuclear
 #   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+.idea/
 
 # Abstra
 #   Abstra is an AI-powered process automation framework.
@@ -234,3 +238,9 @@ docs/superpowers/
 
 # Superpowers SDD scratch workspace
 .superpowers/
+
+# Harbor Tasks
+datasets/
+
+# Claude
+.claude/settings.local.json

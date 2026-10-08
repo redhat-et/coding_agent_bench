@@ -4,6 +4,7 @@ Only implements the operations used by the generated scripts. Transfer failures
 copy one object before exiting, exercising recovery from partial uploads.
 """
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -19,7 +20,38 @@ def resolve(value: str) -> Path:
 
 def main() -> int:
     """Apply one fake AWS request and record its stage for ordering assertions."""
-    service, operation, *args = sys.argv[1:]
+    argv = sys.argv[1:]
+    if argv[:1] == ["--endpoint-url"]:
+        argv = argv[2:]
+    service, operation, *args = argv
+    if operation == "list-objects-v2":
+        bucket = args[args.index("--bucket") + 1]
+        prefix = args[args.index("--prefix") + 1]
+        root = resolve(f"s3://{bucket}")
+        print(json.dumps({"Contents": [
+            {"Key": path.relative_to(root).as_posix()}
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and path.relative_to(root).as_posix().startswith(prefix)
+        ]}))
+        return 0
+    if operation == "delete-objects":
+        bucket = args[args.index("--bucket") + 1]
+        payload = Path(args[args.index("--delete") + 1].removeprefix("file://"))
+        root = resolve(f"s3://{bucket}")
+        for item in json.loads(payload.read_text())["Objects"]:
+            path = root / item["Key"]
+            path.unlink(missing_ok=True)
+            while path.parent != root:
+                path = path.parent
+                try:
+                    path.rmdir()
+                except OSError:
+                    break
+        print("{}")
+        return 0
+    if operation == "cp" and args[-1] == "-":
+        print(resolve(args[-2]).read_text(), end="")
+        return 0
     if (service, operation) == ("s3api", "head-bucket"):
         stage = "head"
     elif operation == "mb":

@@ -1,27 +1,40 @@
 """Deployment security regression tests."""
 
 from pathlib import Path
+import shutil
+import subprocess
 
+import pytest
 import yaml
 
 from coding_agent_bench import api
+from coding_agent_bench.job import OpenshiftJob
 
 
-DEPLOYMENT_PATH = Path(__file__).parents[1] / "deploy" / "job-queue-service.yml"
-INTAKE_CRONJOB_PATH = Path(__file__).parents[1] / "deploy" / "intake-cronjob.yml"
+DEPLOYMENT_PATHS = (
+    Path(__file__).parents[1] / "deploy" / "job-queue" / "base" / "deployment.yaml",
+    Path(__file__).parents[1] / "deploy" / "job-queue" / "base" / "service.yaml",
+    Path(__file__).parents[1] / "deploy" / "job-queue" / "base" / "route.yaml",
+)
+INTAKE_CRONJOB_PATH = (
+    Path(__file__).parents[1] / "deploy" / "intake-poller" / "base" / "cronjob.yaml"
+)
 
 
 def _deployment_objects() -> dict[str, dict]:
     """Return queue manifest objects indexed by Kubernetes kind."""
-    with DEPLOYMENT_PATH.open() as manifest:
-        objects = list(yaml.safe_load_all(manifest))
+    objects = []
+    for path in DEPLOYMENT_PATHS:
+        with path.open() as manifest:
+            objects.extend(yaml.safe_load_all(manifest))
     return {obj["kind"]: obj for obj in objects}
 
 
 def _intake_cronjob() -> dict:
-    """Return the intake CronJob manifest."""
+    """Return the intake CronJob object from its (multi-document) manifest."""
     with INTAKE_CRONJOB_PATH.open() as manifest:
-        return yaml.safe_load(manifest)
+        objects = list(yaml.safe_load_all(manifest))
+    return next(obj for obj in objects if obj["kind"] == "CronJob")
 
 
 def test_queue_manifest_encrypts_service_and_route():
@@ -71,10 +84,29 @@ def test_intake_cronjob_uses_a_dedicated_poller_secret():
     poller_only_keys = {
         "GOOGLE_SHEET_ID",
         "JOB_QUEUE_URL",
-        "SENDER_EMAIL",
         "AUTO_APPROVE",
     }
     for key in poller_only_keys:
         assert env[key]["valueFrom"]["secretKeyRef"]["name"] == "intake-poller-secret"
 
     assert env["API_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "job-queue-secret"
+
+
+@pytest.mark.parametrize("overlay", ["stage", "prod"])
+def test_deployed_workers_use_the_queue_image(overlay, monkeypatch):
+    cli = shutil.which("oc") or shutil.which("kubectl")
+    if cli is None:
+        pytest.skip("oc or kubectl is required to render deployment overlays")
+    path = DEPLOYMENT_PATHS[0].parents[1] / "overlays" / overlay
+    rendered = subprocess.run(
+        [cli, "kustomize", str(path)], check=True, capture_output=True,
+        text=True, timeout=30,
+    ).stdout
+    deployment = next(obj for obj in yaml.safe_load_all(rendered) if obj["kind"] == "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env = {entry["name"]: entry.get("value") for entry in container["env"]}
+    assert env["CODING_AGENT_BENCH_IMAGE"] == container["image"]
+    monkeypatch.setenv("CODING_AGENT_BENCH_IMAGE", env["CODING_AGENT_BENCH_IMAGE"])
+    job = OpenshiftJob("benchmark")
+    for spec in (job._job_spec(["harbor", "run"]), job._resume_job_spec("resume")):
+        assert spec["spec"]["template"]["spec"]["containers"][0]["image"] == container["image"]

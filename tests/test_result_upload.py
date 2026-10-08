@@ -1,6 +1,7 @@
 """Execute generated Bash pod commands against a filesystem-backed fake S3 CLI."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,33 +12,55 @@ import pytest
 from coding_agent_bench.job import OpenshiftJob, _build_logged_shell_step
 
 
+COMPLETE_RESULT = {
+    "finished_at": "2026-09-28T12:00:00+00:00",
+    "n_total_trials": 2,
+    "stats": {
+        "n_completed_trials": 2, "n_pending_trials": 0, "n_running_trials": 0,
+        "n_cancelled_trials": 0, "n_errored_trials": 0,
+    },
+}
+
+
 SHELL_STUBS = r'''
 record() {
     printf '%s\n' "$1" >> "$TRACE"
     if [ "$FAIL_STAGE" = "$1" ]; then return 23; fi
 }
 before() { record before; }
-python3() {
-    case "$2" in
-        *new_host*) record url ;;
-        *) record parent ;;
-    esac
-}
 uv() {
     shift 3
     case "$1" in
+        python)
+            case "$4" in
+                parent) record parent ;;
+                endpoint) record url ;;
+                complete) record complete; shift; "$TEST_PYTHON" "$@" ;;
+                manifest)
+                    if [ "$FAIL_STAGE" = "inventory-$8" ]; then
+                        record "$FAIL_STAGE"; return $?
+                    fi
+                    shift; "$TEST_PYTHON" "$@"
+                    ;;
+                cleanup) record cleanup || return $?; shift; "$TEST_PYTHON" "$@" ;;
+                *) return 99 ;;
+            esac
+            ;;
         harbor)
             record harbor
             printf 'Harbor stdout\n'
             printf 'Harbor stderr\n' >&2
             printf '{"resumed": true}\n' > "$JOB_DIR/config.json"
-            printf 'updated result\n' > "$JOB_DIR/result.json"
+            printf '%s\n' "$RESULT_JSON" > "$JOB_DIR/result.json"
+            if [ "$PAUSE_REQUESTED" = 1 ]; then
+                printf '{"reason": "preempted"}\n' > "$CAB_PAUSE_REQUEST_PATH"
+            fi
             rm -rf "$JOB_DIR/stale-trial"
             return "$HARBOR_RC"
             ;;
         aws)
-            [ "$AWS_ACCESS_KEY_ID" = "$MINIO_ROOT_USER" ] || return 99
-            [ "$AWS_SECRET_ACCESS_KEY" = "$MINIO_ROOT_PASSWORD" ] || return 99
+            [ "$AWS_ACCESS_KEY_ID" = "$STORAGE_ACCESS_KEY" ] || return 99
+            [ "$AWS_SECRET_ACCESS_KEY" = "$STORAGE_SECRET_KEY" ] || return 99
             [ "$AWS_DEFAULT_REGION" = us-east-1 ] || return 99
             [ "$AWS_EC2_METADATA_DISABLED" = true ] || return 99
             shift 3
@@ -49,7 +72,7 @@ uv() {
 '''
 
 
-def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, bucket_mode=""):
+def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, bucket_mode="", result_data=None, pause_requested=False):
     """Run a pod script, retaining local and remote artifacts for assertions."""
     trace = tmp_path / "trace"
     remote = tmp_path / "remote"
@@ -60,24 +83,35 @@ def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, buck
     (original / "result.json").write_text("original result\n")
     (original / "config.json").write_text("{}")
     (original / "console.log").write_text("earlier console output\n")
+    (original / "preemption.json").write_text('{"state": "paused"}')
     (original / "stale-trial").mkdir()
     (original / "stale-trial" / "result.json").write_text("old trial")
-    (remote / "results-staging").mkdir()
+    (remote / "results-staging").mkdir(exist_ok=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    aws_shim = bin_dir / "aws"
+    aws_shim.write_text('#!/bin/sh\nexec "$TEST_PYTHON" "$FAKE_S3" "$@"\n')
+    aws_shim.chmod(0o755)
     command = command.replace("/app/jobs", str(tmp_path / "jobs"))
     result = subprocess.run(
         ["bash", "-c", SHELL_STUBS + command],
         env={
             **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
             "TRACE": str(trace),
             "HARBOR_RC": str(harbor_rc),
             "FAIL_STAGE": fail_stage,
             "BUCKET_MODE": bucket_mode,
+            "RESULT_JSON": json.dumps(COMPLETE_RESULT if result_data is None else result_data),
+            "PAUSE_REQUESTED": "1" if pause_requested else "0",
+            "CAB_PAUSE_REQUEST_PATH": str(tmp_path / "pause-request.json"),
             "TEST_PYTHON": sys.executable,
             "FAKE_S3": str(Path(__file__).with_name("fake_s3.py")),
             "REMOTE_DIR": str(remote),
             "JOB_DIR": str(tmp_path / "jobs" / job_name),
-            "MINIO_ROOT_USER": "test user",
-            "MINIO_ROOT_PASSWORD": "test password with spaces",
+            "STORAGE_ACCESS_KEY": "test user",
+            "STORAGE_SECRET_KEY": "test password with spaces",
+            "STORAGE_ENDPOINT_URL": "http://harbor-storage:9000",
         },
         cwd=tmp_path,
         capture_output=True,
@@ -124,9 +158,11 @@ def test_upload_runs_after_harbor_and_preserves_exit_status(
     if resume:
         command = enqueue_resume(queue_api).command[2]
         expected = [
-            "download", "parent", "head", "backup", "backup-marker",
+            "download", "parent", "url", "head", "backup", "backup-marker",
             "harbor", "upload", "upload-marker", "promote",
         ]
+        if harbor_rc == 0:
+            expected += ["complete", "cleanup"]
     else:
         spec = OpenshiftJob("test")._job_spec(["harbor", "run"])
         command = spec["spec"]["template"]["spec"]["containers"][0]["args"][0]
@@ -219,7 +255,7 @@ def test_failed_bucket_create_rechecks_availability(
         assert status == harbor_rc
         assert "upload" in calls
         if resume:
-            assert calls[-1] == "promote"
+            assert calls[-1] == ("cleanup" if harbor_rc == 0 else "promote")
     else:
         assert status == 23
         assert "upload" not in calls
@@ -256,11 +292,11 @@ def test_managed_resume_updates_url_after_download(tmp_path, queue_api, monkeypa
     assert status == 0
     assert calls == [
         "download", "parent", "url", "head", "backup", "backup-marker",
-        "harbor", "upload", "upload-marker", "promote",
+        "harbor", "upload", "upload-marker", "promote", "complete", "cleanup",
     ]
 
 
-@pytest.mark.parametrize("failure", ["backup", "backup-marker", "upload", "upload-marker", "promote", ""])
+@pytest.mark.parametrize("failure", ["backup", "backup-marker", "upload", "upload-marker", "promote"])
 def test_resume_keeps_recoverable_snapshots(tmp_path, queue_api, failure):
     """Partial transfer failures never remove the only complete remote copy."""
     queued = enqueue_resume(queue_api)
@@ -268,7 +304,8 @@ def test_resume_keeps_recoverable_snapshots(tmp_path, queue_api, failure):
     canonical = tmp_path / "remote/results/job with spaces"
     snapshots = tmp_path / "remote/results-staging/job with spaces" / queued.job_id
 
-    assert status == (23 if failure else 0)
+    assert status == 23
+    assert "cleanup" not in calls
     if failure in ("backup", "backup-marker", "upload", "upload-marker"):
         assert (canonical / "config.json").read_text() == "{}"
         assert (canonical / "result.json").read_text() == "original result\n"
@@ -281,9 +318,9 @@ def test_resume_keeps_recoverable_snapshots(tmp_path, queue_api, failure):
         assert (snapshots / "original/result.json").read_text() == "original result\n"
         assert (snapshots / "original/stale-trial/result.json").exists()
         assert (snapshots / "original.complete").exists()
-    assert (snapshots / "updated.complete").exists() == (failure in ("promote", ""))
-    if failure in ("promote", ""):
-        assert (snapshots / "updated/result.json").read_text() == "updated result\n"
+    assert (snapshots / "updated.complete").exists() == (failure == "promote")
+    if failure == "promote":
+        assert json.loads((snapshots / "updated/result.json").read_text()) == COMPLETE_RESULT
         assert not (snapshots / "updated/stale-trial").exists()
         log = (snapshots / "updated/console.log").read_text()
         assert "earlier console output" in log
@@ -294,10 +331,114 @@ def test_resume_keeps_recoverable_snapshots(tmp_path, queue_api, failure):
         # remain usable even though the canonical prefix is now a mixed version.
         assert (canonical / "config.json").read_text() == '{"resumed": true}\n'
         assert (canonical / "result.json").read_text() == "original result\n"
-    if not failure:
-        assert (canonical / "result.json").read_text() == "updated result\n"
-        assert not (canonical / "stale-trial").exists()
-        assert (canonical / "console.log").read_text() == log
+
+
+@pytest.mark.parametrize("job_name", ["job with spaces", "job with ' quotes"])
+def test_completed_resume_removes_only_its_jobs_staging(tmp_path, queue_api, job_name):
+    """Clean earlier attempts too, after the complete result reaches canonical S3."""
+    staging = tmp_path / "remote/results-staging"
+    previous = staging / job_name / "earlier-attempt" / "original.complete"
+    neighbor = staging / (job_name + "-other") / "original.complete"
+    for path in (previous, neighbor):
+        path.parent.mkdir(parents=True)
+        path.write_text("complete")
+    previous.write_text(json.dumps({
+        "version": 1, "job_name": job_name, "attempt": "earlier-attempt",
+        "phase": "original", "files": ["result.json"],
+    }))
+    (previous.parent / "original").mkdir()
+    (previous.parent / "original/result.json").write_text("earlier result")
+    command = queue_api._build_resume_shell_command(job_name, "current", [], None)
+
+    status, calls = run_shell(tmp_path, command, job_name=job_name)
+
+    assert status == 0
+    assert calls[-3:] == ["promote", "complete", "cleanup"]
+    assert not (staging / job_name).exists()
+    assert neighbor.read_text() == "complete"
+    canonical = tmp_path / "remote/results" / job_name
+    assert json.loads((canonical / "result.json").read_text()) == COMPLETE_RESULT
+    assert not (canonical / "stale-trial").exists()
+    log = (canonical / "console.log").read_text()
+    assert all(text in log for text in ("earlier console output", "Harbor stdout", "Harbor stderr"))
+
+
+@pytest.mark.parametrize("harbor_rc,pause_requested,result_data", [
+    (1, False, COMPLETE_RESULT),
+    (143, False, COMPLETE_RESULT),
+    (0, True, COMPLETE_RESULT),
+    (0, False, {**COMPLETE_RESULT, "finished_at": None}),
+    (0, False, {}),
+    *[(0, False, {**COMPLETE_RESULT, "stats": {**COMPLETE_RESULT["stats"], key: 1}})
+      for key in ("n_completed_trials", "n_pending_trials", "n_running_trials", "n_cancelled_trials", "n_errored_trials")],
+])
+def test_incomplete_resume_keeps_snapshots_after_sync(tmp_path, queue_api, harbor_rc, pause_requested, result_data):
+    queued = enqueue_resume(queue_api)
+    status, calls = run_shell(
+        tmp_path, queued.command[2], harbor_rc=harbor_rc,
+        result_data=result_data, pause_requested=pause_requested,
+    )
+    assert status == harbor_rc
+    assert "promote" in calls
+    assert "cleanup" not in calls
+    snapshots = tmp_path / "remote/results-staging/job with spaces" / queued.job_id
+    assert (snapshots / "original.complete").exists()
+    assert (snapshots / "updated.complete").exists()
+
+
+def test_staging_cleanup_failure_preserves_completed_job(tmp_path, queue_api):
+    queued = enqueue_resume(queue_api)
+    status, calls = run_shell(tmp_path, queued.command[2], fail_stage="cleanup")
+    assert status == 0
+    assert calls[-1] == "cleanup"
+    canonical = tmp_path / "remote/results/job with spaces"
+    assert json.loads((canonical / "result.json").read_text()) == COMPLETE_RESULT
+    snapshots = tmp_path / "remote/results-staging/job with spaces" / queued.job_id
+    assert (snapshots / "original.complete").exists()
+    assert (snapshots / "updated.complete").exists()
+
+
+def test_nested_name_cleanup_preserves_legacy_snapshot(tmp_path, queue_api):
+    job_name = "group/job"
+    legacy = tmp_path / "remote/results-staging/group/job/legacy/original.complete"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("complete")
+    command = queue_api._build_resume_shell_command(job_name, "current", [], None)
+    status, calls = run_shell(tmp_path, command, job_name=job_name)
+    assert status == 0
+    assert "promote" in calls
+    assert "cleanup" in calls
+    assert not (tmp_path / "remote/results-staging/group/job/current").exists()
+    assert legacy.read_text() == "complete"
+
+
+@pytest.mark.parametrize("phase", ["original", "updated"])
+def test_inventory_failure_prevents_promotion_and_cleanup(tmp_path, queue_api, phase):
+    command = enqueue_resume(queue_api).command[2]
+    status, calls = run_shell(tmp_path, command, fail_stage=f"inventory-{phase}")
+    assert status == 23
+    assert "promote" not in calls
+    assert "cleanup" not in calls
+    assert (tmp_path / "remote/results/job with spaces/result.json").read_text() == "original result\n"
+
+
+def test_parent_cleanup_preserves_nested_jobs_and_unlisted_objects(tmp_path, queue_api):
+    """An ancestor job may never recursively delete another job's snapshots."""
+    staging = tmp_path / "remote/results-staging/parent"
+    nested = staging / "child/attempt/original.complete"
+    unlisted = staging / "current/original/unlisted.json"
+    for path in (nested, unlisted):
+        path.parent.mkdir(parents=True)
+        path.write_text("keep")
+    command = queue_api._build_resume_shell_command("parent", "current", [], None)
+    status, calls = run_shell(tmp_path, command, job_name="parent")
+    assert status == 0
+    assert "cleanup" in calls
+    assert nested.read_text() == "keep"
+    assert unlisted.read_text() == "keep"
+    assert not (staging / "current/original.complete").exists()
+    assert not (staging / "current/updated.complete").exists()
+    assert not (staging / "current/original/result.json").exists()
 
 
 def test_each_resume_has_a_unique_snapshot_prefix(queue_api):

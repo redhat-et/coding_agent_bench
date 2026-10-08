@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/redhat-et/coding_agent_bench
+    newTag: stage
+
+patches:
+  - target:
+      kind: CronJob
+      name: intake-poller
+    patch: |
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+  - target:
+      kind: CronJob
+      name: intake-poller
+    patch: |
+      - op: add
+        path: /spec/suspend
+        value: true
+  - target:
+      kind: CronJob
+      name: intake-poller
+    patch: |
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/containers/0/env/0/value
+        value: stage

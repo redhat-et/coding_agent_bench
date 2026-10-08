@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: job-queue-pvc
+  labels:
+    app: job-queue
+spec:
+  resources:
+    requests:
+      storage: 1Gi
+  volumeMode: Filesystem
+  storageClassName: gp3
+  accessModes:
+    - ReadWriteOnce

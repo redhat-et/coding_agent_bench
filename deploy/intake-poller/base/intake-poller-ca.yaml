@@ -1,0 +1,12 @@
+# The service-ca operator injects the service-serving CA into this ConfigMap
+# (populating the service-ca.crt key) because of the inject-cabundle annotation.
+# Declaring it here keeps the manifest self-contained: the operator only
+# populates an existing ConfigMap, it does not create a missing one
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: intake-poller-ca
+  labels:
+    app: intake-poller
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"

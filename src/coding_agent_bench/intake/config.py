@@ -32,8 +32,10 @@ class Status(str, Enum):
     APPROVED = "Approved"
     QUEUED = "Queued"
     RUNNING = "Running"
+    PAUSED = "Paused"
     COMPLETED = "Completed"
     FAILED = "Failed"
+    CANCELLED = "Cancelled"
     NEEDS_REVIEW = "Needs Review"
 
 

@@ -1,0 +1,7 @@
+# -- Orchestrator SA: used by the job pod to manage task pods, builds, etc.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-orchestrator
+  labels:
+    app: harbor

@@ -12,6 +12,22 @@ from coding_agent_bench.providers import (
 )
 
 
+def _restored_agent_mount(
+    config: dict, agent_name: str, target: str
+) -> tuple[dict, Path] | None:
+    """Return the saved agent and bind-mount source for a target, if present."""
+    agents = config.get("agents") or []
+    if isinstance(config.get("agent"), dict):
+        agents = [*agents, config["agent"]]
+    agent = next((item for item in agents if item.get("name") == agent_name), None)
+    if agent is None:
+        return None
+    for mount in (config.get("environment") or {}).get("mounts") or []:
+        if mount.get("target") == target and mount.get("source"):
+            return agent, Path(mount["source"])
+    return None
+
+
 class OracleAgentConfig(AgentConfig):
     """Non-LLM oracle agent. Passes the model through with no extra configuration."""
 
@@ -62,6 +78,21 @@ class CodexAgentConfig(AgentConfig):
 
     name = "codex"
     version = "0.145.0"
+
+    def restore_mounts(self, config: dict, server_url: str) -> None:
+        restored = _restored_agent_mount(
+            config, self.name, "/root/.codex/config.toml"
+        )
+        if restored is None:
+            return
+        agent, path = restored
+        path.parent.mkdir(parents=True, exist_ok=True)
+        codex_create_toml(
+            model_name=str(agent.get("model_name") or "").removeprefix("vllm/"),
+            server_url=server_url,
+            outpath=path,
+            openrouter=OPENROUTER_API_KEY_ENV in (agent.get("env") or {}),
+        )
 
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
@@ -182,6 +213,33 @@ class PiAgentConfig(AgentConfig):
 
     name = "pi"
     version = "0.73.1"
+
+    def restore_mounts(self, config: dict, server_url: str) -> None:
+        restored = _restored_agent_mount(
+            config, self.name, "/root/.pi/agent/models.json"
+        )
+        if restored is None:
+            return
+        agent, path = restored
+        model = str(agent.get("model_name") or "").removeprefix("vllm/")
+        if path.exists():
+            models_json = json.loads(path.read_text())
+        else:
+            models_json = {
+                "providers": {
+                    "vllm": {
+                        "api": "openai-completions",
+                        "apiKey": "NONE",
+                        "models": [{"id": model, "name": model}],
+                    }
+                }
+            }
+        provider = models_json.setdefault("providers", {}).setdefault("vllm", {})
+        provider["baseUrl"] = (
+            server_url.rstrip("/").removesuffix("/v1") + "/v1"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(models_json))
 
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
