@@ -74,13 +74,11 @@ function toggleAdvanced() {{
 
 function validateForm() {{
     const errors = [];
-    const jobName = document.getElementById('job_name').value.trim();
     const agent = document.getElementById('agent').value;
     const dataset = document.getElementById('dataset').value.trim();
     const modelName = document.getElementById('model_name').value;
     const serverUrl = document.getElementById('server_url').value.trim();
 
-    if (!jobName) errors.push('Job name is required');
     if (!agent) errors.push('Agent is required');
     if (!dataset) errors.push('Dataset is required');
     if (!modelName) errors.push('Model name is required');
@@ -123,8 +121,21 @@ function validateForm() {{
     return true;
 }}
 
+function sanitizeJobNamePart(value) {{
+    return value.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+}}
+
+function updateJobName() {{
+    const modelName = document.getElementById('model_name').value;
+    const dataset = document.getElementById('dataset').value.trim();
+    const agent = document.getElementById('agent').value;
+    const jobName = [modelName, dataset, agent].map(sanitizeJobNamePart).join('-');
+    document.getElementById('job_name').value = jobName;
+}}
+
 async function submitJob(event) {{
     event.preventDefault();
+    updateJobName();
     if (!validateForm()) return false;
 
     const btn = document.getElementById('submit-btn');
@@ -245,7 +256,11 @@ async function updateMaxConcurrency() {{
 
 document.getElementById('model_name').addEventListener('change', updateMaxConcurrency);
 document.getElementById('server_url').addEventListener('change', updateMaxConcurrency);
+document.getElementById('model_name').addEventListener('change', updateJobName);
+document.getElementById('agent').addEventListener('change', updateJobName);
+document.getElementById('dataset').addEventListener('input', updateJobName);
 
+updateJobName();
 checkApiKey();
 </script>
 """
@@ -277,10 +292,10 @@ def _build_basic_fields_html(
 
     return f"""
         <div>
-            <label for="job_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Job Name *</label>
-            <input type="text" id="job_name" name="job_name" required
+            <label for="job_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Job Name</label>
+            <input type="text" id="job_name" name="job_name" readonly
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   placeholder="my-benchmark-job">
+                   placeholder="Generated from model, benchmark, and agent">
         </div>
         <div>
             <label for="agent" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Agent *</label>
