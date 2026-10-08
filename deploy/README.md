@@ -179,7 +179,7 @@ development.
 | Key | Description |
 |-----|-------------|
 | `GOOGLE_SHEET_ID` | ID of the intake Google Sheet (the value between `/d/` and `/edit` in its URL) |
-| `JOB_QUEUE_URL` | HTTPS URL for the queue API. Use the cluster's TLS/mTLS endpoint; the poller fails closed instead of using plaintext HTTP. |
+| `JOB_QUEUE_URL` | HTTPS URL for the queue API. Use the service's fully-qualified name (`https://job-queue-service.<namespace>.svc`) — the OpenShift serving certificate is not valid for the short hostname, so TLS verification fails. The poller fails closed instead of using plaintext HTTP. |
 | `AUTO_APPROVE` | `"true"` to auto-submit rows with a blank status, otherwise `"false"` |
 | `ALLOW_INSECURE_QUEUE_HTTP` | Set to `"true"` when the queue is served over HTTP (e.g. locally), otherwise `"false"` |
 | `service-account.json` | Content of a GCP service account that has read access to the Google Sheet. |
