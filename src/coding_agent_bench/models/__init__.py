@@ -16,6 +16,7 @@ from coding_agent_bench.models.configs import (
     poolside_Laguna_S_2_1_NVFP4,
 )
 
+# Please also update docs/queue-service/nebius.md & docs/validated_models.md when making changes here
 MODEL_CONFIGS: list[type[ModelConfig]] = [
     Qwen_Qwen3_8_27B,
     Qwen_Qwen3_8_27B_FP8,

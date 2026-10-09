@@ -60,6 +60,7 @@ class H200x8(ResourceConfig):
     platform = "gpu-h200-sxm"
     preset = "8gpu-128vcpu-1600gb"
 
+# Please also update docs/queue-service/nebius.md when making changes here.
 RESOURCE_CONFIGS: list[ResourceConfig] = [
     B200,
     B200A,
