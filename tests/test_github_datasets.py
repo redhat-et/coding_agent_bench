@@ -581,6 +581,8 @@ def test_ui_submits_directly_without_archive_staging():
     assert "X-GitHub-Token" in html
     assert "github_token:" not in html
     assert "formData.github_dataset" in html
+    assert 'id="github-dataset-fields"' in html
+    assert 'id="github-dataset-fields" style="grid-column: 1 / -1; display: grid;' in html
     assert 'id="github_subdirectory"' in html
     assert 'id="github_subdirectory" autocomplete="off"' in html
     assert 'value="tasks"' in html

@@ -292,31 +292,33 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
                    placeholder="Harbor dataset name (or leave blank when using GitHub)">
         </div>
-        <div style="grid-column: 1 / -1;">
-            <label for="github_repo" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Repository Dataset (optional)</label>
-            <input type="text" id="github_repo" autocomplete="off"
-                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   placeholder="owner/repository or https://github.com/owner/repository">
-            <small style="display: block; color: #666; margin-top: 0.25rem;">The job pod downloads this repository and runs Harbor on the selected directory. Public repositories need no GitHub token. An optional token is held only in queue memory, passed to the pod through stdin, and discarded after preparation.</small>
-        </div>
-        <div>
-            <label for="github_ref" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Branch, Tag, or Commit</label>
-            <input type="text" id="github_ref" autocomplete="off"
-                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   placeholder="Default branch">
-        </div>
-        <div>
-            <label for="github_subdirectory" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Dataset Directory in Repository</label>
-            <input type="text" id="github_subdirectory" autocomplete="off"
-                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   value="tasks" placeholder="e.g., benchmarks/my-dataset">
-            <small style="display: block; color: #666; margin-top: 0.25rem;">Defaults to tasks/. Set a path relative to the repository root; clear the field to use the repository root.</small>
-        </div>
-        <div>
-            <label for="github_token" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Token (private repos only)</label>
-            <input type="password" id="github_token" autocomplete="new-password" autocapitalize="off" spellcheck="false"
-                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   placeholder="Read-only access to this repository">
+        <div id="github-dataset-fields" style="grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 1rem; border: 1px solid #ddd; border-radius: 6px; background: #f7f9fc; box-sizing: border-box;">
+            <div style="grid-column: 1 / -1;">
+                <label for="github_repo" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Repository Dataset (optional)</label>
+                <input type="text" id="github_repo" autocomplete="off"
+                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                       placeholder="owner/repository or https://github.com/owner/repository">
+                <small style="display: block; color: #666; margin-top: 0.25rem;">The job pod downloads this repository and runs Harbor on the selected directory. Public repositories need no GitHub token. An optional token is held only in queue memory, passed to the pod through stdin, and discarded after preparation.</small>
+            </div>
+            <div>
+                <label for="github_ref" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Branch, Tag, or Commit</label>
+                <input type="text" id="github_ref" autocomplete="off"
+                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                       placeholder="Default branch">
+            </div>
+            <div>
+                <label for="github_subdirectory" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Dataset Directory in Repository</label>
+                <input type="text" id="github_subdirectory" autocomplete="off"
+                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                       value="tasks" placeholder="e.g., benchmarks/my-dataset">
+                <small style="display: block; color: #666; margin-top: 0.25rem;">Defaults to tasks/. Set a path relative to the repository root; clear the field to use the repository root.</small>
+            </div>
+            <div style="grid-column: 1 / -1;">
+                <label for="github_token" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Token (private repos only)</label>
+                <input type="password" id="github_token" autocomplete="new-password" autocapitalize="off" spellcheck="false"
+                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                       placeholder="Read-only access to this repository">
+            </div>
         </div>
         <div>
             <label for="model_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Model *</label>
