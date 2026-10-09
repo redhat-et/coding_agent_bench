@@ -145,6 +145,12 @@ async function submitJob(event) {{
     status.textContent = '';
     status.style.color = '#666';
 
+    while (true) {{
+        const lookupPromise = concurrencyLookupPromise;
+        await lookupPromise;
+        if (lookupPromise === concurrencyLookupPromise) break;
+    }}
+
     const formData = {{
         job_name: document.getElementById('job_name').value.trim(),
         agent: document.getElementById('agent').value,
@@ -217,6 +223,8 @@ function checkApiKey() {{
 }}
 
 let concurrencyLookupId = 0;
+let concurrencyLookupPromise = Promise.resolve();
+let lookedUpConcurrency = null;
 
 async function updateMaxConcurrency() {{
     const modelName = document.getElementById('model_name').value;
@@ -226,7 +234,8 @@ async function updateMaxConcurrency() {{
     const lookupId = ++concurrencyLookupId;
 
     warning.textContent = '';
-    concurrencyInput.value = '';
+    if (concurrencyInput.value === lookedUpConcurrency) concurrencyInput.value = '';
+    lookedUpConcurrency = null;
 
     if (!modelName || !serverUrl.toLowerCase().startsWith(NEBIUS_PREFIX)) return;
 
@@ -248,14 +257,19 @@ async function updateMaxConcurrency() {{
         const data = await response.json();
         if (Number.isInteger(data.max_concurrency) && data.max_concurrency > 0) {{
             concurrencyInput.value = data.max_concurrency;
+            lookedUpConcurrency = String(data.max_concurrency);
         }}
     }} catch (error) {{
         if (lookupId === concurrencyLookupId) console.warn('Could not fetch max concurrency:', error);
     }}
 }}
 
-document.getElementById('model_name').addEventListener('change', updateMaxConcurrency);
-document.getElementById('server_url').addEventListener('change', updateMaxConcurrency);
+function startMaxConcurrencyLookup() {{
+    concurrencyLookupPromise = updateMaxConcurrency();
+}}
+
+document.getElementById('model_name').addEventListener('change', startMaxConcurrencyLookup);
+document.getElementById('server_url').addEventListener('change', startMaxConcurrencyLookup);
 document.getElementById('model_name').addEventListener('change', updateJobName);
 document.getElementById('agent').addEventListener('change', updateJobName);
 document.getElementById('dataset').addEventListener('input', updateJobName);
