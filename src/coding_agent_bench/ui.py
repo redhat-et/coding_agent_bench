@@ -15,7 +15,7 @@ def build_submit_form_html(
     """Build the HTML for the job submission form."""
 
     # Define basic fields (always visible)
-    basic_fields = _build_basic_fields_html(models, agents, nebius_enabled)
+    basic_fields = _build_basic_fields_html(models, agents, nebius_configs, nebius_enabled)
 
     # Define optional/advanced fields
     advanced_fields = _build_advanced_fields_html(nebius_configs, nebius_enabled)
@@ -205,18 +205,71 @@ function checkApiKey() {{
     }}
 }}
 
+let concurrencyLookupId = 0;
+let lookedUpConcurrency = null;
+
+async function updateMaxConcurrency() {{
+    const modelName = document.getElementById('model_name').value;
+    const serverUrl = document.getElementById('server_url').value.trim();
+    const concurrencyInput = document.getElementById('n_concurrent');
+    const warning = document.getElementById('n-concurrent-warning');
+    const lookupId = ++concurrencyLookupId;
+
+    warning.textContent = '';
+    if (concurrencyInput.value === lookedUpConcurrency) concurrencyInput.value = '';
+    lookedUpConcurrency = null;
+
+    if (!modelName || !serverUrl.toLowerCase().startsWith(NEBIUS_PREFIX)) return;
+
+    const gpuConfig = serverUrl.substring(NEBIUS_PREFIX.length).toLowerCase();
+    if (!gpuConfig) return;
+
+    try {{
+        const params = new URLSearchParams({{ model_name: modelName, gpu_config: gpuConfig }});
+        const response = await fetch(`/api/model-max-concurrency?${{params}}`);
+
+        if (lookupId !== concurrencyLookupId) return;
+
+        if (response.status === 404) {{
+            warning.textContent = 'No validated concurrency is available for this model and hardware. You can still submit the job.';
+            return;
+        }}
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+
+        const data = await response.json();
+        if (Number.isInteger(data.max_concurrency) && data.max_concurrency > 0) {{
+            concurrencyInput.value = data.max_concurrency;
+            lookedUpConcurrency = String(data.max_concurrency);
+        }}
+    }} catch (error) {{
+        if (lookupId === concurrencyLookupId) console.warn('Could not fetch max concurrency:', error);
+    }}
+}}
+
+document.getElementById('model_name').addEventListener('change', updateMaxConcurrency);
+document.getElementById('server_url').addEventListener('change', updateMaxConcurrency);
+
 checkApiKey();
 </script>
 """
 
 
-def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enabled: bool) -> str:
+def _build_basic_fields_html(
+    models: list[str],
+    agents: list[str],
+    nebius_configs: list[str],
+    nebius_enabled: bool,
+) -> str:
     """Build HTML for the basic (always visible) form fields."""
     model_options = "".join(
         f'<option value="{html.escape(m)}">{html.escape(m)}</option>' for m in models
     )
     agent_options = "".join(
         f'<option value="{html.escape(a)}">{html.escape(a)}</option>' for a in agents
+    )
+    nebius_config_options = "".join(
+        f'<option value="{html.escape(NEBIUS_PREFIX + config)}">'
+        for config in nebius_configs
     )
 
     nebius_help = ""
@@ -255,14 +308,17 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
         <div>
             <label for="server_url" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Server URL *</label>
             <input type="text" id="server_url" name="server_url" required
+                   list="nebius-config-options"
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
                    placeholder="http://localhost:8000">
+            <datalist id="nebius-config-options">{nebius_config_options}</datalist>
             {nebius_help}
         </div>
         <div>
             <label for="n_concurrent" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Concurrent Tasks</label>
             <input type="number" id="n_concurrent" name="n_concurrent" value="1" min="1"
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+            <small id="n-concurrent-warning" style="display: block; color: #cc6600; margin-top: 0.25rem;"></small>
         </div>
 """
 

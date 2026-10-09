@@ -13,7 +13,7 @@ from coding_agent_bench.models.configs import (
     RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8,
     RedHatAI_Inkling_Small,
     RedHatAI_Laguna_S_2_1,
-    poolside_Laguna_S_2_1_NVFP4,
+    Poolside_Laguna_S_2_1_NVFP4,
 )
 
 MODEL_CONFIGS: list[type[ModelConfig]] = [
@@ -30,7 +30,7 @@ MODEL_CONFIGS: list[type[ModelConfig]] = [
     RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8,
     RedHatAI_Inkling_Small,
     RedHatAI_Laguna_S_2_1,
-    poolside_Laguna_S_2_1_NVFP4,
+    Poolside_Laguna_S_2_1_NVFP4,
 ]
 
 MODEL_REGISTRY: dict[str, ModelConfig] = {cls.name: cls() for cls in MODEL_CONFIGS}
