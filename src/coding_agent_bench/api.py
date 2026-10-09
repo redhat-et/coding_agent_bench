@@ -16,7 +16,7 @@ from pathlib import Path
 from coding_agent_bench.builder import SupportedAgent, HarborCommandBuilder
 from coding_agent_bench.intake.validation import validate_server_url
 from coding_agent_bench.job import OpenshiftJob, _build_logged_shell_step
-from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY
+from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY, get_model_max_concurrency
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import validate_remote_skill_sources
 from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
@@ -2375,12 +2375,6 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         "parent_job_id": job_id,
     }
 
-@router.get("/models")
-async def get_models():
-    """List available models for managed servers."""
-    models = list(MODEL_REGISTRY.keys())
-    return {"models": models}
-
 @ui_router.get("/api/models")
 async def get_models_public():
     """List available models (public endpoint for UI)."""
@@ -2398,6 +2392,25 @@ async def get_nebius_configs():
     return {
         "nebius_enabled": nebius_enabled,
         "configs": list(RESOURCE_CONFIG_REGISTRY.keys()),
+    }
+
+@ui_router.get("/api/model-max-concurrency")
+async def model_max_concurrency(model_name: str, gpu_config: str):
+    """Fetch the max concurrency of a given model on a given GPU config."""
+    if model_name not in MODEL_REGISTRY:
+        raise HTTPException(404, f"Model {model_name} not found")
+    if gpu_config not in RESOURCE_CONFIG_REGISTRY:
+        raise HTTPException(404, f"GPU config {gpu_config} not found")
+
+    try:
+        max_concurrency = get_model_max_concurrency(model_name=model_name, gpu_config=gpu_config)
+    except Exception:
+        raise HTTPException(404, "Model and config pair have not been validated")
+
+    return {
+        "model_name": model_name,
+        "gpu_config": gpu_config,
+        "max_concurrency": max_concurrency,
     }
 
 app.include_router(router)
