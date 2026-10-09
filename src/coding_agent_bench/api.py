@@ -1,15 +1,15 @@
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Header
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, field_validator
-from typing import NamedTuple, Optional
+from pydantic import BaseModel, Field, SecretStr, field_validator
+from typing import Optional
 
 import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import validate_remote_skill_sources
 from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
 from coding_agent_bench.agents import AGENT_REGISTRY
+from coding_agent_bench.github_datasets import GitHubDataset
 from coding_agent_bench.ui import build_submit_form_html
 from coding_agent_bench import VERSION
 from coding_agent_bench.preemption import CANCELLED_ERROR_TYPE, PAUSE_PLUGIN
@@ -42,12 +43,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-class QueuedJob(NamedTuple):
+@dataclass
+class QueuedJob:
     job_id: str
     command: list[str]
     server_url: str
     model_name: str
     adopt_existing: bool = False
+    github_dataset: GitHubDataset | None = None
+    github_token: SecretStr | None = field(default=None, repr=False)
 
 _job_queue: list[QueuedJob] = []
 _job_event = asyncio.Event()
@@ -472,6 +476,9 @@ class CreateJobRequest(BaseModel):
     agent_version: Optional[str] = Field(None, description="Pin agent to a specific version (overrides default)")
     max_retries: Optional[int] = Field(None, description="Max retry attempts per task (default: 1)")
     retry_include: Optional[list[str]] = Field(None, description="Error types to retry (default: AgentTimeoutError, NonZeroAgentExitCodeError, ApiRateLimitError, ApiUsageLimitError)")
+    github_dataset: GitHubDataset | None = Field(
+        None, description="GitHub repository to download inside the pod. Optional token goes in X-GitHub-Token."
+    )
     skills: list[str] = Field(
         default_factory=list,
         description="Public Git skill sources in org/name[@ref] or HTTP(S) URL form",
@@ -520,6 +527,12 @@ class JobResponse(BaseModel):
     idempotency_key: str | None = None
     results_job_name: str | None = None
     resumed_by_job_id: str | None = None
+    github_dataset: GitHubDataset | None = None
+
+    @field_validator("github_dataset", mode="before")
+    @classmethod
+    def decode_github_dataset(cls, value):
+        return json.loads(value) if isinstance(value, str) else value
 
 
 class JobStore:
@@ -579,6 +592,8 @@ class JobStore:
                 "UPDATE jobs SET results_job_name = ? WHERE job_id = ?",
                 (results_job_name(dict(row)), row["job_id"]),
             )
+        if "github_dataset" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN github_dataset TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency_key "
             "ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
@@ -598,6 +613,7 @@ class JobStore:
         idempotency_key: str | None = None,
         results_job_name: str | None = None,
         resume_parent_id: str | None = None,
+        github_dataset: GitHubDataset | None = None,
     ) -> bool:
         """Insert a job, optionally claiming a failed checkpoint in the same transaction.
 
@@ -616,8 +632,8 @@ class JobStore:
                     return False
             conn.execute(
                 "INSERT INTO jobs "
-                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     job_name,
@@ -629,12 +645,20 @@ class JobStore:
                     JobStatus.QUEUED.value,
                     idempotency_key,
                     results_job_name or job_name,
+                    github_dataset.model_dump_json() if github_dataset else None,
                 ),
             )
             conn.commit()
             return True
         finally:
             conn.close()
+
+    def pin_github_dataset(self, job_id: str, source: GitHubDataset):
+        """Save only public source metadata and the commit used by the pod."""
+        with self._connect() as conn:
+            conn.execute("UPDATE jobs SET github_dataset = ? WHERE job_id = ?",
+                         (source.model_dump_json(), job_id))
+        conn.close()
 
     def update_status(self, job_id: str, status: JobStatus, error: str | None = None):
         """Update the status of a job."""
@@ -873,6 +897,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await task
         except asyncio.CancelledError:
             pass
+    for queued in _job_queue:
+        queued.github_token = None
+    _job_queue.clear()
     # Do not delete Nebius instances here: OpenShift jobs survive queue restarts
     # and the next queue process must be able to adopt their deterministic VM.
     # Permanent decommissioning therefore requires external instance cleanup.
@@ -1312,6 +1339,7 @@ async def _run_job(
     openrouter: bool = False,
     adopt_existing: bool = False,
     nebius_instance_name: str | None = None,
+    queued_job: QueuedJob | None = None,
 ):
     """Validate, run, and monitor an OpenShift Job."""
     if server_url:
@@ -1336,12 +1364,23 @@ async def _run_job(
                 job_spec = oj._resume_job_spec(command[2])
             else:
                 job_spec = oj._job_spec(command, openrouter=openrouter)
+            if queued_job and queued_job.github_dataset:
+                job_spec = oj.with_github_dataset(job_spec)
             await oj._run_oc_command(
                 ["apply", "-f", "-"],
                 stdin_data=json.dumps(job_spec).encode(),
             )
             job_store.update_status(job_id, JobStatus.RUNNING)
             await oj._wait_for_job_pod_ready()
+            if queued_job and queued_job.github_dataset:
+                source = queued_job.github_dataset
+                try:
+                    commit = await oj.prepare_github_dataset(source, queued_job.github_token)
+                finally:
+                    queued_job.github_token = None
+                source = source.model_copy(update={"commit": commit})
+                job_store.pin_github_dataset(job_id, source)
+                await oj.release_github_dataset()
         else:
             if job_store.get(job_id)["status"] == JobStatus.QUEUED.value:
                 job_store.update_status(job_id, JobStatus.RUNNING)
@@ -1364,6 +1403,12 @@ async def _run_job(
             }
             if not conditions.intersection({"Complete", "Failed"}):
                 await oj._wait_for_job_pod_ready()
+                if queued_job and queued_job.github_dataset:
+                    if not queued_job.github_dataset.commit:
+                        raise RuntimeError("GitHub dataset preparation was interrupted; submit a new job")
+                    # Preparation may have finished just before the queue restarted,
+                    # after pinning the commit but before releasing the pod.
+                    await oj.release_github_dataset()
 
         consecutive_missing = 0
         max_missing = 6  # 6 polls × 5s = 30s before declaring pod gone
@@ -1488,6 +1533,10 @@ async def _run_job(
         error = str(e)
         await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=error)
 
+    finally:
+        if queued_job:
+            queued_job.github_token = None
+
 
 def _reorder_queue_for_nebius():
     """Stable-sort the queue so nebius jobs that can reuse the current instance
@@ -1518,7 +1567,9 @@ def _reorder_queue_for_nebius():
 
 async def _process_queued_job(queued: QueuedJob) -> None:
     """Provision or adopt one queued job without risking the dispatcher task."""
-    job_id, command, server_url, model_name, adopt_existing = queued
+    job_id, command = queued.job_id, queued.command
+    server_url, model_name = queued.server_url, queued.model_name
+    adopt_existing = queued.adopt_existing
     oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
 
     model_config: ModelConfig | None = None
@@ -1527,6 +1578,8 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         row = job_store.get(job_id)
         if not row:
             return
+        if queued.github_dataset is None and row.get("github_dataset"):
+            queued.github_dataset = GitHubDataset.model_validate_json(row["github_dataset"])
         if adopt_existing and row["status"] in (JobStatus.PAUSED.value, JobStatus.QUEUED.value):
             # A manual resume may replace a scheduled recovery's saved command.
             command = json.loads(row["command"])
@@ -1670,6 +1723,7 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 openrouter=is_openrouter(server_url),
                 adopt_existing=adopt_existing,
                 nebius_instance_name=nebius_instance_name,
+                **({"queued_job": queued} if queued.github_dataset else {}),
             )
         except InstancePreempted as e:
             logger.error(
@@ -1705,7 +1759,8 @@ async def _worker():
         _job_event.clear()
         while _job_queue:
             _reorder_queue_for_nebius()
-            job_id, command, server_url, model_name, adopt_existing = _job_queue.pop(0)
+            queued = _job_queue.pop(0)
+            job_id, adopt_existing = queued.job_id, queued.adopt_existing
             row = job_store.get(job_id)
             recoverable_statuses = (
                 JobStatus.QUEUED.value,
@@ -1717,10 +1772,12 @@ async def _worker():
                 JobStatus.PAUSED.value,
             )
             if not row or (adopt_existing and row["status"] not in recoverable_statuses):
+                queued.github_token = None
                 continue
             if not adopt_existing and row["status"] != JobStatus.QUEUED.value:
+                queued.github_token = None
                 continue
-            processing_task = asyncio.create_task(_process_queued_job(QueuedJob(job_id, command, server_url, model_name, adopt_existing)))
+            processing_task = asyncio.create_task(_process_queued_job(queued))
             _active_job = (job_id, processing_task)
             try:
                 await processing_task
@@ -1738,6 +1795,7 @@ async def _worker():
                 # the queue moves on to the next job.
                 logger.exception(f"Queue handler crashed while processing {job_id}")
             finally:
+                queued.github_token = None
                 if _active_job and _active_job[0] == job_id:
                     _active_job = None
 
@@ -1934,7 +1992,7 @@ h1 svg {{ flex-shrink: 0; }}
 </html>"""
     return html_page
 
-def build_cli_command(req: CreateJobRequest):
+def build_cli_command(req: CreateJobRequest, dataset_override: str | None = None):
     """Build the coding-agent-bench CLI command."""
     command = ["coding-agent-bench", "run"]
     
@@ -1942,7 +2000,7 @@ def build_cli_command(req: CreateJobRequest):
     command += [
         "--job-name", req.job_name,
         "--agent", req.agent,
-        "--dataset", req.dataset,
+        "--dataset", dataset_override or req.dataset,
         "--model-name", req.model_name,
         "--server-url", req.server_url,
         "--environment", "openshift",
@@ -1976,6 +2034,14 @@ def build_cli_command(req: CreateJobRequest):
     return command
 
 
+def _github_token(request: Request | None) -> SecretStr | None:
+    # Keep credentials outside JSON models and validation error responses.
+    value = request.headers.get("X-GitHub-Token", "") if request else ""
+    if len(value) > 4096 or any(ord(char) < 33 or ord(char) > 126 for char in value):
+        raise HTTPException(status_code=400, detail="Invalid GitHub token header")
+    return SecretStr(value) if value else None
+
+
 def _job_create_response(row: dict, message: str) -> CreateJobResponse:
     """Reconstruct a create response from a job persisted in the queue store."""
     try:
@@ -1996,6 +2062,7 @@ def _job_create_response(row: dict, message: str) -> CreateJobResponse:
 async def create_job(
     req: CreateJobRequest,
     idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    request: Request = None,
 ):
     """Create a new benchmark job."""
     # FastAPI replaces the Header marker at request time; treating it as absent
@@ -2065,10 +2132,12 @@ async def create_job(
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    # Build the CLI command
-    command = build_cli_command(req=req)
+    token = _github_token(request)
+    if token and not req.github_dataset:
+        raise HTTPException(status_code=400, detail="GitHub token requires a GitHub dataset")
+    dataset_override = req.github_dataset.local_path if req.github_dataset else None
+    command = build_cli_command(req=req, dataset_override=dataset_override)
 
-    # Start the job
     job_id = str(uuid.uuid4())
     try:
         job_store.insert(
@@ -2080,6 +2149,7 @@ async def create_job(
             req.server_url,
             command,
             idempotency_key=idempotency_key,
+            github_dataset=req.github_dataset,
         )
     except sqlite3.IntegrityError:
         # A concurrent retry may win the unique-key race between the lookup above
@@ -2090,7 +2160,10 @@ async def create_job(
             if existing:
                 return _job_create_response(existing, message="Job already exists.")
         raise HTTPException(status_code=409, detail="Job already exists")
-    _job_queue.append(QueuedJob(job_id, command, req.server_url, req.model_name))
+    _job_queue.append(
+        QueuedJob(job_id, command, req.server_url, req.model_name,
+                  github_dataset=req.github_dataset, github_token=token)
+    )
     _job_event.set()
 
     # Return a success response
@@ -2174,6 +2247,7 @@ async def delete_job(job_id: str):
                 and not queued.adopt_existing
             ):
                 _job_queue.pop(i)
+                queued.github_token = None
                 job_store.update_status(job_id, JobStatus.CANCELLED)
                 return {"message": "Job cancelled", "job_id": job_id}
             if job_row["status"] in (
@@ -2298,7 +2372,7 @@ def _build_resume_shell_command(
 
 
 @router.post("/jobs/{job_id}/resume")
-async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
+async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), request: Request = None):
     """Resume a finished or paused job, preserving its original artifact location."""
     job_row = job_store.get(job_id)
     if not job_row:
@@ -2320,6 +2394,15 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         )
 
     original_job_name = results_job_name(job_row)
+    source = None
+    if job_row.get("github_dataset"):
+        source = GitHubDataset.model_validate_json(job_row["github_dataset"])
+        if not source.commit:
+            raise HTTPException(status_code=400, detail="Dataset preparation never completed; submit a new job")
+    token = _github_token(request)
+    if token and not source:
+        raise HTTPException(status_code=400, detail="GitHub token requires a GitHub dataset")
+
     resume_job_id = str(uuid.uuid4())
     resume_job_name = f"{original_job_name}--resume"
 
@@ -2350,7 +2433,14 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         # the original paused would allow the background loop to run both.
         if not job_store.resume_paused(job_id, command, effective_server_url, original_job_name):
             raise HTTPException(status_code=409, detail="Job left the paused state; refresh before retrying")
-        _job_queue.append(QueuedJob(job_id, command, effective_server_url, job_row["model_name"]))
+        # Replace any scheduled automatic recovery so it cannot consume this
+        # transition without the fresh credential supplied by the manual resume.
+        for queued in _job_queue:
+            if queued.job_id == job_id:
+                queued.github_token = None
+        _job_queue[:] = [queued for queued in _job_queue if queued.job_id != job_id]
+        _job_queue.append(QueuedJob(job_id, command, effective_server_url, job_row["model_name"],
+                                    github_dataset=source, github_token=token))
         _job_event.set()
         return {"message": "Paused job queued for resume", "job_id": job_id, "job_name": job_row["job_name"]}
     claim_checkpoint = (
@@ -2361,11 +2451,13 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest()):
         resume_job_id, resume_job_name, job_row["agent"],
         job_row["dataset"], job_row["model_name"], effective_server_url, command,
         results_job_name=original_job_name,
+        github_dataset=source,
         **({"resume_parent_id": job_id} if claim_checkpoint else {}),
     )
     if claim_checkpoint and not inserted:
         raise HTTPException(status_code=409, detail="Checkpoint was claimed or job state changed; refresh before retrying")
-    _job_queue.append(QueuedJob(resume_job_id, command, effective_server_url, job_row["model_name"]))
+    _job_queue.append(QueuedJob(resume_job_id, command, effective_server_url, job_row["model_name"],
+                                github_dataset=source, github_token=token))
     _job_event.set()
 
     return {

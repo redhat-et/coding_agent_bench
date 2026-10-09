@@ -281,6 +281,64 @@ Or list them from the API:
 curl $JOB_QUEUE_URL/jobs -H "X-API-Key: <your-api-key>"
 ```
 
+### Run a GitHub-hosted dataset
+
+In the job form, enter a GitHub repository URL and, if needed, a branch, tag, or
+commit. For a private repository, enter a fine-grained GitHub token with
+read-only Contents access. Public repositories can leave the token blank. The
+job pod downloads the repository directly from GitHub when the job starts.
+
+The optional token is sent in the `X-GitHub-Token` header, held only in queue
+memory while waiting, and passed to the running pod over `oc exec` stdin. It is
+not saved in SQLite, files, environment variables, commands, pod specs, Secrets,
+or application logs. It is discarded after dataset preparation or cancellation;
+the form clears it after submission. The queue API key (`X-API-Key`) is separate
+and remains required for public and private datasets.
+
+Git history and submodules are not included. **Dataset Directory in Repository**
+defaults to `tasks`. Change it to a relative path to one Harbor task folder, or to a dataset
+directory whose immediate child directories are Harbor tasks. For example, use
+`benchmarks/my-dataset` if that contains `task-one/task.toml`,
+`task-two/task.toml`, and so on. Leave it blank if the repository root itself
+is the task or dataset directory. This follows Harbor's local `--path` format:
+it checks for a task at the selected path, otherwise it enumerates its immediate
+child directories as tasks. It does not search for a `tasks/` directory or infer
+the location from a `dataset.toml` automatically.
+
+Downloads are limited to 512 MiB compressed and 2 GiB unpacked within each job's
+4 GiB ephemeral dataset volume. There is no archive staging on the queue server.
+The pod finishes downloading, safely extracts the archive, and checks for valid
+Harbor tasks before execution. Partial downloads and archives are deleted after
+preparation; extracted data disappears when the pod is deleted.
+
+The resolved Git commit is recorded with the repository and subdirectory before
+Harbor starts. Resume re-downloads that exact commit into the same local path,
+then restores job results. Supply a fresh `X-GitHub-Token` header on
+`POST /jobs/{job_id}/resume` for private repositories; the original token is not
+retained. Jobs whose initial dataset preparation never completed must be
+resubmitted. A queue restart loses queued credentials, but can adopt a running
+pod whose dataset was already prepared. Jobs that need a new pod download
+(including automatic recovery after preemption) cannot reuse the original
+private-repository token; manually resume with a fresh token if that download
+fails. Public repositories can be downloaded again without credentials.
+
+API submissions use the same job fields as usual plus:
+
+```json
+{
+  "github_dataset": {
+    "repository_url": "https://github.com/owner/repository",
+    "ref": "main",
+    "subdirectory": "tasks"
+  }
+}
+```
+
+If `subdirectory` is omitted from an API request, it defaults to `tasks`; use
+an empty string to select the repository root.
+
+The GitHub token is an optional request header, never a JSON job field.
+
 Cancel a running or queued job:
 
 ```sh

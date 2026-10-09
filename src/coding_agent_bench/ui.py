@@ -18,7 +18,7 @@ def build_submit_form_html(
     basic_fields = _build_basic_fields_html(models, agents, nebius_enabled)
 
     # Define optional/advanced fields
-    advanced_fields = _build_advanced_fields_html(nebius_configs, nebius_enabled)
+    advanced_fields = _build_advanced_fields_html()
 
     return f"""
 <div id="submit-job-section" style="margin-bottom: 2rem; padding: 1rem; border: 1px solid #ddd; border-radius: 8px; background: #fafafa;">
@@ -60,6 +60,20 @@ const NEBIUS_CONFIGS = {json.dumps(nebius_configs)};
 const NEBIUS_ENABLED = {json.dumps(nebius_enabled)};
 const NEBIUS_PREFIX = '{NEBIUS_PREFIX}';
 
+function parseGitHubRepository(value) {{
+    try {{
+        const url = new URL(value);
+        if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.port || url.username || url.password || url.search || url.hash) return null;
+        const parts = url.pathname.split('/').filter(Boolean);
+        if (parts.length !== 2) return null;
+        const repo = parts[1].replace(/\\.git$/i, '');
+        if (!/^[A-Za-z0-9_.-]+$/.test(parts[0]) || !/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
+        return {{ owner: parts[0], repo }};
+    }} catch (_) {{
+        return null;
+    }}
+}}
+
 function toggleAdvanced() {{
     const adv = document.getElementById('advanced-fields');
     const btn = document.getElementById('advanced-toggle');
@@ -77,12 +91,14 @@ function validateForm() {{
     const jobName = document.getElementById('job_name').value.trim();
     const agent = document.getElementById('agent').value;
     const dataset = document.getElementById('dataset').value.trim();
+    const githubRepo = document.getElementById('github_repo').value.trim();
     const modelName = document.getElementById('model_name').value;
     const serverUrl = document.getElementById('server_url').value.trim();
 
     if (!jobName) errors.push('Job name is required');
     if (!agent) errors.push('Agent is required');
-    if (!dataset) errors.push('Dataset is required');
+    if (!dataset && !githubRepo) errors.push('Enter a Harbor dataset or GitHub repository');
+    if (githubRepo && !parseGitHubRepository(githubRepo)) errors.push('GitHub repository must be an HTTPS URL like https://github.com/owner/repo');
     if (!modelName) errors.push('Model name is required');
     if (!serverUrl) errors.push('Server URL is required');
 
@@ -133,31 +149,8 @@ async function submitJob(event) {{
     btn.textContent = 'Submitting...';
     status.textContent = '';
     status.style.color = '#666';
-
-    const formData = {{
-        job_name: document.getElementById('job_name').value.trim(),
-        agent: document.getElementById('agent').value,
-        dataset: document.getElementById('dataset').value.trim(),
-        model_name: document.getElementById('model_name').value,
-        server_url: document.getElementById('server_url').value.trim(),
-        n_concurrent: parseInt(document.getElementById('n_concurrent').value) || 1,
-    }};
-
-    // Advanced fields
-    const datasetPattern = document.getElementById('dataset_pattern').value.trim();
-    if (datasetPattern) formData.dataset_pattern = datasetPattern;
-
-    const nTasks = document.getElementById('n_tasks').value.trim();
-    if (nTasks) formData.n_tasks = parseInt(nTasks);
-
-    const modelMaxLen = document.getElementById('model_max_len').value.trim();
-    if (modelMaxLen) formData.model_max_len = parseInt(modelMaxLen);
-
-    const beforeScript = document.getElementById('before_script').value.trim();
-    if (beforeScript) formData.before_script = beforeScript;
-
-    const agentVersion = document.getElementById('agent_version').value.trim();
-    if (agentVersion) formData.agent_version = agentVersion;
+    const githubTokenInput = document.getElementById('github_token');
+    const headers = {{ 'Content-Type': 'application/json' }};
 
     const skills = document.getElementById('skills').value
         .split(',')
@@ -167,12 +160,55 @@ async function submitJob(event) {{
 
     try {{
         const apiKey = localStorage.getItem('coding_agent_bench_api_key');
+        if (!apiKey) throw new Error('Set the queue API key before submitting a job.');
+        const githubRepoValue = document.getElementById('github_repo').value.trim();
+        const githubRef = document.getElementById('github_ref').value.trim();
+        const githubSubdirectory = document.getElementById('github_subdirectory').value.trim();
+        const githubRepository = githubRepoValue ? parseGitHubRepository(githubRepoValue) : null;
+        let dataset = document.getElementById('dataset').value.trim();
+
+        if (githubRepository) {{
+            dataset = `github.com/${{githubRepository.owner}}/${{githubRepository.repo}}${{githubRef ? `@${{githubRef}}` : ''}}`;
+            if (githubTokenInput.value) headers['X-GitHub-Token'] = githubTokenInput.value;
+        }}
+        githubTokenInput.value = '';
+        headers['X-API-Key'] = apiKey;
+
+        const formData = {{
+            job_name: document.getElementById('job_name').value.trim(),
+            agent: document.getElementById('agent').value,
+            dataset,
+            model_name: document.getElementById('model_name').value,
+            server_url: document.getElementById('server_url').value.trim(),
+            n_concurrent: parseInt(document.getElementById('n_concurrent').value) || 1,
+        }};
+        if (githubRepository) {{
+            formData.github_dataset = {{
+                repository_url: githubRepoValue,
+                ref: githubRef,
+                subdirectory: githubSubdirectory,
+            }};
+        }}
+
+        // Advanced fields
+        const datasetPattern = document.getElementById('dataset_pattern').value.trim();
+        if (datasetPattern) formData.dataset_pattern = datasetPattern;
+
+        const nTasks = document.getElementById('n_tasks').value.trim();
+        if (nTasks) formData.n_tasks = parseInt(nTasks);
+
+        const modelMaxLen = document.getElementById('model_max_len').value.trim();
+        if (modelMaxLen) formData.model_max_len = parseInt(modelMaxLen);
+
+        const beforeScript = document.getElementById('before_script').value.trim();
+        if (beforeScript) formData.before_script = beforeScript;
+
+        const agentVersion = document.getElementById('agent_version').value.trim();
+        if (agentVersion) formData.agent_version = agentVersion;
+
         const response = await fetch('/jobs', {{
             method: 'POST',
-            headers: {{
-                'Content-Type': 'application/json',
-                'X-API-Key': apiKey || '',
-            }},
+            headers,
             body: JSON.stringify(formData),
         }});
 
@@ -193,6 +229,9 @@ async function submitJob(event) {{
         status.style.color = 'red';
         btn.disabled = false;
         btn.textContent = 'Submit Job';
+    }} finally {{
+        githubTokenInput.value = '';
+        delete headers['X-GitHub-Token'];
     }}
 }}
 
@@ -240,10 +279,36 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
             </select>
         </div>
         <div>
-            <label for="dataset" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Dataset *</label>
-            <input type="text" id="dataset" name="dataset" required
+            <label for="dataset" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Harbor Dataset (optional when using GitHub)</label>
+            <input type="text" id="dataset" name="dataset"
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   placeholder="e.g., humaneval">
+                   placeholder="Harbor dataset name (or leave blank when using GitHub)">
+        </div>
+        <div style="grid-column: 1 / -1;">
+            <label for="github_repo" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Repository Dataset (optional)</label>
+            <input type="url" id="github_repo" autocomplete="url"
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="https://github.com/owner/repository">
+            <small style="display: block; color: #666; margin-top: 0.25rem;">The job pod downloads this repository and runs Harbor on the selected directory. Public repositories need no GitHub token. An optional token is held only in queue memory, passed to the pod through stdin, and discarded after preparation.</small>
+        </div>
+        <div>
+            <label for="github_ref" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Branch, Tag, or Commit</label>
+            <input type="text" id="github_ref" autocomplete="off"
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="Default branch">
+        </div>
+        <div>
+            <label for="github_subdirectory" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Dataset Directory in Repository</label>
+            <input type="text" id="github_subdirectory" autocomplete="off"
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   value="tasks" placeholder="e.g., benchmarks/my-dataset">
+            <small style="display: block; color: #666; margin-top: 0.25rem;">Defaults to tasks/. Set a path relative to the repository root; clear the field to use the repository root.</small>
+        </div>
+        <div>
+            <label for="github_token" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Token (private repos only)</label>
+            <input type="password" id="github_token" autocomplete="new-password" autocapitalize="off" spellcheck="false"
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="Read-only access to this repository">
         </div>
         <div>
             <label for="model_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Model *</label>
@@ -267,7 +332,7 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
 """
 
 
-def _build_advanced_fields_html(nebius_configs: list[str], nebius_enabled: bool) -> str:
+def _build_advanced_fields_html() -> str:
     """Build HTML for the optional/advanced form fields."""
     return """
         <div>
