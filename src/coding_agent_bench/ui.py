@@ -152,12 +152,6 @@ async function submitJob(event) {{
     const githubTokenInput = document.getElementById('github_token');
     const headers = {{ 'Content-Type': 'application/json' }};
 
-    const skills = document.getElementById('skills').value
-        .split(',')
-        .map((skill) => skill.trim())
-        .filter(Boolean);
-    if (skills.length) formData.skills = skills;
-
     try {{
         const apiKey = localStorage.getItem('coding_agent_bench_api_key');
         if (!apiKey) throw new Error('Set the queue API key before submitting a job.');
@@ -182,6 +176,11 @@ async function submitJob(event) {{
             server_url: document.getElementById('server_url').value.trim(),
             n_concurrent: parseInt(document.getElementById('n_concurrent').value) || 1,
         }};
+        const skills = document.getElementById('skills').value
+            .split(',')
+            .map((skill) => skill.trim())
+            .filter(Boolean);
+        if (skills.length) formData.skills = skills;
         if (githubRepository) {{
             formData.github_dataset = {{
                 repository_url: githubRepoValue,

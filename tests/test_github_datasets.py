@@ -584,6 +584,7 @@ def test_ui_submits_directly_without_archive_staging():
     assert 'id="github_subdirectory"' in html
     assert 'id="github_subdirectory" autocomplete="off"' in html
     assert 'value="tasks"' in html
+    assert html.index("const formData = {") < html.index("if (skills.length) formData.skills = skills;")
 
 
 def test_pod_helper_errors_never_emit_credentials(monkeypatch, capsys):
