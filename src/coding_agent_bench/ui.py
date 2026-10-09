@@ -62,9 +62,15 @@ const NEBIUS_PREFIX = '{NEBIUS_PREFIX}';
 
 function parseGitHubRepository(value) {{
     try {{
-        const url = new URL(value);
-        if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.port || url.username || url.password || url.search || url.hash) return null;
-        const parts = url.pathname.split('/').filter(Boolean);
+        const input = value.trim();
+        let parts;
+        if (input.includes('://')) {{
+            const url = new URL(input);
+            if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.port || url.username || url.password || url.search || url.hash) return null;
+            parts = url.pathname.split('/').filter(Boolean);
+        }} else {{
+            parts = input.split('/');
+        }}
         if (parts.length !== 2) return null;
         const repo = parts[1].replace(/\\.git$/i, '');
         if (!/^[A-Za-z0-9_.-]+$/.test(parts[0]) || !/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
@@ -98,7 +104,7 @@ function validateForm() {{
     if (!jobName) errors.push('Job name is required');
     if (!agent) errors.push('Agent is required');
     if (!dataset && !githubRepo) errors.push('Enter a Harbor dataset or GitHub repository');
-    if (githubRepo && !parseGitHubRepository(githubRepo)) errors.push('GitHub repository must be an HTTPS URL like https://github.com/owner/repo');
+    if (githubRepo && !parseGitHubRepository(githubRepo)) errors.push('GitHub repository must be owner/repo or an HTTPS URL like https://github.com/owner/repo');
     if (!modelName) errors.push('Model name is required');
     if (!serverUrl) errors.push('Server URL is required');
 
@@ -159,6 +165,9 @@ async function submitJob(event) {{
         const githubRef = document.getElementById('github_ref').value.trim();
         const githubSubdirectory = document.getElementById('github_subdirectory').value.trim();
         const githubRepository = githubRepoValue ? parseGitHubRepository(githubRepoValue) : null;
+        const githubRepositoryUrl = githubRepository
+            ? `https://github.com/${{githubRepository.owner}}/${{githubRepository.repo}}`
+            : null;
         let dataset = document.getElementById('dataset').value.trim();
 
         if (githubRepository) {{
@@ -183,7 +192,7 @@ async function submitJob(event) {{
         if (skills.length) formData.skills = skills;
         if (githubRepository) {{
             formData.github_dataset = {{
-                repository_url: githubRepoValue,
+                repository_url: githubRepositoryUrl,
                 ref: githubRef,
                 subdirectory: githubSubdirectory,
             }};
@@ -285,9 +294,9 @@ def _build_basic_fields_html(models: list[str], agents: list[str], nebius_enable
         </div>
         <div style="grid-column: 1 / -1;">
             <label for="github_repo" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">GitHub Repository Dataset (optional)</label>
-            <input type="url" id="github_repo" autocomplete="url"
+            <input type="text" id="github_repo" autocomplete="off"
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
-                   placeholder="https://github.com/owner/repository">
+                   placeholder="owner/repository or https://github.com/owner/repository">
             <small style="display: block; color: #666; margin-top: 0.25rem;">The job pod downloads this repository and runs Harbor on the selected directory. Public repositories need no GitHub token. An optional token is held only in queue memory, passed to the pod through stdin, and discarded after preparation.</small>
         </div>
         <div>

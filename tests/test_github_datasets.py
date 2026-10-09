@@ -584,6 +584,9 @@ def test_ui_submits_directly_without_archive_staging():
     assert 'id="github_subdirectory"' in html
     assert 'id="github_subdirectory" autocomplete="off"' in html
     assert 'value="tasks"' in html
+    assert 'id="github_repo" autocomplete="off"' in html
+    assert 'placeholder="owner/repository or https://github.com/owner/repository"' in html
+    assert "repository_url: githubRepositoryUrl" in html
     assert html.index("const formData = {") < html.index("if (skills.length) formData.skills = skills;")
 
 

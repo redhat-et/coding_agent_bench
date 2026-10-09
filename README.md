@@ -283,10 +283,11 @@ curl $JOB_QUEUE_URL/jobs -H "X-API-Key: <your-api-key>"
 
 ### Run a GitHub-hosted dataset
 
-In the job form, enter a GitHub repository URL and, if needed, a branch, tag, or
-commit. For a private repository, enter a fine-grained GitHub token with
-read-only Contents access. Public repositories can leave the token blank. The
-job pod downloads the repository directly from GitHub when the job starts.
+In the job form, enter a GitHub repository as `owner/repository` or a full GitHub
+URL and, if needed, a branch, tag, or commit. For a private repository, enter a
+fine-grained GitHub token with read-only Contents access. Public repositories can
+leave the token blank. The job pod downloads the repository directly from GitHub
+when the job starts.
 
 The optional token is sent in the `X-GitHub-Token` header, held only in queue
 memory while waiting, and passed to the running pod over `oc exec` stdin. It is
