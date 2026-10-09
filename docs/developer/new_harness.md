@@ -6,7 +6,7 @@ This will walk you through the two step process of adding a new harness to the p
 
 For harnesses to be added to `coding_agent_bench`, it must satisfy 3 requirements:
 
-1. It must be supported by `harbor`
+1. It must be supported by Harbor
 2. It must support self-hosted models
 3. Any required configuration must be managed through volume mounts and environment variables only - no interactive setup allowed
 
@@ -53,6 +53,22 @@ harbor task start-env \
 
 Then you can export any needed envvars and run your harness command to test your configuration.
 
-## Registering a New Harness
+## Register the Harness in `coding_agent_bench`
 
-TODO
+Once you have verified your configuration, you can register the harness in `coding_agent_bench` to be used in benchmark runs.
+
+1. Add a new subclass of `AgentConfig` to `src/coding_agent_bench/agents/configs.py`. For example:
+
+    ```python
+    class MyAgentConfig(AgentConfig):
+        """Configuration for MyAgent."""
+
+        name = "my-agent"
+        version = "1.0.0"
+
+        def configure(self, **kwargs) -> AgentConfigResult:
+            ...your configuration code...
+    ```
+
+2. Register the new class in `AGENT_CONFIGS` in `src/coding_agent_bench/agents/__init__.py`
+3. Add any needed tests for your new class to `tests/`

@@ -22,10 +22,11 @@ Before a model can be added to the project, it must be validated to be able to r
 
 ```shell
 export SA_NAME=<name-for-new-sa>
-export PROJECT_ID=project-i00hz9y8pr00mf5rzvw82k
+export PROJECT_ID=<project-id>
 
 # Create Service Account
 export SA_ID=$(nebius iam service-account create \
+  --parent-id $PROJECT_ID \
   --name $SA_NAME \
   --format json | jq -r '.metadata.id')
 
@@ -35,6 +36,8 @@ nebius iam auth-public-key generate \
   --output ~/.nebius/$SA_ID-credentials.json
 
 # Configure the SA as an editor in the project
+# If there is not an editors group, first create one in the console 
+# and give it global editor permits
 export EDITOR_GROUP_ID=$(nebius iam group get-by-name \
   --name editors --parent-id $PROJECT_ID \
   --format json | jq -r '.metadata.id')
@@ -128,8 +131,19 @@ echo "The vLLM server is located at $VLLM_SERVER_PUBLIC_URL"
 
 Once the model has been validated, it can be added to `coding_agent_bench` to be used in benchmark runs on managed Nebius instances.
 
-First, add a new child class of `ModelConfig` with the model-specific arguments to `src/coding_agent_bench/models/configs.py`.
+1. Add a new subclass of `ModelConfig` with the model-specific arguments to `src/coding_agent_bench/models/configs.py`. For example:
+    ```python
+    class Provider_MyModel(ModelConfig):
 
-Then register the new class in `MODEL_CONFIGS` and `MODEL_REGISTRY` in `src/coding_agent_bench/models/__init__.py`.
+        name = "Provider/MyModel"
+        model_max_len = 262144
+        args = [
+            "--model", "Provider/MyModel" ,
+            "--max-model-len", "262144" ,
+            ...other args...
+        ]
+    ```
 
-Please also add the model to the [Validated Models docs](../validated_models.md#validated-vllm-commands).
+2. Register the new class in `MODEL_CONFIGS` and `MODEL_REGISTRY` in `src/coding_agent_bench/models/__init__.py`.
+3. Add any needed tests for your new class to `tests/`.
+4. Add the model to the [Validated Models docs](../validated_models.md#validated-vllm-commands).

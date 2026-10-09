@@ -22,3 +22,9 @@ Copy `.env.example` to `.env`:
 ```sh
 cp .env.example .env
 ```
+
+Follow the specific set up instructions for any components you are testing:
+- [CLI](../cli.md)
+- [Queue Service](../queue-service/local.md)
+- [Nebius](../queue-service/nebius.md)
+- [Intake Poller](../queue-service/intake_poller.md)

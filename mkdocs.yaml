@@ -28,15 +28,14 @@ theme:
 plugins:
   - search
   - mkdocstrings
+  - include_dir_to_nav
+  - git-revision-date-localized
 
 nav:
   - Home: 
     - Home: index.md
-    - Validated Harbor Commands: validated_harbor_commands.md
     - Validated Models: validated_models.md
-  - CLI:
-    - Overview: cli/index.md
-    - Usage: cli/usage.md
+  - CLI: cli.md
   - Queue Service: 
     - Overview: queue-service/index.md
     - Setup:
@@ -51,7 +50,17 @@ nav:
       - New Model: developer/new_model.md
       - New Harness: developer/new_harness.md
       - New Benchmark: developer/new_benchmark.md
+    - GitHub CICD: developer/github_cicd.md
     - Documentation: developer/documentation.md
+  - Harbor Commands: validated_harbor_commands.md
+  - Benchmark Runs: 
+    - Overview: benchmarks/index.md
+    - Benchmark Runs: 
+      - SWE Bench Verified: benchmarks/runs/swe_bench_verified
+      - SWE Bench Pro -- Ansible: benchmarks/runs/swe_bench_pro_ansible
+      - ITBench AA: benchmarks/runs/itbench_aa
+      - Terminal Bench 2.0: benchmarks/runs/terminal_bench_2_0
+    - SWE Bench Acceleration: benchmarks/swe_bench_acceleration.md
 
 markdown_extensions:
   - admonition

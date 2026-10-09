@@ -4,7 +4,7 @@ Documentation should be updated with any major feature updates, or to correct th
 
 You are encouraged to write the documentation yourself, but you may use an agent if you wish.
 
-Please keep the documentation readable - shorter, more user-friendly documentation is preferred over detailed documentation.
+The documentation must be human readable - shorter, more user-friendly documentation is preferred over detailed, nuanced documentation.
 
 Do not write documentation for simple changes or bugfixes, unless it invalidates any existing documentation.
 

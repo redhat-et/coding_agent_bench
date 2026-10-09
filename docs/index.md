@@ -6,8 +6,8 @@ Reproducible benchmarks for coding agents and models using Harbor
 
 ## Features
 
-- Complete instructions for running popular benchmarks with open models
-- CLI utility to simplify benchmark runs against self-hosted models
-- Deployable queue service for scheduling benchmark runs in OpenShift 
-- Leaderboards for popular benchmarks with instructions for reproducing results
-- Full manifests for deploying open models on OpenShift with vLLM
+- [Complete instructions]() for running popular benchmarks with self-hosted models
+- [CLI utility](./cli.md) to simplify benchmark runs against self-hosted models
+- [Deployable queue service](./queue-service/index.md) for scheduling benchmark runs in OpenShift 
+- Leaderboards for popular benchmarks with [instructions for reproducing results](./benchmarks/index.md)
+- [Full manifests](./validated_models.md) for deploying open models on Docker with vLLM

@@ -2,85 +2,46 @@
 
 ## Steps
 
-1. Log in to your cluster and project:
+1. Log in to your cluster:
 
     ```sh
     oc login --server=<server> --token=<token>
-    oc project <project>
     ```
 
-2. Create the MinIO service for artifact storage:
-    
+2. Copy the Secret templates locally and do not commit the resulting files:
+
     ```sh
-    oc apply -f deploy/harbor-minio.yml
+    cp deploy/storage/base/secret.example.yaml deploy/storage/base/secret.yaml
+    cp deploy/job-queue/base/secret.example.yaml deploy/job-queue/base/secret.yaml
     ```
-    
-    Note: the default username and password are `(minioadmin, minioadmin)`.
-    You can update this in the deployment file if needed.
 
-3. Create the orchestrator and task service accounts:
-    
+    Fill in the secret values, then apply the Secrets separately to the target project before deploying the services:
+
     ```sh
-    oc apply -f deploy/harbor-orchestrator-sa.yml
-    oc apply -f deploy/harbor-task-sa.yml
+    oc apply -f deploy/storage/base/secret.yaml -n <project>
+    oc apply -f deploy/job-queue/base/secret.yaml -n <project>
     ```
 
-4. Create a secret file named `job-queue-secret` with the queue service's `API_KEY` and any queue or Nebius settings, then apply it:
-    
-    ```yaml
-    apiVersion: v1
-    kind: Secret
-    metadata:
-      name:  job-queue-secret
-    stringData:
-      API_KEY: <your-api-key>
-    type: Opaque
-    ```
+3. Deploy the RustFS service to store job artifacts:
 
-5. Create the queue service:
-    
     ```sh
-    oc apply -f deploy/job-queue-service.yml
+    oc apply -k deploy/storage/overlays/prod -n <project>
     ```
 
-6. (Optional) To run jobs against OpenRouter (`server_url: openrouter`), create
-   an `openrouter-api-key` secret. Job pods mount it automatically (it is
-   optional, so non-OpenRouter jobs are unaffected):
-    ```yaml
-    apiVersion: v1
-    kind: Secret
-    metadata:
-      name: openrouter-api-key
-    stringData:
-      OPENROUTER_API_KEY: <your-openrouter-api-key>
-    type: Opaque
-    ```
-    The queue service itself also needs `OPENROUTER_API_KEY` in its environment
-    to validate OpenRouter jobs at request time. Add it to `job-queue-secret`
-    (which the service already loads) or `envFrom` the `openrouter-api-key`
-    secret in `deploy/job-queue-service.yml`.
+4. Deploy the Job Queue service:
 
-    The queue listens on HTTPS inside the cluster. OpenShift's service-serving
-    certificate operator creates the `job-queue-tls` Secret referenced by the
-    Deployment, and the Route uses re-encryption so traffic remains encrypted
-    from the router to the queue pod. Wait for that Secret to appear before
-    troubleshooting pod startup:
     ```sh
-    oc get secret job-queue-tls
+    oc apply -k deploy/job-queue/overlays/prod -n <project>
     ```
 
-Get the route for the deployed service:
+5. Get the route for the deployed API service:
 
-```sh
-oc get route job-queue-route --output jsonpath='{.spec.host}'
-```
+    ```sh
+    export JOB_QUEUE_URL="https://$(oc get route job-queue-route -n <project> --output jsonpath='{.spec.host}')"
+    open $JOB_QUEUE_URL/docs
+    ```
 
-Set `JOB_QUEUE_URL` in `intake-poller-secret` to this HTTPS route before
-applying `deploy/intake-cronjob.yml`.
+## Next Steps
 
-Check that the application is live by visiting the docs:
-
-```sh
-export JOB_QUEUE_URL="https://$(oc get route job-queue-route --output jsonpath='{.spec.host}')"
-open $JOB_QUEUE_URL/docs
-```
+1. [Configure the queue service to use Nebius](./nebius.md).
+2. [Configure the intake poller to automatically load jobs from a Google Sheet](./intake_poller.md)

@@ -1,9 +1,12 @@
 # Harbor Validated Commands
 
+The following is a list of validated commands for running Harbor with hosted and self-hosted model servers and various harnesses.
+Use these as a reference if you want to run the benchmark on a specific model server and harness without using the `coding_agent_bench`.
+
 ## Prerequisites:
 
 - Install [Harbor](https://www.harborframework.com/docs/getting-started)
-- [Set up a vLLM server](#deploy-models-with-vllm), or other Anthropic- and OpenAI-compatible server
+- Set up a vLLM server or other Anthropic- and OpenAI-compatible server
 - Set your benchmark in your environment from among the options in [Harbor Hub](https://hub.harborframework.com/), e.g.:
 
     ```bash

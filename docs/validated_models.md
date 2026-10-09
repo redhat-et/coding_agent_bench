@@ -1,14 +1,5 @@
 # Validated Models
 
-Models are validated on Nebius with the following settings
-
-gpu-b200-sxm:
-- 1x B200 (180 GB vRAM)  
-- 20 vCPU  
-- 224 GB RAM  
-- Preemptive  
-- ME-west1
-
 | Model                                                                                                | Hardware     | KV Cache | Max Concurrency |
 | ---------------------------------------------------------------------------------------------------- | ------------ | -------- | --------------- |
 | [Qwen/Qwen3.8-27B](#qwenqwen38-27b)                                                                  | gpu-b200-sxm | FP8      | 12x             |

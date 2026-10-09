@@ -1,7 +1,7 @@
 # Queue Service
 
 The queue service is a FastAPI application that can be deployed on OpenShift to queue and run benchmarks automatically.
-Benchmark results are stored to MinIO for later review.
+Benchmark results are stored to RustFS for later review.
 
 ```mermaid
 sequenceDiagram
@@ -13,7 +13,7 @@ sequenceDiagram
         Harbor Orchestrator Pod->>Task Pod: Run Task Pod
         Task Pod->>Harbor Orchestrator Pod: Save Results
     end
-    Harbor Orchestrator Pod->>MinIO: Save Benchmark Results
+    Harbor Orchestrator Pod->>RustFS: Save Benchmark Results
     Harbor Orchestrator Pod->>Openshift Job: Complete
     Queue Service-->>Openshift Job: Poll for completion
     Openshift Job->>Queue Service: Complete

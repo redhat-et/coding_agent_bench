@@ -10,70 +10,104 @@ After setting up the account, [install the CLI](https://docs.nebius.com/cli/inst
 Then run the following commands to create a service account in your project:
 
 ```sh
-# Create a service account
+export SA_NAME=<name-for-new-sa>
+export PROJECT_ID=<project-id>
+
+# Create Service Account
 export SA_ID=$(nebius iam service-account create \
-  --name <service_account_name> \
+  --parent-id $PROJECT_ID \
+  --name $SA_NAME \
   --format json | jq -r '.metadata.id')
 
-# Create and attach an authorized key to the service account
+# Create and attach an authorized key
 nebius iam auth-public-key generate \
   --service-account-id $SA_ID \
   --output ~/.nebius/$SA_ID-credentials.json
+
+# Configure the SA as an editor in the project
+# If there is not an editors group, first create one in the console 
+# and give it global editor permits
+export EDITOR_GROUP_ID=$(nebius iam group get-by-name \
+  --name editors --parent-id $PROJECT_ID \
+  --format json | jq -r '.metadata.id')
+
+nebius iam group-membership create \
+  --parent-id $EDITOR_GROUP_ID \
+  --member-id $SA_ID
 ```
 
 ## Setup
 
 ### Openshift
 
-Once the service account is created, you can update your job queue secret with the following environment variables needed for Nebius:
+Once the service account is created, copy `deploy/job-queue/base/nebius-secret.example.yaml`. Do not commit the resulting file:
+
+```sh
+cp deploy/job-queue/base/nebius-secret.example.yaml deploy/job-queue/base/nebius-secret.yaml
+```
+
+Fill in the secret values using the values from the previous steps. You can find the tenant ID and subnet ID in the Nebius UI:
 
 ```yaml
-apiVersion: v1
 kind: Secret
 metadata:
-  name:  job-queue-secret
-stringData:
-  API_KEY: <your-api-key>
-  NEBIUS_ENABLED: '1'
-  NEBIUS_SERVICE_ACCOUNT_CREDS: |
-    <service-account-file-content>
-  NEBIUS_PARENT_ID: <project-id>
-  NEBIUS_TENANT_ID: <tenant-id>
-  NEBIUS_SERVICE_ACCOUNT_ID: <service-account-id>
-  NEBIUS_SUBNET_ID: <subnet-id>
-  NEBIUS_INSTANCE_NAME_PREFIX: job-queue-worker
-  NEBIUS_IDLE_TIMEOUT_SECONDS: '600'
-  HF_TOKEN: <optional-huggingface-token>
+  name: nebius-secret
 type: Opaque
+stringData:
+  NEBIUS_ENABLED: "1"
+  NEBIUS_SERVICE_ACCOUNT_CREDS: |
+    <cat ~/.nebius/$SA_ID-credentials.json>
+  NEBIUS_USER: <SA_NAME>
+  NEBIUS_PARENT_ID: <PROJECT_ID>
+  NEBIUS_TENANT_ID: <nebius-tenant-id>
+  NEBIUS_SERVICE_ACCOUNT_ID: <SA_ID>
+  NEBIUS_SUBNET_ID: <nebius-subnet-id>
+  NEBIUS_INSTANCE_NAME_PREFIX: job-queue-worker
+  NEBIUS_IDLE_TIMEOUT_SECONDS: "600"
+  HF_TOKEN: <optional-hugging-face-token>
 ```
+
+Apply the secret and restart the queue service:
+
+```sh
+oc apply -f deploy/job-queue/base/nebius-secret.yaml -n <project>
+oc rollout restart deployment/job-queue -n <project>
+```
+
+When creating a job, set `server_url` to `nebius-<resource>` to use a managed Nebius instance with the specified GPU resource (e.g. `nebius-h200`, `nebius-b200`). Available resources are defined in `RESOURCE_CONFIG_REGISTRY`.
 
 ### Local
 
-Set the following environment variables in your `.env`:
+Create an SSH key for the Nebius VMs:
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/nebius
+```
+
+Set the following environment variables in your `.env` using the values from the previous steps. You can find the tenant ID and subnet ID in the Nebius UI:
 
 ```
 NEBIUS_ENABLED=1
-NEBIUS_SERVICE_ACCOUNT_CREDS_PATH=
-NEBIUS_USER=
-NEBIUS_SSH_PUBLIC_KEY_PATH=
-NEBIUS_SSH_PRIVATE_KEY_PATH=
-NEBIUS_PARENT_ID=
-NEBIUS_TENANT_ID=
-NEBIUS_SERVICE_ACCOUNT_ID=
-NEBIUS_SUBNET_ID=
-NEBIUS_INSTANCE_NAME_PREFIX=cab-worker
+NEBIUS_SERVICE_ACCOUNT_CREDS=<cat ~/.nebius/$SA_ID-credentials.json>
+NEBIUS_USER=<SA_NAME>
+NEBIUS_SSH_PUBLIC_KEY_PATH=/path/to/.ssh/nebius.pub
+NEBIUS_SSH_PRIVATE_KEY_PATH=/path/to/.ssh/nebius
+NEBIUS_PARENT_ID=<PROJECT_ID>
+NEBIUS_TENANT_ID=<nebius-tenant-id>
+NEBIUS_SERVICE_ACCOUNT_ID=<SA_ID>
+NEBIUS_SUBNET_ID=<nebius-subnet-id>
+NEBIUS_INSTANCE_NAME_PREFIX=job-queue-worker
 NEBIUS_IDLE_TIMEOUT_SECONDS=600
-HF_TOKEN=<optional>
+HF_TOKEN=<optional-hugging-face-token>
 ```
 
 ## Usage
 
 When creating a job, set `server_url` to `nebius-<resource>` to use a managed Nebius instance with the specified GPU resource (e.g. `nebius-h200`, `nebius-b200`). 
-Available resources are defined in `RESOURCE_CONFIG_REGISTRY`.
-The options are listed below as well, but use the `RESOURCE_CONFIG_REGISTRY` as the source of truth.
+Available configuration options can be found at `$JOB_QUEUE_URL/api/nebius-configs`.
 
-When creating a job, set `model_name` to one of the options in `MODEL_REGISTRY`.
-The options are listed below as well, but use the `MODEL_REGISTRY` as the source of truth.
+When creating a job, set `model_name` to one of the available models in the queue service.
+Available models can be found at `$JOB_QUEUE_URL/api/models`.
 
 For example:
 
@@ -84,22 +118,18 @@ curl -X POST $JOB_QUEUE_URL/jobs \
     -H "X-API-Key: <your-api-key>"
 ```
 
-## Supported Resources
+### Supported GPU configurations
 
-| Hardware       | Supported | Resource Key   |
-| -------------- | --------- | -------------- |
-| gpu-h200-sxm   | ✅         | `nebius-h200`  |
-| gpu-b200-sxm   | ✅         | `nebius-b200`  |
-| gpu-b200-sxm-a | ✅         | `nebius-b200a` |
+Fetch supported GPU configurations from the queue service:
 
-## Supported Models
+```sh
+curl $JOB_QUEUE_URL/api/nebius-configs
+```
 
-| Model                                            | Supported | Resource Key                                       |
-| ------------------------------------------------ | --------- | -------------------------------------------------- |
-| Qwen/Qwen3.8-27B                                 | ✅         | `Qwen/Qwen3.8-27B`                                 |
-| Qwen/Qwen3.8-27B-FP8                             | ✅         | `Qwen/Qwen3.8-27B-FP8`                             |
-| RedHatAI/gemma-4-31B-it-FP8-block                | ✅         | `RedHatAI/gemma-4-31B-it-FP8-block`                |
-| RedHatAI/gpt-oss-120b                            | ✅         | `RedHatAI/gpt-oss-120b`                            |
-| RedHatAI/Mistral-Small-4-119B-2603-NVFP4         | ✅         | `RedHatAI/Mistral-Small-4-119B-2603-NVFP4`         |
-| RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 | ✅         | `RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` |
-| RedHatAI/Qwen3.6-27B-FP8                         | ✅         | `RedHatAI/Qwen3.6-27B-FP8`                         |
+### Supported Models
+
+Fetch supported models from the queue service:
+
+```sh
+curl $JOB_QUEUE_URL/api/models
+```
