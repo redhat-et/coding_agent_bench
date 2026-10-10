@@ -342,6 +342,7 @@ def test_submission_stores_only_metadata_and_cancel_drops_credential(client):
     row = api.job_store.get(job_id)
     assert TOKEN not in json.dumps(row)
     assert TOKEN.encode() not in api.job_store._db_path.read_bytes()
+    assert row["dataset"] == "acme/data"
     assert source().local_path in json.loads(row["command"])
     assert (
         client.delete(f"/jobs/{job_id}", headers={"X-API-Key": "queue-key"}).status_code
@@ -361,6 +362,47 @@ def test_validation_errors_do_not_echo_token_header(client):
 def test_public_submission_does_not_require_github_token(client):
     response = submit(client, token="")
     assert response.status_code == 200
+    assert api._job_queue[-1].github_token is None
+
+
+def test_unused_github_token_does_not_reject_non_github_job(client):
+    response = client.post(
+        "/jobs",
+        headers={"X-API-Key": "queue-key", "X-GitHub-Token": TOKEN},
+        json={
+            "job_name": "ordinary-job",
+            "agent": "oracle",
+            "dataset": "example-dataset",
+            "model_name": "model",
+            "server_url": "https://model.example",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert api._job_queue[-1].github_dataset is None
+    assert api._job_queue[-1].github_token is None
+
+
+def test_unused_github_token_does_not_block_non_github_resume(client):
+    api.job_store.insert(
+        "ordinary-job",
+        "ordinary-job",
+        "oracle",
+        "example-dataset",
+        "model",
+        "https://model.example",
+        ["coding-agent-bench", "run"],
+    )
+    api.job_store.update_status("ordinary-job", api.JobStatus.FAILED)
+
+    response = client.post(
+        "/jobs/ordinary-job/resume",
+        json={},
+        headers={"X-API-Key": "queue-key", "X-GitHub-Token": TOKEN},
+    )
+
+    assert response.status_code == 200, response.text
+    assert api._job_queue[-1].github_dataset is None
     assert api._job_queue[-1].github_token is None
 
 
@@ -583,6 +625,8 @@ def test_ui_submits_directly_without_archive_staging():
     assert "formData.github_dataset" in html
     assert 'id="github-dataset-fields"' in html
     assert 'id="github-dataset-fields" style="grid-column: 1 / -1; display: grid;' in html
+    assert html.index('id="advanced-fields"') < html.index('id="github-dataset-fields"')
+    assert html.index('id="github-dataset-fields"') < html.index('id="submit-btn"')
     assert 'id="github_subdirectory"' in html
     assert 'id="github_subdirectory" autocomplete="off"' in html
     assert 'value="tasks"' in html

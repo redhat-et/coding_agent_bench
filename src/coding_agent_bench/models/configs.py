@@ -160,10 +160,6 @@ class RedHatAI_DeepSeek_V4_Flash(ModelConfig):
         "--tool-call-parser", "deepseek_v4",
         "--reasoning-parser", "deepseek_v4",
     ]
-    hardware_extra_args = {
-        "gpu-b200-sxm": ["--moe-backend", "deep_gemm_mega_moe", "--attention_config.use_fp4_indexer_cache", "True"],
-        "gpu-b200-sxm-a": ["--moe-backend", "deep_gemm_mega_moe", "--attention_config.use_fp4_indexer_cache", "True"],
-    }
 
 
 class RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8(ModelConfig):
@@ -185,10 +181,6 @@ class RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8(ModelConfig):
         "--tool-call-parser", "deepseek_v4",
         "--reasoning-parser", "deepseek_v4",
     ]
-    hardware_extra_args = {
-        "gpu-b200-sxm": ["--attention_config.use_fp4_indexer_cache", "True"],
-        "gpu-b200-sxm-a": ["--attention_config.use_fp4_indexer_cache", "True"],
-    }
 
 
 class RedHatAI_Inkling_Small(ModelConfig):
@@ -226,7 +218,7 @@ class RedHatAI_Laguna_S_2_1(ModelConfig):
         "--default-chat-template-kwargs", '{"enable_thinking": true}',
     ]
 
-class poolside_Laguna_S_2_1_NVFP4(ModelConfig):
+class Poolside_Laguna_S_2_1_NVFP4(ModelConfig):
     # Verified: 1x B200 183GB, NVFP4, max-model-len 1048576, concurrency 2.33x
 
     name = "poolside/Laguna-S-2.1-NVFP4"

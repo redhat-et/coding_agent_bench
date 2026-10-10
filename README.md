@@ -283,8 +283,9 @@ curl $JOB_QUEUE_URL/jobs -H "X-API-Key: <your-api-key>"
 
 ### Run a GitHub-hosted dataset
 
-In the job form, enter a GitHub repository as `owner/repository` or a full GitHub
-URL and, if needed, a branch, tag, or commit. For a private repository, enter a
+In the job form's **Advanced Options**, enter a GitHub repository as
+`owner/repository` or a full GitHub URL and, if needed, a branch, tag, or commit.
+For a private repository, enter a
 fine-grained GitHub token with read-only Contents access. Public repositories can
 leave the token blank. The job pod downloads the repository directly from GitHub
 when the job starts.
@@ -318,10 +319,10 @@ then restores job results. Supply a fresh `X-GitHub-Token` header on
 `POST /jobs/{job_id}/resume` for private repositories; the original token is not
 retained. Jobs whose initial dataset preparation never completed must be
 resubmitted. A queue restart loses queued credentials, but can adopt a running
-pod whose dataset was already prepared. Jobs that need a new pod download
-(including automatic recovery after preemption) cannot reuse the original
-private-repository token; manually resume with a fresh token if that download
-fails. Public repositories can be downloaded again without credentials.
+pod whose dataset was already prepared. If a private-repository download must
+be repeated without its token, preparation fails and the job must be resubmitted
+with a fresh token (or manually resumed with one when a checkpoint exists).
+Public repositories can be downloaded again without credentials.
 
 API submissions use the same job fields as usual plus:
 

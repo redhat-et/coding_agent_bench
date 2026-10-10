@@ -27,6 +27,7 @@ GITHUB_ARCHIVE_REDIRECT_HOSTS = {
     "objects.githubusercontent.com",
     "github-releases.githubusercontent.com",
 }
+_GITHUB_REPOSITORY_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 class DatasetArchiveError(ValueError):
@@ -115,13 +116,13 @@ def parse_github_repository_url(value: str) -> tuple[str, str]:
         )
     owner, repository = parts
     repository = repository.removesuffix(".git")
-    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
     if (
         not owner
         or not repository
         or owner in (".", "..")
         or repository in (".", "..")
-        or any(char not in allowed for char in owner + repository)
+        or _GITHUB_REPOSITORY_COMPONENT.fullmatch(owner) is None
+        or _GITHUB_REPOSITORY_COMPONENT.fullmatch(repository) is None
     ):
         raise GitHubArchiveFetchError(
             "Repository URL contains an invalid owner or repository"
