@@ -343,6 +343,7 @@ def test_submission_stores_only_metadata_and_cancel_drops_credential(client):
     assert TOKEN not in json.dumps(row)
     assert TOKEN.encode() not in api.job_store._db_path.read_bytes()
     assert row["dataset"] == "acme/data"
+    assert row["github_token_required"] == 1
     assert source().local_path in json.loads(row["command"])
     assert (
         client.delete(f"/jobs/{job_id}", headers={"X-API-Key": "queue-key"}).status_code
@@ -363,6 +364,7 @@ def test_public_submission_does_not_require_github_token(client):
     response = submit(client, token="")
     assert response.status_code == 200
     assert api._job_queue[-1].github_token is None
+    assert api.job_store.get(response.json()["job_id"])["github_token_required"] == 0
 
 
 def test_unused_github_token_does_not_reject_non_github_job(client):
@@ -421,9 +423,30 @@ def test_existing_database_gets_source_metadata_column(tmp_path):
     assert json.loads(store.get("old")["github_dataset"])["commit"] == COMMIT
 
 
+def test_legacy_github_rows_require_token_for_automatic_recovery(tmp_path):
+    path = tmp_path / "legacy-github.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, job_name TEXT, agent TEXT, "
+            "dataset TEXT, model_name TEXT, server_url TEXT, command TEXT, status TEXT, "
+            "error TEXT, github_dataset TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-private", "legacy-private", "oracle", "data", "model",
+                "https://model.example", "[]", "paused", None,
+                source(commit=COMMIT).model_dump_json(),
+            ),
+        )
+
+    store = api.JobStore(path)
+    assert store.get("legacy-private")["github_token_required"] == 1
+
+
 @pytest.mark.parametrize("token", ["", TOKEN])
 def test_resume_restores_same_commit_with_fresh_optional_token(client, token):
-    job_id = submit(client).json()["job_id"]
+    job_id = submit(client, token=token).json()["job_id"]
     api.job_store.pin_github_dataset(job_id, source(ref="main", commit=COMMIT))
     api.job_store.update_status(job_id, api.JobStatus.FAILED)
     response = client.post(
@@ -507,6 +530,47 @@ def test_manual_paused_resume_replaces_scheduled_recovery_with_fresh_token(clien
     assert queued is not scheduled
     assert queued.github_token.get_secret_value() == "fresh-token"
     assert queued.github_dataset.commit == COMMIT
+
+
+def test_private_paused_resume_requires_fresh_token(client):
+    job_id = submit(client).json()["job_id"]
+    api.job_store.pin_github_dataset(job_id, source(commit=COMMIT))
+    api.job_store.update_status(job_id, api.JobStatus.PAUSED)
+    api._job_queue.clear()
+
+    response = client.post(
+        f"/jobs/{job_id}/resume", json={}, headers={"X-API-Key": "queue-key"}
+    )
+
+    assert response.status_code == 400
+    assert "fresh GitHub token" in response.json()["detail"]
+    assert api.job_store.get(job_id)["status"] == api.JobStatus.PAUSED.value
+    assert not api._job_queue
+
+
+def test_auto_recovery_skips_paused_jobs_that_need_github_token(client, monkeypatch):
+    private_id = submit(client).json()["job_id"]
+    public_id = submit(client, token="").json()["job_id"]
+    for job_id in (private_id, public_id):
+        api.job_store.pin_github_dataset(job_id, source(commit=COMMIT))
+        api.job_store.update_status(job_id, api.JobStatus.PAUSED)
+    api._job_queue.clear()
+    monkeypatch.setattr(api, "_nebius", object())
+    monkeypatch.setattr(api, "_shutting_down", False)
+
+    sleep_calls = 0
+
+    async def stop_after_one_scan(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(api.asyncio, "sleep", stop_after_one_scan)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(api._resume_paused_jobs_loop())
+
+    assert [queued.job_id for queued in api._job_queue] == [public_id]
 
 
 @pytest.mark.parametrize("pinned", [False, True])
@@ -634,6 +698,19 @@ def test_ui_submits_directly_without_archive_staging():
     assert 'placeholder="owner/repository or https://github.com/owner/repository"' in html
     assert "repository_url: githubRepositoryUrl" in html
     assert html.index("const formData = {") < html.index("if (skills.length) formData.skills = skills;")
+
+
+def test_paused_private_github_job_ui_requests_fresh_token(client):
+    job_id = submit(client).json()["job_id"]
+    api.job_store.pin_github_dataset(job_id, source(commit=COMMIT))
+    api.job_store.update_status(job_id, api.JobStatus.PAUSED)
+
+    response = client.get("/ui")
+
+    assert response.status_code == 200
+    assert f'data-resume-job-id="{job_id}"' in response.text
+    assert 'data-requires-github-token="true"' in response.text
+    assert 'type="password" data-github-token-input' in response.text
 
 
 def test_pod_helper_errors_never_emit_credentials(monkeypatch, capsys):

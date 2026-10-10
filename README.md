@@ -297,6 +297,13 @@ or application logs. It is discarded after dataset preparation or cancellation;
 the form clears it after submission. The queue API key (`X-API-Key`) is separate
 and remains required for public and private datasets.
 
+SQLite stores only a boolean indicating that a GitHub token was supplied; the
+token itself is never persisted. This is treated conservatively as a possible
+private-repository marker. After a preemption checkpoint, jobs with this marker
+wait for manual resume and a fresh token instead of attempting an unauthenticated
+automatic download. Public-repository jobs without a supplied token can still
+resume automatically.
+
 Git history and submodules are not included. **Dataset Directory in Repository**
 defaults to `tasks`. Change it to a relative path to one Harbor task folder, or to a dataset
 directory whose immediate child directories are Harbor tasks. For example, use
@@ -314,15 +321,15 @@ Harbor tasks before execution. Partial downloads and archives are deleted after
 preparation; extracted data disappears when the pod is deleted.
 
 The resolved Git commit is recorded with the repository and subdirectory before
-Harbor starts. Resume re-downloads that exact commit into the same local path,
-then restores job results. Supply a fresh `X-GitHub-Token` header on
+Harbor starts. Resume re-downloads that exact commit into the new job pod, then
+restores job results. Supply a fresh `X-GitHub-Token` header on
 `POST /jobs/{job_id}/resume` for private repositories; the original token is not
-retained. Jobs whose initial dataset preparation never completed must be
-resubmitted. A queue restart loses queued credentials, but can adopt a running
-pod whose dataset was already prepared. If a private-repository download must
-be repeated without its token, preparation fails and the job must be resubmitted
-with a fresh token (or manually resumed with one when a checkpoint exists).
-Public repositories can be downloaded again without credentials.
+retained. Paused jobs that used a token are excluded from automatic Nebius
+recovery and remain available in the UI's manual-resume section, where you can
+provide a fresh token. Jobs whose initial dataset preparation never completed
+must be resubmitted. A queue restart can still adopt a running pod whose dataset
+was already prepared. Public repositories can be downloaded again without
+credentials.
 
 API submissions use the same job fields as usual plus:
 

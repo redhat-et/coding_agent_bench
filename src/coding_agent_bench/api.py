@@ -566,7 +566,9 @@ class JobStore:
                 preempt_attempts INTEGER NOT NULL DEFAULT 0,
                 pause_checkpointed INTEGER NOT NULL DEFAULT 0,
                 results_job_name TEXT,
-                resumed_by_job_id TEXT
+                resumed_by_job_id TEXT,
+                github_dataset TEXT,
+                github_token_required INTEGER NOT NULL DEFAULT 0
             )"""
         )
         # Migrate columns when upgrading from an older schema.
@@ -594,6 +596,24 @@ class JobStore:
             )
         if "github_dataset" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN github_dataset TEXT")
+        if "github_token_required" not in columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN github_token_required INTEGER NOT NULL DEFAULT 0"
+            )
+            # Older rows do not tell us whether their GitHub source needed
+            # credentials. Conservatively require a fresh token for recovery.
+            if "github_dataset" in columns:
+                conn.execute(
+                    "UPDATE jobs SET github_token_required = 1 WHERE github_dataset IS NOT NULL"
+                )
+                conn.execute(
+                    "UPDATE jobs SET error = ? WHERE status = ? AND pause_checkpointed = 1 "
+                    "AND github_dataset IS NOT NULL",
+                    (
+                        "Checkpoint saved; a fresh GitHub token is required for manual resume",
+                        JobStatus.PAUSED.value,
+                    ),
+                )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency_key "
             "ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
@@ -614,6 +634,7 @@ class JobStore:
         results_job_name: str | None = None,
         resume_parent_id: str | None = None,
         github_dataset: GitHubDataset | None = None,
+        github_token_required: bool = False,
     ) -> bool:
         """Insert a job, optionally claiming a failed checkpoint in the same transaction.
 
@@ -632,8 +653,8 @@ class JobStore:
                     return False
             conn.execute(
                 "INSERT INTO jobs "
-                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     job_name,
@@ -646,6 +667,7 @@ class JobStore:
                     idempotency_key,
                     results_job_name or job_name,
                     github_dataset.model_dump_json() if github_dataset else None,
+                    int(github_token_required),
                 ),
             )
             conn.commit()
@@ -696,17 +718,24 @@ class JobStore:
             conn.close()
 
     def resume_paused(
-        self, job_id: str, command: list[str], server_url: str, artifact_name: str,
+        self,
+        job_id: str,
+        command: list[str],
+        server_url: str,
+        artifact_name: str,
+        github_token_required: bool = False,
     ) -> bool:
         """Claim an existing paused row atomically against automatic recovery."""
         conn = self._connect()
         try:
             cur = conn.execute(
                 "UPDATE jobs SET status = ?, command = ?, server_url = ?, "
-                "results_job_name = ?, error = ? WHERE job_id = ? AND status = ?",
+                "results_job_name = ?, error = ?, github_token_required = MAX(github_token_required, ?) "
+                "WHERE job_id = ? AND status = ?",
                 (
                     JobStatus.QUEUED.value, json.dumps(command), server_url,
-                    artifact_name, "Manual resume requested", job_id, JobStatus.PAUSED.value,
+                    artifact_name, "Manual resume requested", int(github_token_required),
+                    job_id, JobStatus.PAUSED.value,
                 ),
             )
             conn.commit()
@@ -969,7 +998,13 @@ async def _resume_paused_jobs_loop():
             )
             split = (last_index + 1) % len(pending_rows) if pending_rows else 0
             pending_rows = pending_rows[split:] + pending_rows[:split]
-            rows = job_store.list_paused()
+            # A paused GitHub job that originally supplied credentials may
+            # point at a private repository. Its token is intentionally not
+            # persisted, so wait for manual resume to supply a fresh one.
+            rows = [
+                row for row in job_store.list_paused()
+                if not row.get("github_token_required")
+            ]
         except Exception:
             logger.exception("Paused job scan failed")
             continue
@@ -1246,15 +1281,25 @@ async def _pause_commit(job_id: str, oj: OpenshiftJob) -> bool:
 
     attempts = int(row.get("preempt_attempts") or 0) + 1
     attempt_note = f" (attempt {attempts}/{MAX_PREEMPT_RESUMES})" if MAX_PREEMPT_RESUMES else ""
+    token_required = bool(row.get("github_token_required"))
+    pause_error = (
+        "VM preempted — checkpoint saved; manual resume requires a fresh GitHub token"
+        if token_required
+        else f"VM preempted — awaiting Nebius recovery{attempt_note}"
+    )
     parked = job_store.pause_commit(
         job_id,
         _build_pause_resume_command(row),
         attempts,
-        f"VM preempted — awaiting Nebius recovery{attempt_note}",
+        pause_error,
     )
     if not parked:
         logger.info(f"Job {job_id} left the pausing state during finalize; skipping park")
-    elif MAX_PREEMPT_RESUMES > 0 and attempts > MAX_PREEMPT_RESUMES:
+    elif (
+        not token_required
+        and MAX_PREEMPT_RESUMES > 0
+        and attempts > MAX_PREEMPT_RESUMES
+    ):
         # Exhausting automatic retries must not skip cancellation/checkpointing.
         job_store.update_status_if(
             job_id, JobStatus.PAUSED, JobStatus.FAILED,
@@ -1825,9 +1870,17 @@ async def ui():
             cells = "".join(f"<td>{html.escape(str(job.get(col, '')) or '')}</td>" for col in columns)
             if include_resume_action:
                 job_id = html.escape(str(job.get("job_id", "")), quote=True)
+                needs_token = bool(job.get("github_token_required"))
+                token_input = (
+                    '<input type="password" data-github-token-input autocomplete="new-password" '
+                    'placeholder="Fresh GitHub token" aria-label="Fresh GitHub token" '
+                    'style="width: 220px; padding: 0.4rem; margin-right: 0.4rem;">'
+                    if needs_token else ""
+                )
+                button_text = "Resume with token" if needs_token else "Resume from checkpoint"
                 cells += (
-                    '<td><button type="button" data-resume-job-id="'
-                    f'{job_id}">Resume from checkpoint</button></td>'
+                    f'<td>{token_input}<button type="button" data-resume-job-id="{job_id}" '
+                    f'data-requires-github-token="{str(needs_token).lower()}">{button_text}</button></td>'
                 )
             rows += f"<tr>{cells}</tr>"
         if not jobs:
@@ -1840,15 +1893,27 @@ async def ui():
         + job_store.list(JobStatus.FAILING)
         + job_store.list(JobStatus.CANCELLING)
     )
-    paused = job_store.list(JobStatus.PAUSING) + job_store.list(JobStatus.PAUSED)
+    paused_jobs = job_store.list(JobStatus.PAUSED)
+    paused = job_store.list(JobStatus.PAUSING) + [
+        row for row in paused_jobs if not row.get("github_token_required")
+    ]
     queued = job_store.list(JobStatus.QUEUED)
     failed = job_store.list(JobStatus.FAILED)
     manual_resume_required = [
         row for row in failed
-        if "checkpoint saved for manual resume" in (row.get("error") or "")
+        if (
+            "checkpoint saved for manual resume" in (row.get("error") or "")
+            or row.get("pause_checkpointed")
+        )
         and not row.get("resumed_by_job_id")
     ]
-    manual_resume_ids = {row["job_id"] for row in manual_resume_required}
+    manual_resume_required.extend(
+        row for row in paused_jobs if row.get("github_token_required")
+    )
+    manual_resume_ids = {
+        row["job_id"] for row in manual_resume_required
+        if row["status"] == JobStatus.FAILED.value
+    }
     manual_resume_required.reverse()
     completed = (
         job_store.list(JobStatus.COMPLETED)
@@ -1932,12 +1997,21 @@ document.addEventListener('click', async (event) => {
         return;
     }
 
+    const tokenInput = button.closest('tr').querySelector('[data-github-token-input]');
+    let githubToken = tokenInput ? tokenInput.value.trim() : '';
+    if (button.dataset.requiresGithubToken === 'true' && !githubToken) {
+        window.alert('Enter a fresh GitHub token to resume this dataset job.');
+        return;
+    }
+
     button.disabled = true;
     try {
         const jobId = button.dataset.resumeJobId;
+        const headers = {'X-API-Key': apiKey};
+        if (githubToken) headers['X-GitHub-Token'] = githubToken;
         const response = await fetch(`/jobs/${encodeURIComponent(jobId)}/resume`, {
             method: 'POST',
-            headers: {'X-API-Key': apiKey},
+            headers,
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
@@ -1946,6 +2020,9 @@ document.addEventListener('click', async (event) => {
     } catch (error) {
         window.alert(`Could not resume job: ${error.message}`);
         button.disabled = false;
+    } finally {
+        if (tokenInput) tokenInput.value = '';
+        githubToken = '';
     }
 });
 </script>
@@ -1984,7 +2061,7 @@ h1 svg {{ flex-shrink: 0; }}
 {nebius_section}
 {build_table("Running", running)}
 {build_table("Paused (awaiting Nebius recovery)", paused)}
-<p>Paused jobs are waiting for automatic Nebius recovery. If automatic recovery attempts are exhausted, the saved checkpoint appears under “Manual resume required”.</p>
+<p>Paused jobs requiring GitHub credentials wait for manual resume. Enter a fresh token in the action column. Other paused jobs await automatic Nebius recovery; exhausted recoveries appear under “Manual resume required”.</p>
 {build_table("Manual resume required", manual_resume_required, include_resume_action=True)}
 {build_table("Queued", queued)}
 {build_table("Completed", completed)}
@@ -2151,6 +2228,7 @@ async def create_job(
             command,
             idempotency_key=idempotency_key,
             github_dataset=req.github_dataset,
+            github_token_required=token is not None,
         )
     except sqlite3.IntegrityError:
         # A concurrent retry may win the unique-key race between the lookup above
@@ -2401,6 +2479,14 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
         if not source.commit:
             raise HTTPException(status_code=400, detail="Dataset preparation never completed; submit a new job")
     token = _github_token(request) if source else None
+    github_token_required = bool(
+        source and (job_row.get("github_token_required") or token is not None)
+    )
+    if github_token_required and token is None:
+        raise HTTPException(
+            status_code=400,
+            detail="A fresh GitHub token is required to resume this dataset",
+        )
 
     resume_job_id = str(uuid.uuid4())
     resume_job_name = f"{original_job_name}--resume"
@@ -2430,7 +2516,13 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
     if job_row["status"] == JobStatus.PAUSED.value:
         # Reuse the row, as automatic recovery does. Creating a child and leaving
         # the original paused would allow the background loop to run both.
-        if not job_store.resume_paused(job_id, command, effective_server_url, original_job_name):
+        if not job_store.resume_paused(
+            job_id,
+            command,
+            effective_server_url,
+            original_job_name,
+            github_token_required=github_token_required,
+        ):
             raise HTTPException(status_code=409, detail="Job left the paused state; refresh before retrying")
         # Replace any scheduled automatic recovery so it cannot consume this
         # transition without the fresh credential supplied by the manual resume.
@@ -2444,13 +2536,17 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
         return {"message": "Paused job queued for resume", "job_id": job_id, "job_name": job_row["job_name"]}
     claim_checkpoint = (
         job_row["status"] == JobStatus.FAILED.value
-        and "checkpoint saved for manual resume" in (job_row.get("error") or "")
+        and (
+            "checkpoint saved for manual resume" in (job_row.get("error") or "")
+            or job_row.get("pause_checkpointed")
+        )
     )
     inserted = job_store.insert(
         resume_job_id, resume_job_name, job_row["agent"],
         job_row["dataset"], job_row["model_name"], effective_server_url, command,
         results_job_name=original_job_name,
         github_dataset=source,
+        github_token_required=github_token_required,
         **({"resume_parent_id": job_id} if claim_checkpoint else {}),
     )
     if claim_checkpoint and not inserted:
