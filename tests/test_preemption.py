@@ -554,6 +554,24 @@ def test_checkpoint_proof_survives_restart_after_parent_deletion(monkeypatch):
     assert "-f CancelledError" in store.row["command"][2]
 
 
+def test_private_github_pause_waits_for_manual_resume_past_auto_retry_budget(monkeypatch):
+    from coding_agent_bench import api
+
+    store = FlowStore({
+        "job_id": "jid", "job_name": "job-a", "agent": "a", "dataset": "d",
+        "model_name": "m", "server_url": "nebius-b200", "status": "pausing",
+        "preempt_attempts": api.MAX_PREEMPT_RESUMES, "error": None,
+        "pause_checkpointed": 1, "github_token_required": 1,
+    })
+    monkeypatch.setattr(api, "job_store", store)
+
+    assert asyncio.run(api._pause_commit("jid", FlowJob(job=None))) is True
+
+    assert store.row["status"] == "paused"
+    assert "manual resume requires a fresh GitHub token" in store.row["error"]
+    assert store.row["preempt_attempts"] == api.MAX_PREEMPT_RESUMES + 1
+
+
 def test_paused_resume_command_reuses_original_artifact_and_placeholder():
     from coding_agent_bench import api
 

@@ -157,7 +157,7 @@ def test_ui_explains_and_offers_manual_resume_for_exhausted_checkpoint(store, mo
 
     page = asyncio.run(api.ui())
 
-    assert "Paused jobs are waiting for automatic Nebius recovery" in page
+    assert "Paused jobs requiring GitHub credentials wait for manual resume" in page
     assert "Manual resume required" in page
     assert 'data-resume-job-id="manual"' in page
     assert "Resume from checkpoint" in page

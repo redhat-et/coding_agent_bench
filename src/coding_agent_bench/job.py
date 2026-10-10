@@ -6,6 +6,9 @@ import logging
 import os
 
 import json
+from pydantic import SecretStr
+
+from coding_agent_bench.github_datasets import DATASET_ROOT, GitHubDataset
 
 from coding_agent_bench.preemption import PAUSE_REQUEST_PATH
 from coding_agent_bench.utils import storage_endpoint_url
@@ -63,6 +66,29 @@ class OpenshiftJob:
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
         self._clean_legacy_pods = clean_legacy_pods
 
+    @staticmethod
+    def with_github_dataset(spec: dict) -> dict:
+        """Gate both new and resume pods until dataset preparation succeeds."""
+        pod = spec["spec"]["template"]["spec"]
+        pod["volumes"].append(
+            {"name": "github-dataset", "emptyDir": {"sizeLimit": "4Gi"}}
+        )
+        container = pod["containers"][0]
+        container["volumeMounts"].append(
+            {"name": "github-dataset", "mountPath": str(DATASET_ROOT)}
+        )
+        ready = shlex.quote(str(DATASET_ROOT / "ready"))
+        container["args"][0] = (
+            "attempt=0; "
+            f"while [ ! -f {ready} ] && [ \"$attempt\" -lt 900 ]; do "
+            "sleep 1; attempt=$((attempt + 1)); done; "
+            f"[ -f {ready} ] || {{ echo 'Dataset preparation timed out' >&2; exit 1; }}; "
+            + container["args"][0]
+        )
+        # A failed pod cannot retry without a fresh in-memory credential handoff.
+        spec["spec"]["backoffLimit"] = 0
+        return spec
+
     def _resume_job_spec(self, shell_command: str) -> dict:
         """Build a pod spec for a resume job with a raw shell command."""
         return {
@@ -75,7 +101,8 @@ class OpenshiftJob:
                     "spec": {
                         "restartPolicy": "Never",
                         "serviceAccountName": "harbor-orchestrator",
-                        "volumes": [{"name": "jobs", "type": "emptyDir"}],
+                        "securityContext": {"fsGroup": 1001},
+                        "volumes": [{"name": "jobs", "emptyDir": {}}],
                         "containers": [
                             {
                                 "name": "harbor",
@@ -138,6 +165,9 @@ class OpenshiftJob:
                     },
                 }
             )
+        volumes = [{"name": "jobs", "emptyDir": {}}]
+        volume_mounts = [{"name": "jobs", "mountPath": "/app/jobs"}]
+
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -148,7 +178,8 @@ class OpenshiftJob:
                     "spec": {
                         "restartPolicy": "Never",
                         "serviceAccountName": "harbor-orchestrator",
-                        "volumes": [{"name": "jobs", "type": "emptyDir"}],
+                        "securityContext": {"fsGroup": 1001},
+                        "volumes": volumes,
                         "containers": [
                             {
                                 "name": "harbor",
@@ -175,7 +206,7 @@ class OpenshiftJob:
                                     + " || exit $?; exit \"$harbor_rc\""
                                 ],
                                 "env": env,
-                                "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
+                                "volumeMounts": volume_mounts,
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-storage"}}
                                 ],
@@ -484,6 +515,66 @@ class OpenshiftJob:
 
         raise RuntimeError(
             f"Job pod for {self._pod_name} not ready after {timeout_sec} seconds"
+        )
+
+    async def prepare_github_dataset(self, source: GitHubDataset, token: SecretStr | None) -> str:
+        """Pass credentials over exec stdin, never through pod specs or argv."""
+        stdout, _ = await self._run_oc_command(
+            [
+                "get",
+                "pod",
+                f"--selector=job-name={self._pod_name}",
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ]
+        )
+        pod_name = (stdout or "").strip()
+        if not pod_name:
+            raise RuntimeError(f"No pod found for job {self._pod_name}")
+
+        payload = source.model_dump()
+        payload["token"] = token.get_secret_value() if token else ""
+        try:
+            stdout, _ = await self._run_oc_command(
+                ["exec", "-i", pod_name, "--", "uv", "run", "--no-sync", "--no-cache",
+                 "python", "-m", "coding_agent_bench.github_datasets"],
+                stdin_data=json.dumps(payload).encode(),
+                timeout_sec=600,
+                check=False,
+            )
+            result = json.loads(stdout or "{}")
+            commit = result.get("commit")
+            if commit:
+                # Validate untrusted subprocess output before storing or logging.
+                validated = GitHubDataset.model_validate({**source.model_dump(), "commit": commit})
+                if source.commit and source.commit != validated.commit:
+                    raise ValueError("Commit mismatch")
+                return validated.commit
+            error = result.get("error")
+            if not isinstance(error, str):
+                error = None
+        except Exception:
+            raise RuntimeError("GitHub dataset preparation failed or timed out") from None
+        finally:
+            payload.clear()
+            token = None
+        messages = {
+            "github_fetch_failed": "Could not download GitHub dataset; check repository/ref and provide a fresh token for private repos",
+            "invalid_dataset_archive": "GitHub dataset archive is invalid, exceeds size limits, or the selected directory contains no valid Harbor tasks",
+        }
+        raise RuntimeError(messages.get(error, "GitHub dataset preparation failed"))
+
+    async def release_github_dataset(self) -> None:
+        """Release the waiting pod only after the resolved commit is persisted."""
+        stdout, _ = await self._run_oc_command(
+            ["get", "pod", f"--selector=job-name={self._pod_name}",
+             "-o", "jsonpath={.items[0].metadata.name}"]
+        )
+        await self._run_oc_command(
+            ["exec", (stdout or "").strip(), "--", "sh", "-c",
+             f"test -f {shlex.quote(str(DATASET_ROOT / 'prepared'))}"
+             f" && touch {shlex.quote(str(DATASET_ROOT / 'ready'))}"],
+            timeout_sec=30,
         )
 
     async def run_async(
