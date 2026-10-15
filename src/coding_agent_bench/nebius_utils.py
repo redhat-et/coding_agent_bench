@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import tempfile
+from typing import Optional
 
 from coding_agent_bench.models import (
     get_model_config,
@@ -39,6 +40,8 @@ class ResourceConfig(ABC):
     """Hardware preset."""
     tensor_parallel_size: int
     """Tensor parallel size on this hardware (= num GPUs)."""
+    is_preemptible: bool
+    """Boolean to indicate if preemptible instances are available for this resource."""
     additional_args: list[str] = []
     """Additional CLI arguments for instance creation."""
     model_extra_args: dict[str, list[str]] = {}
@@ -52,7 +55,7 @@ class B200(ResourceConfig):
     platform = "gpu-b200-sxm"
     preset = "1gpu-20vcpu-224gb"
     tensor_parallel_size = 1
-    additional_args = ["--preemptible-on-preemption", "stop", "--recovery-policy", "fail"]
+    is_preemptible = True
     model_concurrency = {
         Qwen_Qwen3_8_27B.name: 12,
         Qwen_Qwen3_8_27B_FP8.name: 15,
@@ -74,7 +77,7 @@ class B200x8(ResourceConfig):
     platform = "gpu-b200-sxm"
     preset = "8gpu-160vcpu-1792gb"
     tensor_parallel_size = 8
-    additional_args = ["--preemptible-on-preemption", "stop", "--recovery-policy", "fail"]
+    is_preemptible = True
     model_extra_args = {
         RedHatAI_DeepSeek_V4_Flash.name: ["--moe-backend", "deep_gemm_mega_moe", "--attention_config.use_fp4_indexer_cache", "True"],
         RedHatAI_DeepSeek_V4_Flash_NVFP4_FP8.name: ["--attention_config.use_fp4_indexer_cache", "True"],
@@ -96,6 +99,7 @@ class H200(ResourceConfig):
     platform = "gpu-h200-sxm"
     preset = "1gpu-16vcpu-200gb"
     tensor_parallel_size = 1
+    is_preemptible = True
     
 class H200x8(ResourceConfig):
 
@@ -103,6 +107,7 @@ class H200x8(ResourceConfig):
     platform = "gpu-h200-sxm"
     preset = "8gpu-128vcpu-1600gb"
     tensor_parallel_size = 8
+    is_preemptible = True
     model_concurrency = {
         RedHatAI_GLM_5_2_FP8.name: 2,
         RedHatAI_DeepSeek_V4_Flash.name: 9,
@@ -170,9 +175,13 @@ class NebiusInstanceManager:
             creds_path = Path(f.name)
             temp_creds = True
         try:
+            profile_name = "default-service-account"
             self.profile = await self.create_profile(
-                "default-service-account",
+                profile_name,
                 credentials_path=creds_path,
+            )
+            await self.activate_profile(
+                profile_name
             )
         finally:
             if temp_creds:
@@ -203,22 +212,50 @@ class NebiusInstanceManager:
 
     async def create_profile(self, name: str, credentials_path: Path):
         """Create a new service account profile."""
-        try:
-            args = [
-                "profile", "create",
-                "--endpoint", "api.nebius.cloud",
-                "--parent-id", self._parent_id,
-                "--tenant-id", self._tenant_id,
-                "--service-account-file", str(credentials_path),
-                "--profile", name,
-            ]
-            return await self.exec(args)
-        except Exception as e:
-            if "already exists" in str(e):
-                logger.info("Profile already exists. Skipping creation.")
-                return None
-            else:
+        # List available profiles
+        args = ["profile", "list"]
+        stdout = await self.exec(args)
+        profiles = [line.replace(" [default]", "") for line in stdout.splitlines()]
+
+        if name not in profiles:
+            try:
+                args = [
+                    "profile", "create",
+                    "--endpoint", "api.nebius.cloud",
+                    "--parent-id", self._parent_id,
+                    "--tenant-id", self._tenant_id,
+                    "--service-account-file", str(credentials_path),
+                    "--profile", name,
+                ]
+                return await self.exec(args)
+            except Exception as e:
+                if "already exists" in str(e):
+                    logger.info("Profile already exists. Skipping creation.")
+                    return None
+                else:
+                    raise e
+        else:
+            try:
+                args = [
+                    "profile", "update", name,
+                    "--endpoint", "api.nebius.cloud",
+                    "--parent-id", self._parent_id,
+                    "--tenant-id", self._tenant_id,
+                    "--service-account-file", str(credentials_path),
+                ]
+                return await self.exec(args)
+            except Exception as e:
+                logger.error("Failed to update profile.")
                 raise e
+
+    async def activate_profile(self, name: str):
+        """Activate a profile."""
+        try:
+            args = ["profile", "activate", name]
+            await self.exec(args)
+        except Exception as e:
+            logger.error(f"Failed to activate profile {name}")
+            raise e
 
     async def create_instance(self, instance_name: str, subnet_id: str, gpu_config: str = "h200"):
         """Create a new compute instance."""
@@ -257,6 +294,15 @@ class NebiusInstanceManager:
             "--reservation-policy-policy", "forbid",
         ]
         args += resource_config.additional_args
+
+        # Prefer preemptible instances, if the resource supports it
+        if resource_config.is_preemptible:
+            args += [
+                "--preemptible-on-preemption", "stop",
+                "--recovery-policy", "fail",
+                "--follows-spot-price=true",
+            ]
+
         await self.exec(args)
 
     async def get_instance(self, instance_name: str):
@@ -264,6 +310,7 @@ class NebiusInstanceManager:
         args = [
             "compute", "instance", "get-by-name",
             "--name", instance_name,
+            "--parent-id", self._parent_id,
             "--format", "json",
         ]
         stdout = await self.exec(args)

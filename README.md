@@ -24,6 +24,7 @@ Reproducible benchmarks for coding agents and models using Harbor
 - [Queue Service](#queue-service)
   - [Set up the service](#set-up-the-service)
   - [Use the service](#use-the-service)
+  - [Run a GitHub-hosted dataset](#run-a-github-hosted-dataset)
   - [(Optional) Connect to Nebius](#optional-connect-to-nebius)
   - [(Optional) Set Up the Intake Poller](#optional-set-up-the-intake-poller)
 - [Harbor Command Examples](#harbor-command-examples)
