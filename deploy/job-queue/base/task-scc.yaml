@@ -1,0 +1,39 @@
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: harbor-task-scc
+priority: 20
+allowPrivilegedContainer: false
+allowHostNetwork: false
+allowHostPorts: false
+allowHostPID: false
+allowHostIPC: false
+allowHostDirVolumePlugin: false
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+volumes:
+  - configMap
+  - emptyDir
+  - projected
+  - secret
+  - downwardAPI
+  - persistentVolumeClaim
+allowedCapabilities:
+  - CHOWN
+  - DAC_OVERRIDE
+  - FOWNER
+  - FSETID
+  - KILL
+  - NET_BIND_SERVICE
+  - SETGID
+  - SETUID
+  - SYS_CHROOT
+defaultAddCapabilities: []
+requiredDropCapabilities:
+  - ALL
