@@ -1,0 +1,78 @@
+site_name: "Coding Agent Bench"
+
+repo_url: https://github.com/redhat-et/coding_agent_bench
+
+theme:
+  name: "material"
+  icon:
+    logo: material/chart-box
+  features:
+    # Add tabs
+    - navigation.tabs 
+    - navigation.tabs.sticky
+  palette:
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings
+  - include_dir_to_nav
+  - git-revision-date-localized
+
+nav:
+  - Home: 
+    - Home: index.md
+    - Validated Models: validated_models.md
+  - CLI: cli.md
+  - Queue Service: 
+    - Overview: queue-service/index.md
+    - Setup:
+      - Openshift: queue-service/openshift.md
+      - Local (Developer): queue-service/local.md
+      - Nebius (Optional): queue-service/nebius.md
+    - Usage: queue-service/usage.md
+    - Intake Poller: queue-service/intake_poller.md
+  - Developer:
+    - Overview: developer/index.md
+    - Adding Features:
+      - New Model: developer/new_model.md
+      - New Harness: developer/new_harness.md
+      - New Benchmark: developer/new_benchmark.md
+    - GitHub CICD: developer/github_cicd.md
+    - Documentation: developer/documentation.md
+  - Harbor Commands: validated_harbor_commands.md
+  - Benchmark Runs: 
+    - Overview: benchmarks/index.md
+    - Benchmark Runs: 
+      - SWE Bench Verified: benchmarks/runs/swe_bench_verified
+      - SWE Bench Pro -- Ansible: benchmarks/runs/swe_bench_pro_ansible
+      - ITBench AA: benchmarks/runs/itbench_aa
+      - Terminal Bench 2.0: benchmarks/runs/terminal_bench_2_0
+    - SWE Bench Acceleration: benchmarks/swe_bench_acceleration.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

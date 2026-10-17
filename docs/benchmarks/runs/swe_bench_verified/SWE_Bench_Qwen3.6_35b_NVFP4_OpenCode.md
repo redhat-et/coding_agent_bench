@@ -17,7 +17,7 @@
 
 ## vLLM Server Config
 
-**Manifest:** [Qwen3.6_35b_NVFP4.yml](../deploy/Qwen3.6_35b_NVFP4.yml)  
+**Manifest:** [Qwen3.6_35b_NVFP4.yml](https://github.com/redhat-et/coding_agent_bench/blob/main/deploy/Qwen3.6_27b_FP8.yml)  
 **Hardware:** 2x A100 40GB  
 **Model Max Len:** 262,144  
 **Max Concurrency:** 9.2x  
