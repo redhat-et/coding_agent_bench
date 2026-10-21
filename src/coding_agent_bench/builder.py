@@ -5,6 +5,7 @@ from enum import Enum
 import os
 
 from coding_agent_bench.agents import get_agent_config
+from coding_agent_bench.providers import MODEL_API_KEY_ENV
 
 
 class SupportedAgent(str, Enum):
@@ -166,6 +167,7 @@ class HarborCommandBuilder:
         agent_timeout_multiplier: float = None,
         thinking: str = None,
         allow_agent_host: list[str] = None,
+        api_key: str | None = None,
         **kwargs,
     ) -> tuple[list[str], Path]:
         """
@@ -187,12 +189,18 @@ class HarborCommandBuilder:
             model_max_len = model_config.model_max_len if model_config else 262000
 
         agent_config = get_agent_config(agent)
+        api_key = api_key or os.environ.get(MODEL_API_KEY_ENV)
         result = agent_config.configure(
             model_name=model_name,
             server_url=server_url,
             model_max_len=model_max_len,
+            api_key=api_key,
             **kwargs,
         )
+        if api_key:
+            # Keep the request-scoped credential available to agents that use
+            # config-time environment substitution, such as OpenCode.
+            result.agent_env = {**(result.agent_env or {}), MODEL_API_KEY_ENV: api_key}
 
         cmd = self._build_command(
             agent=agent,

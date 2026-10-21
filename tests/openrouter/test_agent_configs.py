@@ -11,10 +11,9 @@ from coding_agent_bench.agents.configs import (
 )
 
 
-def test_openclaw_openrouter(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+def test_openclaw_openrouter():
     result = OpenClawAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter"
+        model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test"
     )
     assert result.agent_env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
     assert result.agent_env["OPENAI_API_KEY"] == "sk-or-test"
@@ -31,8 +30,7 @@ def test_openclaw_default_placeholder(monkeypatch):
 
 def test_pi_openrouter(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    PiAgentConfig().configure(model_name="openai/gpt-4o", server_url="openrouter")
+    PiAgentConfig().configure(model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test")
     cfg = json.loads((tmp_path / "models.json").read_text())
     provider = cfg["providers"]["vllm"]
     assert provider["baseUrl"] == "https://openrouter.ai/api/v1"
@@ -47,15 +45,16 @@ def test_pi_default_placeholder(monkeypatch, tmp_path):
     assert cfg["providers"]["vllm"]["apiKey"] == "NONE"
 
 
-def test_opencode_openrouter(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+def test_opencode_openrouter():
     result = OpenCodeAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter"
+        model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test"
     )
     cfg = json.loads(result.agent_env["OPENCODE_CONFIG_CONTENT"])
     provider = cfg["provider"]["vllm"]
     assert provider["options"]["baseURL"] == "https://openrouter.ai/api/v1"
-    assert provider["options"]["apiKey"] == "sk-or-test"
+    assert provider["options"]["apiKey"] == "{env:CAB_MODEL_API_KEY}"
+    assert result.agent_env["CAB_MODEL_API_KEY"] == "sk-or-test"
+    assert json.loads(result.agent_kwargs["opencode_config"])["provider"]["vllm"]["options"] == provider["options"]
     assert "openai/gpt-4o" in provider["models"]
 
 
@@ -75,10 +74,9 @@ def test_oracle_rejects_openrouter():
         OracleAgentConfig().configure(model_name="m", server_url="openrouter")
 
 
-def test_claude_code_openrouter(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+def test_claude_code_openrouter():
     result = ClaudeCodeAgentConfig().configure(
-        model_name="anthropic/claude-opus-5", server_url="openrouter"
+        model_name="anthropic/claude-opus-5", server_url="openrouter", api_key="sk-or-test"
     )
     # OpenRouter's Claude Code integration: base URL without /v1, blank
     # ANTHROPIC_API_KEY, key in ANTHROPIC_AUTH_TOKEN.

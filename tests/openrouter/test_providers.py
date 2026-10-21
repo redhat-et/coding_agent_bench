@@ -21,16 +21,14 @@ def test_openrouter_base_url_excludes_v1():
     assert not OPENROUTER_BASE_URL.endswith("/v1")
 
 
-def test_resolve_openrouter_returns_url_and_key(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    base_url, api_key = resolve_provider("openrouter")
+def test_resolve_openrouter_returns_url_and_key():
+    base_url, api_key = resolve_provider("openrouter", "sk-or-test")
     assert base_url == OPENROUTER_BASE_URL
     assert api_key == "sk-or-test"
 
 
-def test_resolve_openrouter_missing_key_raises(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+def test_resolve_openrouter_missing_key_raises():
+    with pytest.raises(ValueError, match="model API key"):
         resolve_provider("openrouter")
 
 

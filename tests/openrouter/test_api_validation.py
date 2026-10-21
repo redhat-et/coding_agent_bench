@@ -17,11 +17,11 @@ network access.
 
 import os
 import tempfile
+import json
 
 _tmp_dir = tempfile.mkdtemp(prefix="cab-openrouter-api-test-")
 os.environ["JOB_STORE_PATH"] = os.path.join(_tmp_dir, "jobs.db")
 os.environ.setdefault("API_KEY", "test-api-key")
-os.environ.pop("OPENROUTER_API_KEY", None)
 os.environ.pop("NEBIUS_ENABLED", None)
 
 import pytest  # noqa: E402
@@ -44,11 +44,10 @@ def client():
         yield c
 
 
-def test_create_job_openrouter_unsupported_agent_returns_400(client, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+def test_create_job_openrouter_unsupported_agent_returns_400(client):
     resp = client.post(
         "/jobs",
-        headers=HEADERS,
+        headers={**HEADERS, "X-Model-API-Key": "sk-or-test"},
         json={
             "job_name": "test-oracle-openrouter",
             "agent": "oracle",
@@ -58,11 +57,10 @@ def test_create_job_openrouter_unsupported_agent_returns_400(client, monkeypatch
         },
     )
     assert resp.status_code == 400, resp.text
-    assert "openrouter" in resp.text.lower()
+    assert "oracle" in resp.text.lower()
 
 
-def test_create_job_openrouter_missing_key_returns_400(client, monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_create_job_openrouter_missing_key_returns_400(client):
     resp = client.post(
         "/jobs",
         headers=HEADERS,
@@ -75,14 +73,13 @@ def test_create_job_openrouter_missing_key_returns_400(client, monkeypatch):
         },
     )
     assert resp.status_code == 400, resp.text
-    assert "OPENROUTER_API_KEY" in resp.text
+    assert "model API key" in resp.text
 
 
-def test_resume_openrouter_job_is_allowed(client, monkeypatch):
+def test_resume_openrouter_job_is_allowed(client):
     # Resuming an OpenRouter job works: the restored config already carries the
     # OpenRouter URL and key, so no URL rewrite is needed (same as a static
     # vLLM-route resume).
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     from coding_agent_bench.api import JobStatus, job_store
 
     job_id = "resume-openrouter-test"
@@ -92,6 +89,9 @@ def test_resume_openrouter_job_is_allowed(client, monkeypatch):
     )
     job_store.update_status(job_id, JobStatus.COMPLETED)
 
-    resp = client.post(f"/jobs/{job_id}/resume", headers=HEADERS)
+    resp = client.post(f"/jobs/{job_id}/resume", headers={**HEADERS, "X-Model-API-Key": "sk-or-test"})
     assert resp.status_code == 200, resp.text
     assert "not supported" not in resp.text.lower()
+    row = job_store.get(resp.json()["job_id"])
+    assert row["model_api_key_required"] == 1
+    assert "sk-or-test" not in json.dumps(row)

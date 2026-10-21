@@ -13,6 +13,7 @@ from coding_agent_bench.github_datasets import DATASET_ROOT, GitHubDataset
 from coding_agent_bench.preemption import PAUSE_REQUEST_PATH
 from coding_agent_bench.utils import storage_endpoint_url
 from coding_agent_bench import VERSION
+from coding_agent_bench.providers import MODEL_API_KEY_ENV
 
 
 DEFAULT_CODING_AGENT_BENCH_IMAGE = f"ghcr.io/redhat-et/coding_agent_bench:v{VERSION}"
@@ -66,6 +67,61 @@ class OpenshiftJob:
         self._pod_name = f"coding-agent-bench--{self._job_name}"[:58]
         self._clean_legacy_pods = clean_legacy_pods
 
+    @property
+    def model_api_key_secret_name(self) -> str:
+        return f"cab-model-key-{self._job_name}"[:63]
+
+    async def create_model_api_key_secret(self, api_key: SecretStr) -> None:
+        """Create the per-job credential Secret without putting it in argv."""
+        secret = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": self.model_api_key_secret_name,
+                "labels": {
+                    "app": "coding-agent-bench",
+                    "coding-agent-bench-job": self._job_name,
+                    "coding-agent-bench-purpose": "model-api-key",
+                },
+            },
+            "type": "Opaque",
+            "stringData": {"key": api_key.get_secret_value()},
+        }
+        await self._run_oc_command(["apply", "-f", "-"], stdin_data=json.dumps(secret).encode())
+
+    async def delete_model_api_key_secret(self) -> None:
+        await self._run_oc_command(
+            ["delete", "secret", self.model_api_key_secret_name, "--ignore-not-found"],
+            check=False,
+            timeout_sec=30,
+        )
+
+    async def model_api_key_secret_exists(self) -> bool:
+        stdout, _ = await self._run_oc_command(
+            ["get", "secret", self.model_api_key_secret_name, "-o", "name"],
+            check=False,
+            timeout_sec=30,
+        )
+        return bool((stdout or "").strip())
+
+    async def attach_model_api_key_secret(self) -> None:
+        """Tie the Secret to the Job so Kubernetes can garbage-collect it."""
+        stdout, _ = await self._run_oc_command(
+            ["get", f"job/{self._pod_name}", "-o", "jsonpath={.metadata.uid}"],
+            timeout_sec=30,
+        )
+        uid = (stdout or "").strip()
+        if not uid:
+            raise RuntimeError(f"OpenShift returned no UID for job {self._pod_name}")
+        patch = json.dumps({"metadata": {"ownerReferences": [{
+            "apiVersion": "batch/v1", "kind": "Job", "name": self._pod_name,
+            "uid": uid, "controller": False, "blockOwnerDeletion": False,
+        }]}})
+        await self._run_oc_command(
+            ["patch", "secret", self.model_api_key_secret_name, "--type", "merge", "-p", patch],
+            timeout_sec=30,
+        )
+
     @staticmethod
     def with_github_dataset(spec: dict) -> dict:
         """Gate both new and resume pods until dataset preparation succeeds."""
@@ -89,14 +145,26 @@ class OpenshiftJob:
         spec["spec"]["backoffLimit"] = 0
         return spec
 
-    def _resume_job_spec(self, shell_command: str) -> dict:
+    def _resume_job_spec(self, shell_command: str, model_api_key_secret: str | None = None) -> dict:
         """Build a pod spec for a resume job with a raw shell command."""
+        env = [
+            {"name": "HOME", "value": "/tmp"},
+            {"name": "HARBOR_PARENT", "value": self._pod_name},
+            {"name": "CAB_PAUSE_REQUEST_PATH", "value": PAUSE_REQUEST_PATH},
+            {"name": "STORAGE_ENDPOINT_URL", "value": storage_endpoint_url()},
+        ]
+        if model_api_key_secret:
+            env.append({
+                "name": MODEL_API_KEY_ENV,
+                "valueFrom": {"secretKeyRef": {"name": model_api_key_secret, "key": "key"}},
+            })
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
             "metadata": {"name": self._pod_name, "labels": {"app": "harbor"}},
             "spec": {
                 "backoffLimit": 0,
+                "ttlSecondsAfterFinished": 3600,
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
@@ -110,12 +178,7 @@ class OpenshiftJob:
                                 "imagePullPolicy": "Always",
                                 "command": ["bash", "-c"],
                                 "args": [shell_command],
-                                "env": [
-                                    {"name": "HOME", "value": "/tmp"},
-                                    {"name": "HARBOR_PARENT", "value": self._pod_name},
-                                    {"name": "CAB_PAUSE_REQUEST_PATH", "value": PAUSE_REQUEST_PATH},
-                                    {"name": "STORAGE_ENDPOINT_URL", "value": storage_endpoint_url()},
-                                ],
+                                "env": env,
                                 "volumeMounts": [{"name": "jobs", "mountPath": "/app/jobs"}],
                                 "envFrom": [
                                     {"secretRef": {"name": "harbor-storage"}}
@@ -132,6 +195,7 @@ class OpenshiftJob:
         command: list[str],
         before_script: list[str] = None,
         openrouter: bool = False,
+        model_api_key_secret: str | None = None,
     ) -> dict:
         """Build a benchmark pod that logs output and uploads results before exit."""
         # Queue pod names use the job UUID; artifacts use Harbor's --job-name.
@@ -145,22 +209,19 @@ class OpenshiftJob:
             ["uv", "run", "--no-sync", "--no-cache", *command],
             f"/app/jobs/{artifact_name}",
         )
-        # Only openrouter jobs need the OpenRouter key, so scope the secret to
-        # them rather than exposing it to every job pod.
         env: list[dict] = [
             {"name": "HARBOR_PARENT", "value": self._pod_name},
             {"name": "CAB_PAUSE_REQUEST_PATH", "value": PAUSE_REQUEST_PATH},
             {"name": "STORAGE_ENDPOINT_URL", "value": storage_endpoint_url()},
         ]
-        if openrouter:
+        if model_api_key_secret:
             env.append(
                 {
-                    "name": "OPENROUTER_API_KEY",
+                    "name": MODEL_API_KEY_ENV,
                     "valueFrom": {
                         "secretKeyRef": {
-                            "name": "job-queue-secret",
-                            "key": "OPENROUTER_API_KEY",
-                            "optional": True,
+                            "name": model_api_key_secret,
+                            "key": "key",
                         }
                     },
                 }
@@ -582,8 +643,12 @@ class OpenshiftJob:
         command: list[str],
         before_script: list[str] = None,
         openrouter: bool = False,
+        model_api_key_secret: str | None = None,
     ):
-        job_spec = self._job_spec(command, before_script, openrouter=openrouter)
+        job_spec = self._job_spec(
+            command, before_script, openrouter=openrouter,
+            model_api_key_secret=model_api_key_secret,
+        )
         job_json = json.dumps(job_spec)
 
         try:
@@ -591,6 +656,8 @@ class OpenshiftJob:
                 ["apply", "-f", "-"],
                 stdin_data=job_json.encode(),
             )
+            if model_api_key_secret:
+                await self.attach_model_api_key_secret()
 
             await self._wait_for_job_pod_ready()
         except (asyncio.CancelledError, KeyboardInterrupt):
@@ -606,9 +673,11 @@ class OpenshiftJob:
         command: list[str],
         before_script: list[str] = None,
         openrouter: bool = False,
+        model_api_key_secret: str | None = None,
     ):
         return asyncio.run(
-            self.run_async(command, before_script, openrouter=openrouter)
+            self.run_async(command, before_script, openrouter=openrouter,
+                           model_api_key_secret=model_api_key_secret)
         )
 
     async def _cleanup_async(self):

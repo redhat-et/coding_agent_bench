@@ -1,10 +1,8 @@
-import os
-
 OPENROUTER_SENTINEL = "openrouter"
 # Base URL without the /v1 suffix. Agents append /v1 as needed (openclaw,
 # opencode, pi, codex); claude-code uses the base as-is for ANTHROPIC_BASE_URL.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"
-OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+MODEL_API_KEY_ENV = "CAB_MODEL_API_KEY"
 
 # Agents (SupportedAgent.value strings) that cannot use OpenRouter. This is
 # only a fast, request-time 400 for create_job's lightweight openrouter
@@ -19,20 +17,18 @@ def is_openrouter(server_url: str) -> bool:
     return server_url == OPENROUTER_SENTINEL
 
 
-def resolve_provider(server_url: str) -> tuple[str, str | None]:
+def resolve_provider(server_url: str, api_key: str | None = None) -> tuple[str, str | None]:
     """Resolve server_url to (base_url, api_key).
 
-    For the "openrouter" sentinel, return the OpenRouter base URL and the key
-    from the OPENROUTER_API_KEY environment variable, raising ValueError if the
-    key is not set. For any other server_url, return (server_url, None) so
-    callers keep their existing no-auth behavior.
+    For the "openrouter" sentinel, return the OpenRouter base URL and the
+    explicitly supplied key. For any other server_url, return the URL and the
+    supplied key. Keys are request-scoped and must never come from provider
+    specific process environment variables.
     """
     if is_openrouter(server_url):
-        api_key = os.environ.get(OPENROUTER_API_KEY_ENV)
         if not api_key:
             raise ValueError(
-                f"server_url '{OPENROUTER_SENTINEL}' requires the "
-                f"{OPENROUTER_API_KEY_ENV} environment variable to be set"
+                f"server_url '{OPENROUTER_SENTINEL}' requires a model API key"
             )
         return OPENROUTER_BASE_URL, api_key
-    return server_url, None
+    return server_url, api_key

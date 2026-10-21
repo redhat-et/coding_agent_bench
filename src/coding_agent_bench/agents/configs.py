@@ -6,7 +6,7 @@ from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
 from coding_agent_bench.helpers.codex import codex_create_toml
 from coding_agent_bench.models.configs import Qwen_Qwen3_8_27B, Qwen_Qwen3_8_27B_FP8
 from coding_agent_bench.providers import (
-    OPENROUTER_API_KEY_ENV,
+    MODEL_API_KEY_ENV,
     is_openrouter,
     resolve_provider,
 )
@@ -34,6 +34,8 @@ class OracleAgentConfig(AgentConfig):
     name = "oracle"
 
     def configure(self, **kwargs) -> AgentConfigResult:
+        if kwargs.get("api_key"):
+            raise ValueError("oracle is a non-LLM agent and cannot use a model API key")
         if is_openrouter(kwargs["server_url"]):
             raise ValueError("oracle is a non-LLM agent and cannot use OpenRouter")
         return AgentConfigResult(model=kwargs["model_name"])
@@ -48,7 +50,7 @@ class ClaudeCodeAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
         agent_env = {
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": model_name,
@@ -91,20 +93,20 @@ class CodexAgentConfig(AgentConfig):
             model_name=str(agent.get("model_name") or "").removeprefix("vllm/"),
             server_url=server_url,
             outpath=path,
-            openrouter=OPENROUTER_API_KEY_ENV in (agent.get("env") or {}),
+            requires_auth=MODEL_API_KEY_ENV in (agent.get("env") or {}),
         )
 
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
 
         outpath = Path("config.toml").absolute()
         codex_create_toml(
             model_name=model_name,
             server_url=base_url,
             outpath=outpath,
-            openrouter=bool(api_key),
+            requires_auth=bool(api_key),
         )
         print(f"Created config.toml at {outpath}")
 
@@ -118,7 +120,7 @@ class CodexAgentConfig(AgentConfig):
 
         agent_env = {"CODEX_HOME": "/root/.codex/"}
         if api_key:
-            agent_env[OPENROUTER_API_KEY_ENV] = api_key
+            agent_env[MODEL_API_KEY_ENV] = api_key
 
         return AgentConfigResult(
             model="vllm/" + model_name,
@@ -136,7 +138,7 @@ class OpenClawAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
         agent_env = {
             "OPENAI_BASE_URL": base_url.rstrip("/").removesuffix("/v1") + "/v1",
             "OPENAI_API_KEY": api_key or "sk-no-key-required",
@@ -154,14 +156,17 @@ class OpenCodeAgentConfig(AgentConfig):
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
 
         model = "vllm/" + model_name
         context_limit = int(model_max_len * 0.75)
         output_limit = int(model_max_len * 0.25)
         options = {"baseURL": base_url.rstrip("/").removesuffix("/v1") + "/v1"}
         if api_key:
-            options["apiKey"] = api_key
+            # Let OpenCode resolve the credential from the task environment.
+            # This is its supported substitution syntax and avoids embedding
+            # the key in OPENCODE_CONFIG_CONTENT itself.
+            options["apiKey"] = "{env:" + MODEL_API_KEY_ENV + "}"
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model,
@@ -180,10 +185,24 @@ class OpenCodeAgentConfig(AgentConfig):
             },
         }
 
+        # Harbor's OpenCode adapter writes this native config file immediately
+        # before execution. Supplying the provider here avoids relying solely
+        # on OPENCODE_CONFIG_CONTENT, which can be absent from the adapter's
+        # per-command environment in some task environments.
+        # Harbor parses --ak values as JSON; keep this as JSON text so nested
+        # provider options are reconstructed as a dictionary in the adapter.
+        agent_kwargs = {"opencode_config": json.dumps(opencode_config)}
+
         agent_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
         }
-        return AgentConfigResult(model=model, agent_env=agent_env)
+        if api_key:
+            agent_env[MODEL_API_KEY_ENV] = api_key
+        return AgentConfigResult(
+            model=model,
+            agent_env=agent_env,
+            agent_kwargs=agent_kwargs,
+        )
 
 
 class OpenHandsSdkAgentConfig(AgentConfig):
@@ -229,7 +248,7 @@ class PiAgentConfig(AgentConfig):
                 "providers": {
                     "vllm": {
                         "api": "openai-completions",
-                        "apiKey": "NONE",
+                    "apiKey": "NONE",
                         "models": [{"id": model, "name": model}],
                     }
                 }
@@ -245,7 +264,7 @@ class PiAgentConfig(AgentConfig):
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
 
         models_json = {
             "providers": {

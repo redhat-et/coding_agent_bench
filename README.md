@@ -143,6 +143,24 @@ uv run coding-agent-bench run \
 
 If you want to see a preview of Harbor command that would be run for a given set of arguments without actually running the job, add the `--dry-run` flag.
 
+For an authenticated self-hosted OpenAI- or Anthropic-compatible server, provide
+the model key without placing it in shell history:
+
+```sh
+export MY_MODEL_KEY="<model-api-key>"
+uv run coding-agent-bench run \
+    --agent claude-code \
+    --dataset scale-ai/swe-bench-pro \
+    --model-name my-model \
+    --server-url https://my.server.url \
+    --api-key-env MY_MODEL_KEY
+```
+
+`--api-key <key>` is also supported, but is more likely to be exposed through
+shell history or process listings. Remote CLI runs and queue API jobs use a
+per-job OpenShift Secret; the key is not included in the persisted command or
+jobs database. OpenRouter uses the same per-job key flow.
+
 > [!note]
 > Additional configuration options are available, use `uv run coding-agent-bench run --help` to see them.
 
@@ -260,6 +278,23 @@ curl -X POST $JOB_QUEUE_URL/jobs \
     -H "Content-Type: application/json" \
     -H "X-API-Key: <your-api-key>"
 ```
+
+For an authenticated model endpoint, add the key as a request header. It is
+not part of the JSON request body:
+
+```sh
+curl -X POST $JOB_QUEUE_URL/jobs \
+    -d '{"job_name":"authenticated-test","agent":"pi","dataset":"swe-bench/swe-bench-verified","model_name":"qwen3.6-27b","server_url":"https://model.example.com","n_tasks":1}' \
+    -H "Content-Type: application/json" \
+    -H "X-API-Key: <your-api-key>" \
+    -H "X-Model-API-Key: <model-api-key>"
+```
+
+The queue stores only a boolean indicating that a model key was supplied. The
+key itself is held in memory and passed to the parent OpenShift Job through a
+short-lived, per-job Secret. If automatic Nebius recovery follows a successful
+preemption, it reuses that Secret. If the Secret is unavailable or recovery is
+exhausted, manual resume requires a fresh `X-Model-API-Key` header.
 
 ```json
 {

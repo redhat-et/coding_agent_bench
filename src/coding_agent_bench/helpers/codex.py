@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from coding_agent_bench.providers import OPENROUTER_API_KEY_ENV
+from coding_agent_bench.providers import MODEL_API_KEY_ENV
 
 TEMPLATE = """model = {model_name}
 model_provider = "vllm"
@@ -26,16 +26,20 @@ def _toml_string(value: str) -> str:
 
 
 def codex_create_toml(
-    model_name: str, server_url: str, outpath: Path, openrouter: bool = False
+    model_name: str, server_url: str, outpath: Path, requires_auth: bool = False,
+    openrouter: bool | None = None,
 ):
+    # ``openrouter`` remains a harmless compatibility alias for callers that
+    # used the old provider-specific option; authentication is now generic.
+    requires_auth = requires_auth or bool(openrouter)
     base_url = server_url.rstrip("/").removesuffix("/v1") + "/v1"
-    if openrouter:
-        # OpenRouter: chat-completions wire format with key auth. Codex reads the
-        # key from the OPENROUTER_API_KEY env var (env_key), so the value itself
+    if requires_auth:
+        # Authenticated OpenAI-compatible endpoints use chat-completions. Codex
+        # reads the key from the task environment, so the value itself
         # is never passed to or written by this function.
         wire_api = "chat"
         requires_openai_auth = "true"
-        env_key_line = f"env_key = {_toml_string(OPENROUTER_API_KEY_ENV)}\n\n"
+        env_key_line = f"env_key = {_toml_string(MODEL_API_KEY_ENV)}\n\n"
     else:
         # Default self-served vLLM: Responses API, no auth.
         wire_api = "responses"
