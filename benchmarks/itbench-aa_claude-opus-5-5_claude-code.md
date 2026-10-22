@@ -25,10 +25,11 @@
 **Command:**
 
 ```bash
-# Until the openshift tweaks and the itbench-aa adapter are merged upstream
-# (PR harbor-framework/harbor#3403), pin both fork packages in pyproject.toml:
-#   harbor = { git = "https://github.com/redhat-et/harbor.git", branch = "feat/itbench-aa" }
+# Until the itbench-aa adapter is merged upstream (PR harbor-framework/adapters#14)
+# pin the fork package in pyproject.toml:
+#   harbor = { git = "https://github.com/redhat-et/harbor.git" }
 #   harbor-itbench-aa-adapter = { git = "https://github.com/redhat-et/harbor.git", branch = "feat/itbench-aa", subdirectory = "adapters/itbench-aa" }
+# Then add "harbor-itbench-aa-adapter" to dependencies
 uv sync
 
 # Download the dataset (~31 GB, public, reuses the local HF cache on re-runs)
