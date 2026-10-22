@@ -12,7 +12,10 @@ DEFAULT_GPU_COST_USD_PER_HOUR = 4
 
 class Metrics(BaseModel):
     n_tasks: int
-    n_errors: int
+    # Integer for single runs; the mean across runs (possibly fractional,
+    # e.g. 0.5) for averaged multi-run reports, so the reported error count
+    # and error rate stay honest instead of rounding 0.5 down to 0.
+    n_errors: float
     score: float
     n_input_tokens: int
     n_cache_tokens: int
@@ -295,7 +298,9 @@ def average_metrics(metrics_list: list[Metrics], concurrencies: list[int] | None
 
     return Metrics(
         n_tasks=metrics_list[0].n_tasks,
-        n_errors=mean_int([m.n_errors for m in metrics_list]),
+        # Keep the true mean (not mean_int): rounding e.g. [1, 0] to 0 errors
+        # contradicts the per-run exception stats shown alongside it.
+        n_errors=sum(m.n_errors for m in metrics_list) / n_runs,
         score=round(sum(m.score for m in metrics_list) / n_runs, 3),
         n_input_tokens=mean_int([m.n_input_tokens for m in metrics_list]),
         n_cache_tokens=mean_int([m.n_cache_tokens for m in metrics_list]),
@@ -349,11 +354,17 @@ def _reward_outcome_counts(result_dict: dict) -> tuple[int, int, int] | None:
         return (n_full, n_partial, n_zero)
     return None
 
-def _reward_outcome_string(result_dicts: list[dict], n_errors: int) -> str | None:
+def _format_count(value: float) -> str:
+    """Format a (possibly fractional averaged) count without a trailing .0."""
+    return str(int(value)) if value == int(value) else f"{value:g}"
+
+
+def _reward_outcome_string(result_dicts: list[dict], n_errors: float) -> str | None:
     """Outcome counts across runs, averaged for multi-run reports.
 
     Returns e.g. "18 Full Reward / 3 Partial Reward / 19 Zero Reward / 0 Errors"
-    (mean counts across runs, rounded), or None when no run has a reward
+    (mean counts across runs; fractional means are kept as e.g. "13.5" so the
+    counts still sum to n_tasks), or None when no run has a reward
     distribution.
     """
     all_counts = [_reward_outcome_counts(r) for r in result_dicts]
@@ -361,10 +372,10 @@ def _reward_outcome_string(result_dicts: list[dict], n_errors: int) -> str | Non
     if not all_counts:
         return None
     n_runs = len(all_counts)
-    n_full = round(sum(c[0] for c in all_counts) / n_runs)
-    n_partial = round(sum(c[1] for c in all_counts) / n_runs)
-    n_zero = round(sum(c[2] for c in all_counts) / n_runs)
-    return f"{n_full} Full Reward / {n_partial} Partial Reward / {n_zero} Zero Reward / {n_errors} Errors"
+    n_full = sum(c[0] for c in all_counts) / n_runs
+    n_partial = sum(c[1] for c in all_counts) / n_runs
+    n_zero = sum(c[2] for c in all_counts) / n_runs
+    return f"{_format_count(n_full)} Full Reward / {_format_count(n_partial)} Partial Reward / {_format_count(n_zero)} Zero Reward / {_format_count(n_errors)} Errors"
 
 def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = None, gpu_cost_per_hour: float = DEFAULT_GPU_COST_USD_PER_HOUR):
     n_runs = len(job_dirs)
@@ -408,11 +419,14 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
         score_string = reward_string
     else:
         n_success = round(metrics.score * metrics.n_tasks)
-        score_string = f"{n_success} Success / {metrics.n_tasks - n_success - metrics.n_errors} Failed / {metrics.n_errors} Errors"
+        score_string = f"{n_success} Success / {_format_count(metrics.n_tasks - n_success - metrics.n_errors)} Failed / {_format_count(metrics.n_errors)} Errors"
     
-    # Create errors string
+    # Create errors string (exception occurrences aggregated across all runs)
     eval_name = list(result_dict["stats"]["evals"].keys())[0]
-    error_dict = {k: len(v) for k, v in result_dict["stats"]["evals"][eval_name]["exception_stats"].items()}
+    error_dict: dict[str, int] = {}
+    for run_result in run_results:
+        for k, v in run_result["stats"]["evals"][eval_name]["exception_stats"].items():
+            error_dict[k] = error_dict.get(k, 0) + len(v)
     error_string = ", ".join([f"{v} {k}s" for k, v in error_dict.items()])
 
     # Create command string
@@ -484,7 +498,7 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
         job_name=job_name,
         score=round(metrics.score*100, 1),
         score_string=score_string,
-        error_rate=round(metrics.n_errors / metrics.n_tasks * 100, 1),
+        error_rate=round(metrics.n_errors / metrics.n_tasks * 100, 2),
         error_string=error_string,
         total_time=total_time,
         agent_time=agent_time,
