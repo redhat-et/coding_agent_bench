@@ -1,13 +1,11 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: harbor-task-anyuid
-  labels:
-    app: harbor
+  name: harbor-task-scc
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: system:openshift:scc:anyuid
+  name: system:openshift:scc:harbor-task-scc
 subjects:
   - kind: ServiceAccount
     name: harbor-task

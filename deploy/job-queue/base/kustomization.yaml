@@ -6,7 +6,8 @@ resources:
   - ./orchestrator-anyuid.yaml
   # Task Pod SA
   - ./task-sa.yaml
-  - ./task-anyuid.yaml
+  - ./task-scc.yaml
+  - ./task-scc-rolebinding.yaml
   # Job Queue
   - ./pvc.yaml
   - ./deployment.yaml
