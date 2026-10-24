@@ -20,18 +20,6 @@ replacements:
         fieldPaths:
           - spec.template.spec.containers.[name=job-queue].env.[name=CODING_AGENT_BENCH_IMAGE].value
 
-replacements:
-  - source:
-      kind: Deployment
-      name: job-queue
-      fieldPath: spec.template.spec.containers.[name=job-queue].image
-    targets:
-      - select:
-          kind: Deployment
-          name: job-queue
-        fieldPaths:
-          - spec.template.spec.containers.[name=job-queue].env.[name=CODING_AGENT_BENCH_IMAGE].value
-
 patches:
   - target:
       kind: Deployment
