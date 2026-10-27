@@ -398,6 +398,16 @@ def prepare_dataset(
             raise DatasetArchiveError(
                 "Selected directory contains no valid Harbor tasks"
             )
+        provenance = {
+            "repository_url": source.repository_url,
+            "requested_ref": source.ref or None,
+            "commit": commit,
+            "subdirectory": source.subdirectory,
+        }
+        provenance_path = root / "provenance.json"
+        temporary_provenance = root / "provenance.json.tmp"
+        temporary_provenance.write_text(json.dumps(provenance), encoding="utf-8")
+        temporary_provenance.replace(provenance_path)
         (root / "prepared").touch()
         return commit
     except BaseException:

@@ -146,6 +146,12 @@ def run(
     agent_version: Annotated[
         Optional[str], typer.Option(help="Pin agent to a specific version (overrides agent_versions.toml)")
     ] = None,
+    leaderboard_metadata: Annotated[
+        Optional[Path], typer.Option(help="Optional overrides for automatically collected job metadata")
+    ] = None,
+    leaderboard_metadata_json: Annotated[
+        Optional[str], typer.Option(help="Inline leaderboard metadata JSON (used by the queue)")
+    ] = None,
     max_retries: Annotated[
         Optional[int], typer.Option(help="Max retry attempts per task (default: 1)")
     ] = None,
@@ -171,6 +177,22 @@ def run(
     ] = False,
 ):
     """Run a benchmark with full Harbor configuration support."""
+    from coding_agent_bench.leaderboard_results import (
+        job_metadata, runtime_github_source, save_metadata, try_export_on_completion,
+    )
+
+    if leaderboard_metadata is not None and leaderboard_metadata_json is not None:
+        raise typer.BadParameter("Use only one leaderboard metadata option")
+    metadata = None
+    if leaderboard_metadata is not None or leaderboard_metadata_json is not None:
+        import json
+
+        try:
+            metadata = json.loads(leaderboard_metadata.read_text() if leaderboard_metadata is not None else leaderboard_metadata_json)
+            if not isinstance(metadata, dict):
+                raise ValueError("Leaderboard metadata must be a JSON object")
+        except (OSError, ValueError) as error:
+            raise typer.BadParameter(str(error)) from error
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
@@ -194,6 +216,16 @@ def run(
         typer.echo("Running job on remote server...")
         job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
+        if metadata is not None:
+            # A client-side file path is not available in the remote pod.
+            filtered = []
+            arguments = iter(remote_args)
+            for argument in arguments:
+                if argument in ("--leaderboard-metadata", "--leaderboard-metadata-json"):
+                    next(arguments, None)
+                elif not argument.startswith(("--leaderboard-metadata=", "--leaderboard-metadata-json=")):
+                    filtered.append(argument)
+            remote_args = [*filtered, "--leaderboard-metadata-json", json.dumps(metadata)]
         command = ["coding-agent-bench", "run", *remote_args]
         
         # Parse before script if provided
@@ -241,6 +273,11 @@ def run(
         if dry_run:
             return
 
+        metadata = job_metadata(
+            dataset, model_name, agent.value, version=agent_version, skills=skills,
+            overrides=metadata, github_source=runtime_github_source(dataset),
+        )
+        save_metadata(job_dir, metadata)
         proc = subprocess.Popen(harbor_command, env={**os.environ, **extra_envs})
         try:
             proc.wait()
@@ -257,8 +294,10 @@ def run(
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+            try_export_on_completion(job_dir, 130)
             raise SystemExit(130)
         typer.echo(f"Job output dir: {job_dir}")
+        try_export_on_completion(job_dir, proc.returncode)
         # The pod's logging/upload wrapper must observe Harbor's failure status.
         raise typer.Exit(proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
 
