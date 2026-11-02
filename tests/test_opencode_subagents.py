@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import click
 
 from coding_agent_bench.agents.configs import OpenCodeAgentConfig
 from coding_agent_bench.builder import HarborCommandBuilder
@@ -36,6 +37,11 @@ from scripts.calculate_metrics import (
 EXAMPLE_SUBAGENT = Path("examples/opencode/reviewer-subagent.md")
 EXAMPLE_PROVIDER = Path("examples/opencode/reviewer-provider.json")
 EXAMPLE_POLICY = Path("examples/opencode/reviewer-escalation-policy.md")
+
+
+def plain_cli_output(output: str) -> str:
+    """Normalize terminal styling and wrapping for semantic assertions."""
+    return " ".join(click.unstyle(output).split())
 
 
 def write_subagent(path: Path, name: str = "reviewer", mode: str = "subagent") -> Path:
@@ -495,7 +501,10 @@ def test_cli_rejects_policy_without_subagent():
     )
 
     assert result.exit_code != 0
-    assert "--subagent-policy and --subagent-provider require at least one --subagent" in result.output
+    assert (
+        "--subagent-policy and --subagent-provider require at least one --subagent"
+        in plain_cli_output(result.output)
+    )
 
 
 def test_subagents_are_absent_by_default(monkeypatch):
@@ -539,7 +548,7 @@ def test_cli_rejects_subagents_for_other_harnesses(tmp_path):
     )
 
     assert result.exit_code != 0
-    assert "only supported with --agent opencode" in result.output
+    assert "only supported with --agent opencode" in plain_cli_output(result.output)
 
 
 @pytest.mark.skipif(
@@ -564,6 +573,9 @@ def test_opencode_discovers_configured_subagent(tmp_path, monkeypatch):
 
     environment = dict(os.environ)
     environment["HOME"] = str(home)
+    environment["XDG_CONFIG_HOME"] = str(home / ".config")
+    environment["XDG_DATA_HOME"] = str(home / ".local" / "share")
+    environment["XDG_CACHE_HOME"] = str(home / ".cache")
     opencode_binary = os.environ.get("OPENCODE_BINARY") or "opencode"
     result = subprocess.run(
         [opencode_binary, "agent", "list"],
