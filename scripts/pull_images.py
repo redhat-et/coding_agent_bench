@@ -41,7 +41,7 @@ def main():
             print(f"  FAILED: {result.stderr.strip()}")
             failed.append(image)
         else:
-            print(f"  OK")
+            print("  OK")
 
     print(f"\nDone: {len(images) - len(failed)} succeeded, {len(failed)} failed")
     if failed:

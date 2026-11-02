@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - stage
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f4a4 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@dae13b699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: 0.11.1
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test with coverage
+        run: uv run pytest --cov --cov-report=term-missing --durations=20
+
+  opencode-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f4a4 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@dae13b699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: 0.11.1
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Install pinned OpenCode
+        run: npm install -g opencode-ai@1.18.1
+
+      - name: Verify OpenCode version
+        run: test "$(opencode --version)" = "1.18.1"
+
+      - name: Run OpenCode integration tests
+        env:
+          OPENCODE_BINARY: opencode
+        run: >
+          uv run pytest
+          tests/test_opencode_subagent_integration.py
+          tests/test_opencode_subagents.py::test_opencode_discovers_configured_subagent
