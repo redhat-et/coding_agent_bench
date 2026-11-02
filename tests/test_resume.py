@@ -57,11 +57,23 @@ def test_missing_or_malformed_result_is_not_complete(tmp_path, monkeypatch, docu
 ])
 def test_transport_changes_update_all_metadata_but_not_artifacts(tmp_path, new_url, api_url):
     old_url = "http://198.51.100.10:8000/v1"
+    reviewer_url = "https://reviewer.example.com/api/v1"
     opencode = {
         "$schema": "https://opencode.ai/config.json",
-        "provider": {"vllm": {"options": {"baseURL": old_url, "apiKey": "NONE"}}},
+        "provider": {
+            "vllm": {"options": {"baseURL": old_url, "apiKey": "NONE"}},
+            "reviewer": {
+                "options": {
+                    "baseURL": reviewer_url,
+                    "apiKey": "{env:REVIEWER_API_KEY}",
+                }
+            },
+        },
         "mcp": {"tool": {"url": old_url}},
-        "agent": {"reviewer": {"mode": "subagent", "model": "openrouter/reviewer-model"}},
+        "agent": {
+            "reviewer": {"mode": "subagent", "model": "reviewer/reviewer-model"},
+            "debugger": {"mode": "subagent", "model": "vllm/debugger-model"},
+        },
     }
     agent = {
         "name": "opencode",
@@ -112,6 +124,10 @@ def test_transport_changes_update_all_metadata_but_not_artifacts(tmp_path, new_u
         assert env["DOCS_URL"] == old_url
         embedded = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         assert embedded["provider"]["vllm"]["options"] == {"baseURL": api_url, "apiKey": "NONE"}
+        assert embedded["provider"]["reviewer"]["options"] == {
+            "baseURL": reviewer_url,
+            "apiKey": "{env:REVIEWER_API_KEY}",
+        }
         assert embedded["mcp"]["tool"]["url"] == old_url
         assert embedded["$schema"] == opencode["$schema"]
         agent_config = config["agent"] if "agent" in config else config["agents"][0]
@@ -120,7 +136,11 @@ def test_transport_changes_update_all_metadata_but_not_artifacts(tmp_path, new_u
         ]["baseURL"] == api_url
         assert (
             agent_config["kwargs"]["opencode_config"]["agent"]["reviewer"]["model"]
-            == "openrouter/reviewer-model"
+            == "reviewer/reviewer-model"
+        )
+        assert (
+            agent_config["kwargs"]["opencode_config"]["agent"]["debugger"]["model"]
+            == "vllm/debugger-model"
         )
     assert loaded[task / "result.json"]["agent_result"] == result["agent_result"]
     assert artifact.read_bytes() == original_artifact

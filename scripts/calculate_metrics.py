@@ -610,20 +610,31 @@ def run_identity(job_dir: Path) -> tuple:
     kwargs = agent_config.get("kwargs") or {}
     metadata = kwargs.get("subagent_metadata")
     opencode_config = kwargs.get("opencode_config")
+    if isinstance(opencode_config, str):
+        opencode_config = json.loads(opencode_config)
     if metadata is None and opencode_config is None:
         subagent_identity = None
     else:
         canonical_metadata = json.loads(json.dumps(metadata or {}))
         for definition in canonical_metadata.get("definitions", []):
             definition.pop("source", None)
+        for provider in canonical_metadata.get("providers", []):
+            provider.pop("source", None)
+            provider.pop("sha256", None)
         canonical_policy = canonical_metadata.get("escalation_policy")
         if isinstance(canonical_policy, dict):
             canonical_policy.pop("source", None)
+        canonical_config = json.loads(json.dumps(opencode_config or {}))
+        for provider in (canonical_config.get("provider") or {}).values():
+            if isinstance(provider, dict):
+                options = provider.get("options")
+                if isinstance(options, dict):
+                    options.pop("baseURL", None)
         subagent_identity = json.dumps(
             {
                 "version": kwargs.get("version"),
                 "metadata": canonical_metadata,
-                "opencode_config": opencode_config,
+                "opencode_config": canonical_config,
             },
             sort_keys=True,
             separators=(",", ":"),

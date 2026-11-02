@@ -7,6 +7,7 @@ import os
 from coding_agent_bench.agents import get_agent_config
 from coding_agent_bench.subagents import (
     SUBAGENT_POLICY_INLINE_PREFIX,
+    load_subagent_providers,
     materialize_inline_policy,
 )
 
@@ -52,6 +53,7 @@ class HarborCommandBuilder:
         retry_include: list[str] = None,
         skills: list[str] = None,
         subagent_policy: str | Path | None = None,
+        allow_agent_host: list[str] = None,
         extra_harbor_args: list[str] = None,
         **kwargs,
     ) -> list[str]:
@@ -90,7 +92,12 @@ class HarborCommandBuilder:
         # Add agent kwargs
         if agent_kwargs is not None:
             for key, value in agent_kwargs.items():
-                args += ["--ak", f"{key}={value}"]
+                serialized_value = (
+                    json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    if not isinstance(value, str)
+                    else value
+                )
+                args += ["--ak", f"{key}={serialized_value}"]
         # Add environment
         args += ["--env", environment]
         harbor_parent = os.environ.get("HARBOR_PARENT")
@@ -106,6 +113,9 @@ class HarborCommandBuilder:
         # Add agent skills using Harbor's repeatable native flag.
         for skill in skills or []:
             args += ["--skill", skill]
+
+        for host in allow_agent_host or []:
+            args += ["--allow-agent-host", host]
 
         # Add number of concurrent tasks when explicitly requested. Omitting the
         # flag lets the Harbor/queue defaults apply.
@@ -157,6 +167,7 @@ class HarborCommandBuilder:
         skills: list[str] = None,
         subagents: list[str | Path] | None = None,
         subagent_policy: str | Path | None = None,
+        subagent_providers: list[str | Path | dict] | None = None,
         extra_harbor_args: list[str] = None,
         **kwargs,
     ) -> tuple[list[str], Path]:
@@ -169,10 +180,12 @@ class HarborCommandBuilder:
         """
         if environment not in ["docker", "openshift"]:
             raise ValueError(f"Invalid environment: {environment}")
-        if (subagents or subagent_policy) and agent != SupportedAgent.opencode:
+        if (subagents or subagent_policy or subagent_providers) and agent != SupportedAgent.opencode:
             raise ValueError("Subagents are only supported with --agent opencode")
-        if subagent_policy is not None and not subagents:
-            raise ValueError("--subagent-policy requires at least one --subagent")
+        if (subagent_policy is not None or subagent_providers) and not subagents:
+            raise ValueError(
+                "--subagent-policy and --subagent-provider require at least one --subagent"
+            )
         if model_max_len is None:
             # Keep model-specific limits in the queue's ModelConfig registry rather
             # than requiring every caller to duplicate them in its request.
@@ -182,12 +195,23 @@ class HarborCommandBuilder:
             model_max_len = model_config.model_max_len if model_config else 262000
 
         agent_config = get_agent_config(agent)
+        provider_definitions = load_subagent_providers(subagent_providers)
+        extra_allowed_hosts = list(
+            dict.fromkeys(
+                host
+                for host in (
+                    provider.network_host() for provider in provider_definitions
+                )
+                if host is not None
+            )
+        )
         result = agent_config.configure(
             model_name=model_name,
             server_url=server_url,
             model_max_len=model_max_len,
             subagents=subagents,
             subagent_policy=subagent_policy,
+            subagent_providers=subagent_providers,
             **kwargs,
         )
 
@@ -214,6 +238,7 @@ class HarborCommandBuilder:
                 retry_include=retry_include,
                 skills=skills,
                 subagent_policy=effective_subagent_policy,
+                allow_agent_host=extra_allowed_hosts,
                 extra_harbor_args=extra_harbor_args,
             )
         except Exception:

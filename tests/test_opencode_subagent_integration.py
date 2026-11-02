@@ -2,12 +2,16 @@ import json
 import os
 import subprocess
 import threading
+import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 
 OPENCODE_BINARY = os.environ.get("OPENCODE_BINARY")
+if OPENCODE_BINARY and not Path(OPENCODE_BINARY).is_absolute():
+    OPENCODE_BINARY = shutil.which(OPENCODE_BINARY)
 
 
 def _sse_chunk(model, delta, finish_reason=None):
@@ -35,7 +39,13 @@ class _MockModelHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
-        self.requests.append({"headers": dict(self.headers), **body})
+        self.requests.append(
+            {
+                "headers": dict(self.headers),
+                "server_port": self.server.server_port,
+                **body,
+            }
+        )
         has_tools = bool(body.get("tools"))
         has_tool_result = any(
             message.get("role") == "tool" for message in body.get("messages", [])
@@ -122,9 +132,12 @@ def test_opencode_1_18_1_routes_and_delegates(tmp_path):
 
     handler_requests: list[dict] = []
     _MockModelHandler.requests = handler_requests
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockModelHandler)
-    endpoint = f"http://127.0.0.1:{server.server_port}/v1"
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    primary_server = ThreadingHTTPServer(("127.0.0.1", 0), _MockModelHandler)
+    reviewer_server = ThreadingHTTPServer(("127.0.0.1", 0), _MockModelHandler)
+    primary_endpoint = f"http://127.0.0.1:{primary_server.server_port}/v1"
+    reviewer_endpoint = f"http://127.0.0.1:{reviewer_server.server_port}/v1"
+    threading.Thread(target=primary_server.serve_forever, daemon=True).start()
+    threading.Thread(target=reviewer_server.serve_forever, daemon=True).start()
     try:
         home = tmp_path / "home"
         config_dir = home / ".config" / "opencode"
@@ -136,10 +149,24 @@ def test_opencode_1_18_1_routes_and_delegates(tmp_path):
                 "mock": {
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "Mock",
-                    "options": {"baseURL": endpoint, "apiKey": "mock-key"},
+                    "options": {
+                        "baseURL": primary_endpoint,
+                        "apiKey": "{env:MOCK_PRIMARY_KEY}",
+                    },
+                    "models": {"primary": {"name": "Primary"}},
+                },
+                "reviewer": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Reviewer",
+                    "options": {
+                        "baseURL": reviewer_endpoint,
+                        "apiKey": "{env:MOCK_REVIEWER_KEY}",
+                    },
                     "models": {
-                        "primary": {"name": "Primary"},
-                        "reviewer": {"name": "Reviewer"},
+                        "reviewer": {
+                            "name": "Reviewer",
+                            "limit": {"context": 1000, "output": 250},
+                        }
                     },
                 }
             },
@@ -147,7 +174,7 @@ def test_opencode_1_18_1_routes_and_delegates(tmp_path):
                 "reviewer": {
                     "description": "Review code",
                     "mode": "subagent",
-                    "model": "mock/reviewer",
+                    "model": "reviewer/reviewer",
                     "permission": {"edit": "deny", "bash": "deny"},
                     "prompt": "Review the request and report findings.",
                 }
@@ -166,7 +193,9 @@ def test_opencode_1_18_1_routes_and_delegates(tmp_path):
             cwd=tmp_path,
             env={
                 "HOME": str(home),
-                "PATH": "/usr/bin:/bin",
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "MOCK_PRIMARY_KEY": "mock-primary-key",
+                "MOCK_REVIEWER_KEY": "mock-reviewer-key",
                 "NO_COLOR": "1",
             },
             capture_output=True,
@@ -174,8 +203,10 @@ def test_opencode_1_18_1_routes_and_delegates(tmp_path):
             timeout=45,
         )
     finally:
-        server.shutdown()
-        server.server_close()
+        primary_server.shutdown()
+        primary_server.server_close()
+        reviewer_server.shutdown()
+        reviewer_server.server_close()
 
     assert result.returncode == 0, result.stderr
     assert [request["model"] for request in handler_requests] == [
@@ -185,14 +216,28 @@ def test_opencode_1_18_1_routes_and_delegates(tmp_path):
         "primary",
     ]
     assert all(
-        request["headers"].get("Authorization") == "Bearer mock-key"
+        request["headers"].get("Authorization")
+        == (
+            "Bearer mock-primary-key"
+            if request["server_port"] == primary_server.server_port
+            else "Bearer mock-reviewer-key"
+        )
         for request in handler_requests
     )
+    assert [request["server_port"] for request in handler_requests] == [
+        primary_server.server_port,
+        primary_server.server_port,
+        reviewer_server.server_port,
+        primary_server.server_port,
+    ]
     reviewer_request = handler_requests[2]
     assert reviewer_request["messages"][0]["content"].startswith(
         "Review the request and report findings."
     )
-    assert "exact model ID is mock/reviewer" in reviewer_request["messages"][0]["content"]
+    assert (
+        "exact model ID is reviewer/reviewer"
+        in reviewer_request["messages"][0]["content"]
+    )
     assert '"tool":"task"' in result.stdout
     assert '"modelID":"reviewer"' in result.stdout
     assert "PRIMARY_CONSUMED_REVIEW:delegation works" in result.stdout

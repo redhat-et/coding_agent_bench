@@ -12,6 +12,7 @@ from coding_agent_bench.providers import (
 )
 from coding_agent_bench.subagents import (
     load_subagent_definitions,
+    load_subagent_providers,
     policy_metadata,
     subagents_to_opencode_config,
 )
@@ -186,13 +187,51 @@ class OpenCodeAgentConfig(AgentConfig):
         }
 
         subagents = load_subagent_definitions(kwargs.get("subagents"))
+        providers = load_subagent_providers(kwargs.get("subagent_providers"))
+        if providers and not subagents:
+            raise ValueError("OpenCode subagent providers require a subagent")
         agent_kwargs = None
         if subagents:
+            referenced_providers = {
+                definition.model.split("/", 1)[0]
+                for definition in subagents
+                if definition.model is not None
+            }
+            configured_providers = {provider.name for provider in providers}
+            if referenced_providers - {"vllm"} - configured_providers:
+                missing = sorted(
+                    referenced_providers - {"vllm"} - configured_providers
+                )
+                raise ValueError(
+                    "OpenCode subagent model providers are not configured: "
+                    + ", ".join(missing)
+                )
+            if configured_providers - referenced_providers:
+                unused = sorted(configured_providers - referenced_providers)
+                raise ValueError(
+                    "OpenCode subagent providers are not referenced by a subagent: "
+                    + ", ".join(unused)
+                )
+            for provider in providers:
+                provider_models = set((provider.config.get("models") or {}).keys())
+                for definition in subagents:
+                    if not definition.model or not definition.model.startswith(
+                        provider.name + "/"
+                    ):
+                        continue
+                    model_id = definition.model.split("/", 1)[1]
+                    if model_id not in provider_models:
+                        raise ValueError(
+                            f"OpenCode provider {provider.name!r} does not define "
+                            f"subagent model {model_id!r}"
+                        )
+                opencode_config["provider"][provider.name] = provider.config
             opencode_config["agent"] = subagents_to_opencode_config(subagents)
             metadata = {
                 "definitions": [
                     definition.to_metadata() for definition in subagents
-                ]
+                ],
+                "providers": [provider.to_metadata() for provider in providers],
             }
             if kwargs.get("subagent_policy") is not None:
                 metadata["escalation_policy"] = policy_metadata(

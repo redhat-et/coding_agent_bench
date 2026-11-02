@@ -205,8 +205,22 @@ uv run coding-agent-bench run \
 ```
 
 Edit `examples/opencode/reviewer-subagent.md` and replace
-`openrouter/REPLACE_WITH_REVIEWER_MODEL_ID` with the reviewer model you want to
-evaluate. The example uses OpenRouter for both the primary and reviewer models.
+`REPLACE_WITH_REVIEWER_MODEL_ID` with the reviewer model you want to evaluate.
+When the reviewer uses a provider other than the primary `vllm` provider, also
+pass an OpenCode provider mapping. `examples/opencode/reviewer-provider.json`
+shows an independent OpenRouter reviewer endpoint, model, and context/output
+limits:
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-primary-model \
+    --server-url http://my-primary-server:8000 \
+    --subagent ./examples/opencode/reviewer-subagent.md \
+    --subagent-provider ./examples/opencode/reviewer-provider.json
+```
+
 The example is read-only: it denies edit and bash permissions and asks for
 actionable review findings. There is no silent fallback to the primary
 model. OpenCode 1.18.1 may instead report an unavailable reviewer model as a
@@ -232,13 +246,13 @@ The example policy asks the primary model to request review after repeated
 failed repairs, before finalizing complex changes, or when uncertainty remains.
 It does not force a review on every task.
 
-Provider credentials follow the primary model's provider. For an OpenRouter
-primary and reviewer, set `OPENROUTER_API_KEY`. Local runs use your current
-environment. Remote OpenShift runs encode the validated definitions and policy
-into the worker command, where the worker recreates the OpenCode configuration
-before Harbor starts the task. Harbor 0.20.0 forwards credentials only for the
-primary model's provider, so a reviewer on a different provider requires a
-Harbor enhancement and is not supported by this integration.
+Provider credentials use OpenCode environment-variable interpolation. For an
+OpenRouter reviewer, set `OPENROUTER_API_KEY`; a primary local model plus an
+OpenRouter reviewer is supported, and remote OpenShift runs scope the
+OpenRouter secret to jobs that need it. Other cross-provider credentials must
+already be available in the execution environment because the initial
+integration does not add a generic per-provider secret store. Never place raw
+API keys in provider definitions.
 Generated OpenCode configuration uses environment-variable interpolation, and
 generated reports redact known credential values. Harbor's existing agent
 environment forwarding may still place the raw environment value in process
@@ -246,8 +260,10 @@ arguments and lock artifacts, so credential isolation is not claimed beyond the
 OpenCode configuration and rendered reports.
 
 Harbor records the OpenCode version, primary model, subagent names and models,
-definition SHA-256 hashes, and escalation-policy hash in the job configuration.
-Generated reports include these details. Harbor's current OpenCode adapter does
+definition SHA-256 hashes, provider source/configuration hashes, and
+escalation-policy hash in the job configuration. Generated reports include these
+details. Endpoint-only changes are excluded from aggregation compatibility while
+remaining visible in the full configuration. Harbor's current OpenCode adapter does
 not collect per-subagent invocation counts or costs, so reports explicitly say
 that those metrics are unavailable rather than estimating them.
 

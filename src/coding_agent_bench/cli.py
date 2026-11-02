@@ -24,9 +24,11 @@ from coding_agent_bench.utils import (
 )
 from coding_agent_bench.subagents import (
     SUBAGENT_INLINE_PREFIX,
+    SUBAGENT_PROVIDER_INLINE_PREFIX,
     SUBAGENT_POLICY_INLINE_PREFIX,
     encode_remote_path_arguments,
     load_subagent_definitions,
+    load_subagent_providers,
     policy_metadata,
 )
 
@@ -180,6 +182,13 @@ def run(
             help="Markdown policy appended to each task instruction to guide subagent use"
         ),
     ] = None,
+    subagent_providers: Annotated[
+        Optional[list[Path]],
+        typer.Option(
+            "--subagent-provider",
+            help="OpenCode provider JSON/YAML definition (repeatable)",
+        ),
+    ] = None,
     envs: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -197,12 +206,31 @@ def run(
 
     try:
         definitions = load_subagent_definitions(subagents)
+        providers = load_subagent_providers(subagent_providers)
         if definitions and agent != SupportedAgent.opencode:
             raise ValueError("Subagents are only supported with --agent opencode")
-        if subagent_policy is not None and not definitions:
-            raise ValueError("--subagent-policy requires at least one --subagent")
+        if (subagent_policy is not None or providers) and not definitions:
+            raise ValueError(
+                "--subagent-policy and --subagent-provider require at least one --subagent"
+            )
         if subagent_policy is not None:
             policy_metadata(subagent_policy)
+        referenced_providers = {
+            definition.model.split("/", 1)[0]
+            for definition in definitions
+            if definition.model is not None
+        }
+        configured_providers = {provider.name for provider in providers}
+        if referenced_providers - {"vllm"} - configured_providers:
+            raise ValueError(
+                "OpenCode subagent model providers are not configured: "
+                + ", ".join(sorted(referenced_providers - {"vllm"} - configured_providers))
+            )
+        if configured_providers - referenced_providers:
+            raise ValueError(
+                "OpenCode subagent providers are not referenced by a subagent: "
+                + ", ".join(sorted(configured_providers - referenced_providers))
+            )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--subagent") from exc
 
@@ -231,6 +259,9 @@ def run(
         remote_args = encode_remote_path_arguments(
             remote_args, "--subagent-policy", SUBAGENT_POLICY_INLINE_PREFIX
         )
+        remote_args = encode_remote_path_arguments(
+            remote_args, "--subagent-provider", SUBAGENT_PROVIDER_INLINE_PREFIX
+        )
         command = ["coding-agent-bench", "run", *remote_args]
         
         # Parse before script if provided
@@ -243,7 +274,15 @@ def run(
         
         # Create the job
         try:
-            job.run(command, _before_script, openrouter=is_openrouter(server_url))
+            job.run(
+                command,
+                _before_script,
+                openrouter=is_openrouter(server_url)
+                or any(
+                    provider.network_host() == "openrouter.ai"
+                    for provider in providers
+                ),
+            )
         except KeyboardInterrupt:
             typer.echo("\nInterrupted — cleaning up remote job...")
             job.cleanup()
@@ -271,6 +310,7 @@ def run(
                 skills=skills,
                 subagents=subagents,
                 subagent_policy=subagent_policy,
+                subagent_providers=subagent_providers,
                 extra_harbor_args=extra_harbor_args,
             )
             if subagent_policy is not None and str(subagent_policy).startswith(

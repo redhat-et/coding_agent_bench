@@ -54,6 +54,7 @@ def test_opencode_openrouter(monkeypatch):
         model_name="openai/gpt-4o",
         server_url="openrouter",
         subagents=["examples/opencode/reviewer-subagent.md"],
+        subagent_providers=["examples/opencode/reviewer-provider.json"],
     )
     cfg = json.loads(result.agent_env["OPENCODE_CONFIG_CONTENT"])
     provider = cfg["provider"]["vllm"]

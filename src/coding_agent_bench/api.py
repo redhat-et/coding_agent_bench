@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, SecretStr, field_validator
-from typing import Optional
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from typing import Any, Optional
 
 import asyncio
 import logging
@@ -30,6 +30,14 @@ from coding_agent_bench.ui import build_submit_form_html
 from coding_agent_bench import VERSION
 from coding_agent_bench.preemption import CANCELLED_ERROR_TYPE, PAUSE_PLUGIN
 from coding_agent_bench.resume import is_resume_command, resume_options, results_job_name
+from coding_agent_bench.subagents import (
+    inline_policy_argument,
+    inline_provider_argument,
+    inline_subagent_argument,
+    load_subagent_definitions,
+    load_subagent_providers,
+    policy_metadata,
+)
 
 import getpass
 import json
@@ -487,6 +495,18 @@ class CreateJobRequest(BaseModel):
         default_factory=list,
         description="Public Git skill sources in org/name[@ref] or HTTP(S) URL form",
     )
+    subagents: list[str] = Field(
+        default_factory=list,
+        description="OpenCode subagent Markdown definitions",
+    )
+    subagent_policy: Optional[str] = Field(
+        None,
+        description="Markdown policy appended to each task instruction",
+    )
+    subagent_providers: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="OpenCode provider mappings used by subagents",
+    )
     extra_harbor_flags: list[str] = Field(
         default_factory=list,
         description="Extra Harbor CLI arguments, one shell-style argument fragment per line",
@@ -496,6 +516,48 @@ class CreateJobRequest(BaseModel):
         max_length=256,
         description="Stable key used to safely retry creation of the same job",
     )
+
+    @model_validator(mode="after")
+    def validate_subagents(self):
+        if not (self.subagents or self.subagent_policy or self.subagent_providers):
+            return self
+        if self.agent != SupportedAgent.opencode:
+            raise ValueError("Subagents are only supported for OpenCode")
+        if not self.subagents:
+            raise ValueError("Subagent policy and providers require a subagent")
+        definitions = load_subagent_definitions(
+            [inline_subagent_argument(markdown) for markdown in self.subagents]
+        )
+        providers = load_subagent_providers(self.subagent_providers)
+        if self.subagent_policy is not None:
+            policy_metadata(inline_policy_argument(self.subagent_policy))
+        referenced = {
+            definition.model.split("/", 1)[0]
+            for definition in definitions
+            if definition.model is not None
+        }
+        configured = {provider.name for provider in providers}
+        if referenced - {"vllm"} - configured:
+            raise ValueError(
+                "OpenCode subagent model providers are not configured: "
+                + ", ".join(sorted(referenced - {"vllm"} - configured))
+            )
+        if configured - referenced:
+            raise ValueError(
+                "OpenCode subagent providers are not referenced by a subagent: "
+                + ", ".join(sorted(configured - referenced))
+            )
+        for provider in providers:
+            model_ids = set((provider.config.get("models") or {}).keys())
+            for definition in definitions:
+                if definition.model and definition.model.startswith(provider.name + "/"):
+                    model_id = definition.model.split("/", 1)[1]
+                    if model_id not in model_ids:
+                        raise ValueError(
+                            f"OpenCode provider {provider.name!r} does not define "
+                            f"subagent model {model_id!r}"
+                        )
+        return self
 
     @field_validator("extra_harbor_flags")
     @classmethod
@@ -2125,6 +2187,12 @@ def build_cli_command(req: CreateJobRequest):
             command += ["--retry-include", exc]
     for skill in req.skills:
         command += ["--skill", skill]
+    for markdown in req.subagents:
+        command += ["--subagent", inline_subagent_argument(markdown)]
+    if req.subagent_policy is not None:
+        command += ["--subagent-policy", inline_policy_argument(req.subagent_policy)]
+    for provider in req.subagent_providers:
+        command += ["--subagent-provider", inline_provider_argument(provider)]
     if req.extra_harbor_flags:
         from coding_agent_bench.cli import get_cab_option_names
 

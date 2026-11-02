@@ -34,6 +34,7 @@ from scripts.calculate_metrics import (
 
 
 EXAMPLE_SUBAGENT = Path("examples/opencode/reviewer-subagent.md")
+EXAMPLE_PROVIDER = Path("examples/opencode/reviewer-provider.json")
 EXAMPLE_POLICY = Path("examples/opencode/reviewer-escalation-policy.md")
 
 
@@ -43,7 +44,7 @@ def write_subagent(path: Path, name: str = "reviewer", mode: str = "subagent") -
 name: {name}
 description: Review code without editing it
 mode: {mode}
-model: openrouter/example/reviewer-model
+model: vllm/example-reviewer
 permission:
   edit: deny
   bash: deny
@@ -60,7 +61,7 @@ def test_valid_opencode_subagent_definition(tmp_path):
 
     assert definition.name == "reviewer"
     assert definition.mode == "subagent"
-    assert definition.model == "openrouter/example/reviewer-model"
+    assert definition.model == "vllm/example-reviewer"
     assert definition.prompt == "Review the implementation and report findings.\n"
     assert definition.metadata["permission"] == {"edit": "deny", "bash": "deny"}
     assert definition.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
@@ -168,8 +169,8 @@ def test_multiple_subagents_preserve_models_and_instructions(tmp_path, monkeypat
     second = write_subagent(tmp_path / "debugger.md", name="debugger")
     second.write_text(
         second.read_text().replace(
-            "openrouter/example/reviewer-model",
-            "anthropic/example-debugger",
+            "vllm/example-reviewer",
+            "vllm/example-debugger",
         )
     )
 
@@ -183,8 +184,8 @@ def test_multiple_subagents_preserve_models_and_instructions(tmp_path, monkeypat
     config = result.agent_kwargs["opencode_config"]
     metadata = result.agent_kwargs["subagent_metadata"]
 
-    assert config["agent"]["reviewer"]["model"] == "openrouter/example/reviewer-model"
-    assert config["agent"]["debugger"]["model"] == "anthropic/example-debugger"
+    assert config["agent"]["reviewer"]["model"] == "vllm/example-reviewer"
+    assert config["agent"]["debugger"]["model"] == "vllm/example-debugger"
     assert config["agent"]["reviewer"]["prompt"] == (
         "Review the implementation and report findings.\n"
     )
@@ -205,7 +206,7 @@ def test_local_command_generation_with_subagent_policy(tmp_path, monkeypatch):
         model_name="primary-model",
         server_url="http://vllm:8000",
         environment="docker",
-        subagents=[subagent],
+            subagents=[subagent],
         subagent_policy=EXAMPLE_POLICY,
     )
 
@@ -215,12 +216,14 @@ def test_local_command_generation_with_subagent_policy(tmp_path, monkeypatch):
     opencode_arguments = [
         value for flag, value in zip(command, command[1:]) if flag == "--ak"
     ]
-    assert any(
-        argument.startswith("opencode_config=")
-        and "'reviewer'" in argument
-        and "openrouter/example/reviewer-model" in argument
+    opencode_argument = next(
+        argument
         for argument in opencode_arguments
+        if argument.startswith("opencode_config=")
     )
+    assert json.loads(opencode_argument.removeprefix("opencode_config="))["agent"][
+        "reviewer"
+    ]["model"] == "vllm/example-reviewer"
 
 
 def test_remote_opencode_subagents_are_encoded_and_shell_safe(tmp_path):
@@ -264,6 +267,7 @@ def test_remote_policy_metadata_stays_reproducible(monkeypatch):
         model_name="primary-model",
         server_url="http://vllm:8000",
         subagents=[arguments[1]],
+        subagent_providers=[EXAMPLE_PROVIDER],
         subagent_policy=policy_argument,
     )
     metadata = result.agent_kwargs["subagent_metadata"]["escalation_policy"]
@@ -318,6 +322,8 @@ def test_remote_policy_temp_file_is_cleaned_after_local_execution(
             "http://vllm:8000",
             "--subagent",
             inline_subagent,
+            "--subagent-provider",
+            str(EXAMPLE_PROVIDER),
             "--subagent-policy",
             inline_policy,
         ],
@@ -365,6 +371,8 @@ def test_remote_policy_temp_file_is_cleaned_after_dry_run(monkeypatch):
             "http://vllm:8000",
             "--subagent",
             inline_subagent,
+            "--subagent-provider",
+            str(EXAMPLE_PROVIDER),
             "--subagent-policy",
             inline_policy,
             "--dry-run",
@@ -412,6 +420,8 @@ def test_remote_policy_temp_file_is_cleaned_when_process_launch_fails(monkeypatc
             "http://vllm:8000",
             "--subagent",
             inline_subagent,
+            "--subagent-provider",
+            str(EXAMPLE_PROVIDER),
             "--subagent-policy",
             inline_policy,
         ],
@@ -455,6 +465,7 @@ def test_remote_policy_temp_file_is_cleaned_when_command_construction_fails(
             server_url="http://vllm:8000",
             environment="docker",
             subagents=[EXAMPLE_SUBAGENT],
+            subagent_providers=[EXAMPLE_PROVIDER],
             subagent_policy=inline_policy,
         )
 
@@ -484,7 +495,7 @@ def test_cli_rejects_policy_without_subagent():
     )
 
     assert result.exit_code != 0
-    assert "--subagent-policy requires at least one --subagent" in result.output
+    assert "--subagent-policy and --subagent-provider require at least one --subagent" in result.output
 
 
 def test_subagents_are_absent_by_default(monkeypatch):
@@ -588,6 +599,7 @@ def test_report_records_subagent_reproducibility_metadata(monkeypatch):
         model_name="primary-model",
         server_url="http://vllm:8000",
         subagents=[EXAMPLE_SUBAGENT],
+        subagent_providers=[EXAMPLE_PROVIDER],
         subagent_policy=EXAMPLE_POLICY,
     )
     section = _subagent_report_section(
@@ -628,6 +640,7 @@ def test_openrouter_credentials_are_not_embedded_in_opencode_metadata(monkeypatc
         model_name="primary-model",
         server_url="openrouter",
         subagents=[EXAMPLE_SUBAGENT],
+        subagent_providers=[EXAMPLE_PROVIDER],
         subagent_policy=EXAMPLE_POLICY,
     )
     command, _ = HarborCommandBuilder().build(
@@ -637,6 +650,7 @@ def test_openrouter_credentials_are_not_embedded_in_opencode_metadata(monkeypatc
         server_url="openrouter",
         environment="docker",
         subagents=[EXAMPLE_SUBAGENT],
+        subagent_providers=[EXAMPLE_PROVIDER],
         subagent_policy=EXAMPLE_POLICY,
     )
     opencode_arguments = [

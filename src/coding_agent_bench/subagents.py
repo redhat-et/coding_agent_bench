@@ -9,15 +9,34 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
 
 SUBAGENT_INLINE_PREFIX = "opencode-subagent:"
 SUBAGENT_POLICY_INLINE_PREFIX = "opencode-subagent-policy:"
+SUBAGENT_PROVIDER_INLINE_PREFIX = "opencode-subagent-provider:"
 MAX_SUBAGENT_PAYLOAD_BYTES = 1024 * 1024
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.:-]+)+$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.:@-]+$")
+_ENV_INTERPOLATION_RE = re.compile(r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$")
+ALLOWED_PROVIDER_API_KEY_ENVS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "AZURE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENCODE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+    }
+)
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
@@ -48,6 +67,39 @@ class SubagentDefinition:
         }
 
 
+@dataclass(frozen=True)
+class SubagentProviderDefinition:
+    name: str
+    config: dict[str, Any]
+    source: str
+    sha256: str
+
+    def to_metadata(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "source": self.source,
+            "sha256": self.sha256,
+            "configuration_sha256": self.configuration_sha256(),
+        }
+
+    def configuration_sha256(self) -> str:
+        canonical = dict(self.config)
+        options = canonical.get("options")
+        if isinstance(options, dict):
+            options = dict(options)
+            options.pop("baseURL", None)
+            canonical["options"] = options
+        return hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def network_host(self) -> str | None:
+        endpoint = (self.config.get("options") or {}).get("baseURL")
+        if endpoint is None:
+            return None
+        return validate_provider_endpoint(endpoint).hostname
+
+
 def _decode_inline(value: str, prefix: str) -> bytes:
     if not value.startswith(prefix):
         raise ValueError(f"Invalid inline subagent payload: {value!r}")
@@ -67,6 +119,24 @@ def _read_subagent(source: str | Path) -> tuple[str, str, bytes]:
         raise ValueError(f"OpenCode subagent file not found: {path}")
     payload = path.read_bytes()
     return str(path.resolve()), _decode_payload(payload), payload
+
+
+def validate_provider_endpoint(endpoint: str):
+    """Validate and normalize an OpenCode provider HTTP(S) endpoint."""
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        raise ValueError("OpenCode provider endpoint must be an HTTP(S) URL")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("OpenCode provider endpoint must be an HTTP(S) URL")
+    if "*" in unquote(parsed.hostname) or "*" in unquote(parsed.path):
+        raise ValueError("OpenCode provider endpoint must not contain wildcards")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("OpenCode provider endpoint contains an invalid port") from exc
+    if port == 0:
+        raise ValueError("OpenCode provider endpoint port must be between 1 and 65535")
+    return parsed
 
 
 def _decode_payload(payload: bytes) -> str:
@@ -164,6 +234,173 @@ def load_subagent_definitions(sources: list[str | Path] | None) -> list[Subagent
     return definitions
 
 
+def _read_provider_document(source: str | Path) -> tuple[str, bytes, str]:
+    value = str(source)
+    if value.startswith(SUBAGENT_PROVIDER_INLINE_PREFIX):
+        payload = _decode_inline(value, SUBAGENT_PROVIDER_INLINE_PREFIX)
+        return "<inline remote payload>", payload, _decode_payload(payload)
+    path = Path(value)
+    if not path.is_file():
+        raise ValueError(f"OpenCode subagent provider file not found: {path}")
+    payload = path.read_bytes()
+    return str(path.resolve()), payload, _decode_payload(payload)
+
+
+def _parse_provider_document(markdown: str) -> dict[str, Any]:
+    try:
+        if markdown.lstrip().startswith("{"):
+            document = json.loads(markdown)
+        else:
+            document = yaml.safe_load(markdown)
+    except (json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"Invalid OpenCode subagent provider document: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("OpenCode subagent provider document must be a mapping")
+    return document
+
+
+def validate_subagent_provider_document(
+    document: dict[str, Any],
+) -> list[SubagentProviderDefinition]:
+    """Validate an OpenCode provider mapping without embedding credentials."""
+    definitions: list[SubagentProviderDefinition] = []
+    try:
+        json.dumps(document, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "OpenCode subagent provider document must contain JSON-compatible values"
+        ) from exc
+    for name, config in document.items():
+        if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+            raise ValueError(
+                "OpenCode provider names may contain only letters, numbers, "
+                "underscores, and hyphens"
+            )
+        if name == "vllm":
+            raise ValueError("OpenCode provider 'vllm' is reserved for the primary model")
+        if not isinstance(config, dict):
+            raise ValueError(f"OpenCode provider {name!r} must be a mapping")
+        if not isinstance(config.get("npm"), str) or not config["npm"].strip():
+            raise ValueError(f"OpenCode provider {name!r} requires a non-empty 'npm'")
+        options = config.get("options", {})
+        if not isinstance(options, dict):
+            raise ValueError(f"OpenCode provider {name!r} options must be a mapping")
+        if "baseURL" in options:
+            endpoint = validate_provider_endpoint(options["baseURL"])
+            if endpoint.path.rstrip("/").endswith("/v1"):
+                normalized = options["baseURL"].rstrip("/")
+            else:
+                normalized = options["baseURL"].rstrip("/") + "/v1"
+            options["baseURL"] = normalized
+        if "apiKey" in options and (
+            not isinstance(options["apiKey"], str)
+            or _ENV_INTERPOLATION_RE.fullmatch(options["apiKey"]) is None
+        ):
+            raise ValueError(
+                f"OpenCode provider {name!r} apiKey must use {{env:VARIABLE_NAME}}"
+            )
+        if "apiKey" in options:
+            match = _ENV_INTERPOLATION_RE.fullmatch(options["apiKey"])
+            if match is None or match.group(1) not in ALLOWED_PROVIDER_API_KEY_ENVS:
+                raise ValueError(
+                    f"OpenCode provider {name!r} apiKey references an unsupported "
+                    "credential environment variable"
+                )
+        models = config.get("models")
+        if not isinstance(models, dict) or not models:
+            raise ValueError(
+                f"OpenCode provider {name!r} models must be a non-empty mapping"
+            )
+        for model_id, model_config in models.items():
+            if not isinstance(model_id, str) or not _MODEL_ID_RE.fullmatch(model_id):
+                raise ValueError(
+                    f"OpenCode provider {name!r} contains an invalid model ID"
+                )
+            if not isinstance(model_config, dict):
+                raise ValueError(
+                    f"OpenCode provider {name!r} model {model_id!r} must be a mapping"
+                )
+            limit = model_config.get("limit")
+            if limit is not None:
+                if not isinstance(limit, dict):
+                    raise ValueError(
+                        f"OpenCode provider {name!r} model {model_id!r} limit must be a mapping"
+                    )
+                for key in ("context", "output"):
+                    value = limit.get(key)
+                    if value is not None and (type(value) is not int or value < 1):
+                        raise ValueError(
+                            f"OpenCode provider {name!r} model {model_id!r} "
+                            f"{key} limit must be a positive integer"
+                        )
+        definitions.append(
+            SubagentProviderDefinition(
+                name=name,
+                config=config,
+                source="<inline document>",
+                sha256=hashlib.sha256(
+                    json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+            )
+        )
+    if not definitions:
+        raise ValueError("OpenCode subagent provider document must define a provider")
+    return definitions
+
+
+def load_subagent_providers(
+    sources: list[str | Path | dict[str, Any]] | None,
+) -> list[SubagentProviderDefinition]:
+    definitions: list[SubagentProviderDefinition] = []
+    names: set[str] = set()
+    for source in sources or []:
+        if isinstance(source, dict):
+            source_payload = json.dumps(
+                source, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            if len(source_payload) > MAX_SUBAGENT_PAYLOAD_BYTES:
+                raise ValueError(
+                    f"OpenCode subagent provider payload exceeds "
+                    f"{MAX_SUBAGENT_PAYLOAD_BYTES} bytes"
+                )
+            document_definitions = validate_subagent_provider_document(source)
+            source_reference = "<inline API document>"
+        else:
+            source_reference, payload, document = _read_provider_document(source)
+            source_payload = payload
+            try:
+                document_definitions = validate_subagent_provider_document(
+                    _parse_provider_document(document)
+                )
+            except ValueError:
+                raise
+        for definition in document_definitions:
+            if definition.name in names:
+                raise ValueError(
+                    f"Duplicate OpenCode subagent provider name: {definition.name}"
+                )
+            names.add(definition.name)
+            if not isinstance(source, dict):
+                definitions.append(
+                    SubagentProviderDefinition(
+                        name=definition.name,
+                        config=definition.config,
+                        source=source_reference,
+                        sha256=hashlib.sha256(source_payload).hexdigest(),
+                    )
+                )
+            else:
+                definitions.append(
+                    SubagentProviderDefinition(
+                        name=definition.name,
+                        config=definition.config,
+                        source=source_reference,
+                        sha256=definition.sha256,
+                    )
+                )
+    return definitions
+
+
 def subagents_to_opencode_config(definitions: list[SubagentDefinition]) -> dict[str, Any]:
     return {
         definition.name: definition.to_opencode_config()
@@ -211,6 +448,21 @@ def materialize_inline_policy(source: str | Path) -> Path:
         if policy_path is not None:
             policy_path.unlink(missing_ok=True)
         raise
+
+
+def inline_subagent_argument(markdown: str) -> str:
+    return SUBAGENT_INLINE_PREFIX + base64.b64encode(markdown.encode("utf-8")).decode("ascii")
+
+
+def inline_policy_argument(markdown: str) -> str:
+    return SUBAGENT_POLICY_INLINE_PREFIX + base64.b64encode(
+        markdown.encode("utf-8")
+    ).decode("ascii")
+
+
+def inline_provider_argument(document: dict[str, Any]) -> str:
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return SUBAGENT_PROVIDER_INLINE_PREFIX + base64.b64encode(payload).decode("ascii")
 
 
 def encode_remote_path_arguments(
