@@ -125,6 +125,11 @@ def _update_agent_endpoint(agent: dict, server_url: str) -> None:
         if provider is not None:
             provider.setdefault("options", {})["baseURL"] = api_base
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode)
+    opencode_config = (agent.get("kwargs") or {}).get("opencode_config")
+    if opencode_config is not None:
+        provider = opencode_config.get("provider", {}).get("vllm")
+        if provider is not None:
+            provider.setdefault("options", {})["baseURL"] = api_base
 
 
 def _restore_agent_mounts(config: dict, server_url: str) -> None:

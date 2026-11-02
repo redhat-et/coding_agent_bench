@@ -166,7 +166,7 @@ class OpenCodeAgentConfig(AgentConfig):
         output_limit = int(model_max_len * 0.25)
         options = {"baseURL": base_url.rstrip("/").removesuffix("/v1") + "/v1"}
         if api_key:
-            options["apiKey"] = api_key
+            options["apiKey"] = "{env:OPENROUTER_API_KEY}"
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model,

@@ -61,12 +61,19 @@ def test_transport_changes_update_all_metadata_but_not_artifacts(tmp_path, new_u
         "$schema": "https://opencode.ai/config.json",
         "provider": {"vllm": {"options": {"baseURL": old_url, "apiKey": "NONE"}}},
         "mcp": {"tool": {"url": old_url}},
+        "agent": {"reviewer": {"mode": "subagent", "model": "openrouter/reviewer-model"}},
     }
-    agent = {"name": "opencode", "env": {
-        "OPENAI_BASE_URL": old_url, "ANTHROPIC_BASE_URL": old_url,
-        "HOSTED_VLLM_API_BASE": old_url, "DOCS_URL": old_url,
-        "OPENCODE_CONFIG_CONTENT": json.dumps(opencode),
-    }}
+    agent = {
+        "name": "opencode",
+        "env": {
+            "OPENAI_BASE_URL": old_url,
+            "ANTHROPIC_BASE_URL": old_url,
+            "HOSTED_VLLM_API_BASE": old_url,
+            "DOCS_URL": old_url,
+            "OPENCODE_CONFIG_CONTENT": json.dumps(opencode),
+        },
+        "kwargs": {"opencode_config": json.loads(json.dumps(opencode))},
+    }
     environment = {"kwargs": {"persistent_env": {"HARBOR_PARENT": "old", "KEEP": "yes"}}}
     trial = {"agent": agent, "environment": environment}
     result = {"config": trial, "agent_result": {"url": old_url, "score": 1}}
@@ -107,12 +114,45 @@ def test_transport_changes_update_all_metadata_but_not_artifacts(tmp_path, new_u
         assert embedded["provider"]["vllm"]["options"] == {"baseURL": api_url, "apiKey": "NONE"}
         assert embedded["mcp"]["tool"]["url"] == old_url
         assert embedded["$schema"] == opencode["$schema"]
+        agent_config = config["agent"] if "agent" in config else config["agents"][0]
+        assert agent_config["kwargs"]["opencode_config"]["provider"]["vllm"][
+            "options"
+        ]["baseURL"] == api_url
+        assert (
+            agent_config["kwargs"]["opencode_config"]["agent"]["reviewer"]["model"]
+            == "openrouter/reviewer-model"
+        )
     assert loaded[task / "result.json"]["agent_result"] == result["agent_result"]
     assert artifact.read_bytes() == original_artifact
     first = {path: path.read_bytes() for path in documents}
     update_parent(tmp_path, "new-parent")
     update_endpoint(tmp_path, new_url)
     assert {path: path.read_bytes() for path in documents} == first
+
+
+def test_endpoint_update_without_subagents_updates_embedded_config(tmp_path):
+    old_url = "http://198.51.100.10:8000/v1"
+    agent = {
+        "name": "opencode",
+        "env": {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(
+                {"provider": {"vllm": {"options": {"baseURL": old_url}}}}
+            )
+        },
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps({"agents": [agent], "environment": {"type": "docker"}})
+    )
+
+    update_endpoint(tmp_path, "http://203.0.113.20:9000")
+
+    updated = json.loads((tmp_path / "config.json").read_text())
+    embedded = json.loads(
+        updated["agents"][0]["env"]["OPENCODE_CONFIG_CONTENT"]
+    )
+    assert embedded["provider"]["vllm"]["options"]["baseURL"] == (
+        "http://203.0.113.20:9000/v1"
+    )
 
 
 @pytest.mark.parametrize("name,target,filename", [

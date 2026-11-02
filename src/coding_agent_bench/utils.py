@@ -7,6 +7,25 @@ from harbor.skills import resolve_repo_source
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_STORAGE_ENDPOINT_URL = "http://harbor-storage:9000"
+SENSITIVE_ENV_KEYS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AZURE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "GITHUB_TOKEN",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "LLAMA_API_KEY",
+        "MISTRAL_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENCODE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+    }
+)
 # Keep policy explicit and small. Harbor options are otherwise forwarded
 # dynamically; add a flag name here only when CAB must prevent passthrough.
 BLOCKED_HARBOR_FLAGS: frozenset[str] = frozenset(
@@ -37,8 +56,33 @@ def storage_endpoint_url() -> str:
 
 def cmd_to_string(cmd: list[str]):
     """Format a bash command as a string."""
-    cmd_string = shlex.join(cmd)
+    cmd_string = shlex.join(redact_command_for_display(cmd))
     return cmd_string
+
+
+def _is_sensitive_key(key: str) -> bool:
+    return key in SENSITIVE_ENV_KEYS or key.lower() in {"apikey", "api_key"}
+
+
+def _redact_command_argument(argument: str) -> str:
+    if "=" not in argument:
+        return argument
+    key, value = argument.split("=", 1)
+    if _is_sensitive_key(key):
+        return f"{key}=<redacted>"
+    if key in {"OPENCODE_CONFIG_CONTENT", "opencode_config"}:
+        redacted_value = re.sub(
+            r'("apiKey"\s*:\s*")[^"]+(")',
+            r"\1<redacted>\2",
+            value,
+        )
+        return f"{key}={redacted_value}"
+    return argument
+
+
+def redact_command_for_display(cmd: list[str]) -> list[str]:
+    """Redact credential-bearing values before rendering a command."""
+    return [_redact_command_argument(argument) for argument in cmd]
 
 
 def validate_remote_skill_sources(skills: list[str] | None) -> None:

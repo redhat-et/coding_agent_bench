@@ -6,6 +6,7 @@
 **Dataset:** [{dataset}](https://hub.harborframework.com/datasets/{dataset}/latest) ({num_tasks} tasks)  
 **Model:** {model}  
 **Harness:** {harness}  
+{subagent_section}
 **Environment:** {environment}  
 **Job Name:** {job_name}  
 
