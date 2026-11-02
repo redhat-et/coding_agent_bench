@@ -184,6 +184,79 @@ Pin a tag or named branch with `@ref` (or in the full URL) when comparing
 benchmark runs. Harbor resolves the reference to a commit and records that
 commit in the job lock file for reproducibility.
 
+### Use OpenCode Subagents
+
+OpenCode custom subagents are Markdown files with YAML frontmatter. Coding Agent
+Bench requires `name`, `description`, and `mode: subagent` metadata. The Markdown
+body becomes the subagent prompt. An optional `model` can select a stronger
+reviewer model in OpenCode's `provider/model` format; if omitted, the subagent
+uses the primary model. Optional `permission` metadata is preserved.
+
+Use the repeatable `--subagent` option. Subagents are intentionally supported
+only with `--agent opencode`; other harnesses reject the option.
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-primary-model \
+    --server-url openrouter \
+    --subagent ./examples/opencode/reviewer-subagent.md
+```
+
+Edit `examples/opencode/reviewer-subagent.md` and replace
+`openrouter/REPLACE_WITH_REVIEWER_MODEL_ID` with the reviewer model you want to
+evaluate. The example uses OpenRouter for both the primary and reviewer models.
+The example is read-only: it denies edit and bash permissions and asks for
+actionable review findings. There is no silent fallback to the primary
+model. OpenCode 1.18.1 may instead report an unavailable reviewer model as a
+tool error while exiting zero, and Harbor 0.20.0 may consequently treat the
+trial as successful. Inspect OpenCode tool errors before considering such an
+experimental run valid.
+
+Escalation behavior is opt-in and separately configurable. The policy is a
+Markdown file appended to each task instruction, so different policies can be
+compared without changing the subagent definition:
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-primary-model \
+    --server-url openrouter \
+    --subagent ./examples/opencode/reviewer-subagent.md \
+    --subagent-policy ./examples/opencode/reviewer-escalation-policy.md
+```
+
+The example policy asks the primary model to request review after repeated
+failed repairs, before finalizing complex changes, or when uncertainty remains.
+It does not force a review on every task.
+
+Provider credentials follow the primary model's provider. For an OpenRouter
+primary and reviewer, set `OPENROUTER_API_KEY`. Local runs use your current
+environment. Remote OpenShift runs encode the validated definitions and policy
+into the worker command, where the worker recreates the OpenCode configuration
+before Harbor starts the task. Harbor 0.20.0 forwards credentials only for the
+primary model's provider, so a reviewer on a different provider requires a
+Harbor enhancement and is not supported by this integration.
+Generated OpenCode configuration uses environment-variable interpolation, and
+generated reports redact known credential values. Harbor's existing agent
+environment forwarding may still place the raw environment value in process
+arguments and lock artifacts, so credential isolation is not claimed beyond the
+OpenCode configuration and rendered reports.
+
+Harbor records the OpenCode version, primary model, subagent names and models,
+definition SHA-256 hashes, and escalation-policy hash in the job configuration.
+Generated reports include these details. Harbor's current OpenCode adapter does
+not collect per-subagent invocation counts or costs, so reports explicitly say
+that those metrics are unavailable rather than estimating them.
+
+OpenCode 1.18.1 reports an unavailable subagent model as a JSON tool error and
+may still exit zero; Harbor 0.20.0 raises only for top-level OpenCode error
+events. The integration test captures this behavior so there is no silent
+fallback, but making unavailable reviewer models fail the Harbor trial requires
+an upstream Harbor or OpenCode change.
+
 ## Queue Service
 
 The queue service is a FastAPI application that can be deployed on OpenShift to queue and run benchmarks automatically.

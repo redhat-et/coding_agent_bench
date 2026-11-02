@@ -22,6 +22,13 @@ from coding_agent_bench.utils import (
     validate_extra_harbor_flags,
     validate_remote_skill_sources,
 )
+from coding_agent_bench.subagents import (
+    SUBAGENT_INLINE_PREFIX,
+    SUBAGENT_POLICY_INLINE_PREFIX,
+    encode_remote_path_arguments,
+    load_subagent_definitions,
+    policy_metadata,
+)
 
 def _duplicate_option(args: list[str], parameters) -> str | None:
     """Find the first repeated non-repeatable option in raw arguments."""
@@ -160,6 +167,19 @@ def run(
             help="Path or git source (org/name[@ref], URL) for skill directories. Can be used multiple times.",
         ),
     ] = None,
+    subagents: Annotated[
+        Optional[list[Path]],
+        typer.Option(
+            "--subagent",
+            help="OpenCode subagent Markdown definition (repeatable)",
+        ),
+    ] = None,
+    subagent_policy: Annotated[
+        Optional[Path],
+        typer.Option(
+            help="Markdown policy appended to each task instruction to guide subagent use"
+        ),
+    ] = None,
     envs: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -174,6 +194,17 @@ def run(
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
+
+    try:
+        definitions = load_subagent_definitions(subagents)
+        if definitions and agent != SupportedAgent.opencode:
+            raise ValueError("Subagents are only supported with --agent opencode")
+        if subagent_policy is not None and not definitions:
+            raise ValueError("--subagent-policy requires at least one --subagent")
+        if subagent_policy is not None:
+            policy_metadata(subagent_policy)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--subagent") from exc
 
     try:
         extra_envs = parse_envs(envs)
@@ -194,6 +225,12 @@ def run(
         typer.echo("Running job on remote server...")
         job = OpenshiftJob(job_name=job_name)
         remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
+        remote_args = encode_remote_path_arguments(
+            remote_args, "--subagent", SUBAGENT_INLINE_PREFIX
+        )
+        remote_args = encode_remote_path_arguments(
+            remote_args, "--subagent-policy", SUBAGENT_POLICY_INLINE_PREFIX
+        )
         command = ["coding-agent-bench", "run", *remote_args]
         
         # Parse before script if provided
@@ -215,52 +252,64 @@ def run(
 
     else:
         builder = HarborCommandBuilder()
-        harbor_command, job_dir = builder.build(
-            agent=agent,
-            dataset=dataset,
-            model_name=model_name,
-            server_url=server_url,
-            environment=environment,
-            dataset_pattern=dataset_pattern,
-            n_concurrent=n_concurrent,
-            n_tasks=n_tasks,
-            model_max_len=model_max_len,
-            job_name=job_name,
-            agent_version=agent_version,
-            max_retries=max_retries,
-            retry_include=retry_include,
-            skills=skills,
-            extra_harbor_args=extra_harbor_args,
-        )
-        preview = ""
-        if dry_run:
-            export_lines = envs_to_export_lines(extra_envs)
-            preview = f"{export_lines}\n" if export_lines else ""
-        typer.echo(f"Job command:\n{preview}{cmd_to_string(harbor_command)}\n")
-
-        if dry_run:
-            return
-
-        proc = subprocess.Popen(harbor_command, env={**os.environ, **extra_envs})
+        materialized_policy_path = None
         try:
-            proc.wait()
-        except KeyboardInterrupt:
-            typer.echo("\nInterrupted — waiting for harbor to shut down...")
-            proc.send_signal(signal.SIGINT)
+            harbor_command, job_dir = builder.build(
+                agent=agent,
+                dataset=dataset,
+                model_name=model_name,
+                server_url=server_url,
+                environment=environment,
+                dataset_pattern=dataset_pattern,
+                n_concurrent=n_concurrent,
+                n_tasks=n_tasks,
+                model_max_len=model_max_len,
+                job_name=job_name,
+                agent_version=agent_version,
+                max_retries=max_retries,
+                retry_include=retry_include,
+                skills=skills,
+                subagents=subagents,
+                subagent_policy=subagent_policy,
+                extra_harbor_args=extra_harbor_args,
+            )
+            if subagent_policy is not None and str(subagent_policy).startswith(
+                SUBAGENT_POLICY_INLINE_PREFIX
+            ):
+                policy_flag_index = harbor_command.index("--extra-instruction-path") + 1
+                materialized_policy_path = Path(harbor_command[policy_flag_index])
+            preview = ""
+            if dry_run:
+                export_lines = envs_to_export_lines(extra_envs)
+                preview = f"{export_lines}\n" if export_lines else ""
+            typer.echo(f"Job command:\n{preview}{cmd_to_string(harbor_command)}\n")
+
+            if dry_run:
+                return
+
+            proc = subprocess.Popen(harbor_command, env={**os.environ, **extra_envs})
             try:
-                proc.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                typer.echo("Harbor did not exit in time, terminating...")
-                proc.terminate()
+                proc.wait()
+            except KeyboardInterrupt:
+                typer.echo("\nInterrupted — waiting for harbor to shut down...")
+                proc.send_signal(signal.SIGINT)
                 try:
-                    proc.wait(timeout=10)
+                    proc.wait(timeout=60)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-            raise SystemExit(130)
-        typer.echo(f"Job output dir: {job_dir}")
-        # The pod's logging/upload wrapper must observe Harbor's failure status.
-        raise typer.Exit(proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
+                    typer.echo("Harbor did not exit in time, terminating...")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                raise SystemExit(130)
+            typer.echo(f"Job output dir: {job_dir}")
+            # The pod's logging/upload wrapper must observe Harbor's failure status.
+            raise typer.Exit(proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
+        finally:
+            if materialized_policy_path is not None:
+                materialized_policy_path.unlink(missing_ok=True)
 
 
 @app.command()

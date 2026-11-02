@@ -10,6 +10,11 @@ from coding_agent_bench.providers import (
     is_openrouter,
     resolve_provider,
 )
+from coding_agent_bench.subagents import (
+    load_subagent_definitions,
+    policy_metadata,
+    subagents_to_opencode_config,
+)
 
 
 def _restored_agent_mount(
@@ -180,10 +185,32 @@ class OpenCodeAgentConfig(AgentConfig):
             },
         }
 
+        subagents = load_subagent_definitions(kwargs.get("subagents"))
+        agent_kwargs = None
+        if subagents:
+            opencode_config["agent"] = subagents_to_opencode_config(subagents)
+            metadata = {
+                "definitions": [
+                    definition.to_metadata() for definition in subagents
+                ]
+            }
+            if kwargs.get("subagent_policy") is not None:
+                metadata["escalation_policy"] = policy_metadata(
+                    kwargs["subagent_policy"]
+                )
+            agent_kwargs = {
+                "opencode_config": opencode_config,
+                "subagent_metadata": metadata,
+            }
+
         agent_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
         }
-        return AgentConfigResult(model=model, agent_env=agent_env)
+        if is_openrouter(server_url) and api_key:
+            agent_env[OPENROUTER_API_KEY_ENV] = api_key
+        return AgentConfigResult(
+            model=model, agent_env=agent_env, agent_kwargs=agent_kwargs
+        )
 
 
 class OpenHandsSdkAgentConfig(AgentConfig):
