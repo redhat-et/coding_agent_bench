@@ -30,6 +30,7 @@ from coding_agent_bench.subagents import (
     load_subagent_definitions,
     load_subagent_providers,
     policy_metadata,
+    validate_subagent_configuration,
 )
 
 def _duplicate_option(args: list[str], parameters) -> str | None:
@@ -215,22 +216,7 @@ def run(
             )
         if subagent_policy is not None:
             policy_metadata(subagent_policy)
-        referenced_providers = {
-            definition.model.split("/", 1)[0]
-            for definition in definitions
-            if definition.model is not None
-        }
-        configured_providers = {provider.name for provider in providers}
-        if referenced_providers - {"vllm"} - configured_providers:
-            raise ValueError(
-                "OpenCode subagent model providers are not configured: "
-                + ", ".join(sorted(referenced_providers - {"vllm"} - configured_providers))
-            )
-        if configured_providers - referenced_providers:
-            raise ValueError(
-                "OpenCode subagent providers are not referenced by a subagent: "
-                + ", ".join(sorted(configured_providers - referenced_providers))
-            )
+        validate_subagent_configuration(definitions, providers, model_name)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--subagent") from exc
 

@@ -37,7 +37,7 @@ def _command_requires_openrouter(command: list[str]) -> bool:
         else:
             continue
         if any(
-            provider.network_host() == "openrouter.ai"
+            "OPENROUTER_API_KEY" in provider.required_api_key_envs()
             for provider in load_subagent_providers([source])
         ):
             return True

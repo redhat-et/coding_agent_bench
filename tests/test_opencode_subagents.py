@@ -50,7 +50,7 @@ def write_subagent(path: Path, name: str = "reviewer", mode: str = "subagent") -
 name: {name}
 description: Review code without editing it
 mode: {mode}
-model: vllm/example-reviewer
+model: vllm/primary-model
 permission:
   edit: deny
   bash: deny
@@ -67,7 +67,7 @@ def test_valid_opencode_subagent_definition(tmp_path):
 
     assert definition.name == "reviewer"
     assert definition.mode == "subagent"
-    assert definition.model == "vllm/example-reviewer"
+    assert definition.model == "vllm/primary-model"
     assert definition.prompt == "Review the implementation and report findings.\n"
     assert definition.metadata["permission"] == {"edit": "deny", "bash": "deny"}
     assert definition.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
@@ -175,8 +175,8 @@ def test_multiple_subagents_preserve_models_and_instructions(tmp_path, monkeypat
     second = write_subagent(tmp_path / "debugger.md", name="debugger")
     second.write_text(
         second.read_text().replace(
-            "vllm/example-reviewer",
-            "vllm/example-debugger",
+            "vllm/primary-model",
+            "vllm/primary-model",
         )
     )
 
@@ -190,8 +190,8 @@ def test_multiple_subagents_preserve_models_and_instructions(tmp_path, monkeypat
     config = result.agent_kwargs["opencode_config"]
     metadata = result.agent_kwargs["subagent_metadata"]
 
-    assert config["agent"]["reviewer"]["model"] == "vllm/example-reviewer"
-    assert config["agent"]["debugger"]["model"] == "vllm/example-debugger"
+    assert config["agent"]["reviewer"]["model"] == "vllm/primary-model"
+    assert config["agent"]["debugger"]["model"] == "vllm/primary-model"
     assert config["agent"]["reviewer"]["prompt"] == (
         "Review the implementation and report findings.\n"
     )
@@ -229,7 +229,7 @@ def test_local_command_generation_with_subagent_policy(tmp_path, monkeypatch):
     )
     assert json.loads(opencode_argument.removeprefix("opencode_config="))["agent"][
         "reviewer"
-    ]["model"] == "vllm/example-reviewer"
+    ]["model"] == "vllm/primary-model"
 
 
 def test_remote_opencode_subagents_are_encoded_and_shell_safe(tmp_path):
@@ -260,7 +260,7 @@ def test_remote_opencode_subagents_are_encoded_and_shell_safe(tmp_path):
 
 
 def test_remote_policy_metadata_stays_reproducible(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     arguments = encode_remote_path_arguments(
         ["--subagent", str(EXAMPLE_SUBAGENT)], "--subagent", SUBAGENT_INLINE_PREFIX
     )
@@ -312,7 +312,7 @@ def test_remote_policy_temp_file_is_cleaned_after_local_execution(
         captured_policy = policy_path.read_text()
         return FakeProcess()
 
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setattr("coding_agent_bench.cli.subprocess.Popen", fake_popen)
     result = CliRunner(env={"COLUMNS": "240"}).invoke(
         app,
@@ -361,7 +361,7 @@ def test_remote_policy_temp_file_is_cleaned_after_dry_run(monkeypatch):
         captured_command = command
         return ""
 
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setattr("coding_agent_bench.cli.cmd_to_string", fake_cmd_to_string)
     result = CliRunner(env={"COLUMNS": "240"}).invoke(
         app,
@@ -410,7 +410,7 @@ def test_remote_policy_temp_file_is_cleaned_when_process_launch_fails(monkeypatc
         captured_command = command
         raise RuntimeError("launch failed")
 
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     monkeypatch.setattr("coding_agent_bench.cli.subprocess.Popen", fake_popen)
     result = CliRunner(env={"COLUMNS": "240"}).invoke(
         app,
@@ -443,6 +443,7 @@ def test_remote_policy_temp_file_is_cleaned_when_process_launch_fails(monkeypatc
 def test_remote_policy_temp_file_is_cleaned_when_command_construction_fails(
     monkeypatch,
 ):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     inline_policy = (
         SUBAGENT_POLICY_INLINE_PREFIX
         + base64.b64encode(EXAMPLE_POLICY.read_bytes()).decode()
@@ -606,7 +607,7 @@ def test_harbor_writes_subagents_to_opencode_config_path(tmp_path):
 
 
 def test_report_records_subagent_reproducibility_metadata(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     result = OpenCodeAgentConfig().configure(
         model_name="primary-model",
         server_url="http://vllm:8000",

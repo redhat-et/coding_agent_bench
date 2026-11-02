@@ -358,7 +358,10 @@ def _redact_json_text(text: str) -> str:
 
 
 def _redact_report_text(text: str) -> str:
-    sensitive_keys = "|".join(re.escape(key) for key in SENSITIVE_ENV_KEYS)
+    sensitive_keys = "|".join(
+        re.escape(key)
+        for key in SENSITIVE_ENV_KEYS | {"Authorization", "X-API-Key"}
+    )
     return re.sub(
         rf'("(?:apiKey|{sensitive_keys})"\s*:\s*")[^"]+(")',
         r"\1<redacted>\2",

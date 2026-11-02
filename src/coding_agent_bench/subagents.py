@@ -20,16 +20,21 @@ SUBAGENT_PROVIDER_INLINE_PREFIX = "opencode-subagent-provider:"
 MAX_SUBAGENT_PAYLOAD_BYTES = 1024 * 1024
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.:-]+)+$")
-_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.:@-]+$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.:@-]+(?:/[A-Za-z0-9_.:@-]+)*$")
 _ENV_INTERPOLATION_RE = re.compile(r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$")
+SENSITIVE_PROVIDER_FIELD_RE = re.compile(
+    r"(?:api[_-]?key|authorization|token|secret|password)", re.IGNORECASE
+)
 ALLOWED_PROVIDER_API_KEY_ENVS = frozenset(
     {
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "AZURE_API_KEY",
         "DEEPSEEK_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "GROQ_API_KEY",
+        "LLAMA_API_KEY",
         "MISTRAL_API_KEY",
         "OPENAI_API_KEY",
         "OPENCODE_API_KEY",
@@ -99,6 +104,9 @@ class SubagentProviderDefinition:
             return None
         return validate_provider_endpoint(endpoint).hostname
 
+    def required_api_key_envs(self) -> frozenset[str]:
+        return _required_provider_envs(self.config.get("options"))
+
 
 def _decode_inline(value: str, prefix: str) -> bytes:
     if not value.startswith(prefix):
@@ -128,6 +136,10 @@ def validate_provider_endpoint(endpoint: str):
     parsed = urlsplit(endpoint)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError("OpenCode provider endpoint must be an HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("OpenCode provider endpoint must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("OpenCode provider endpoint must not contain a query or fragment")
     if "*" in unquote(parsed.hostname) or "*" in unquote(parsed.path):
         raise ValueError("OpenCode provider endpoint must not contain wildcards")
     try:
@@ -137,6 +149,37 @@ def validate_provider_endpoint(endpoint: str):
     if port == 0:
         raise ValueError("OpenCode provider endpoint port must be between 1 and 65535")
     return parsed
+
+
+def _required_provider_envs(value: Any) -> frozenset[str]:
+    """Return credential environment variables referenced by provider options."""
+    required: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if SENSITIVE_PROVIDER_FIELD_RE.search(str(key)):
+                if not isinstance(item, str):
+                    raise ValueError(
+                        f"OpenCode provider credential field {key!r} must be a string"
+                    )
+                match = _ENV_INTERPOLATION_RE.fullmatch(item)
+                if match is None:
+                    raise ValueError(
+                        f"OpenCode provider credential field {key!r} must use "
+                        "{{env:VARIABLE_NAME}} without a literal secret"
+                    )
+                variable = match.group(1)
+                if variable not in ALLOWED_PROVIDER_API_KEY_ENVS:
+                    raise ValueError(
+                        f"OpenCode provider credential field {key!r} references "
+                        "an unsupported credential environment variable"
+                    )
+                required.add(variable)
+            else:
+                required.update(_required_provider_envs(item))
+    elif isinstance(value, list):
+        for item in value:
+            required.update(_required_provider_envs(item))
+    return frozenset(required)
 
 
 def _decode_payload(payload: bytes) -> str:
@@ -292,20 +335,7 @@ def validate_subagent_provider_document(
             else:
                 normalized = options["baseURL"].rstrip("/") + "/v1"
             options["baseURL"] = normalized
-        if "apiKey" in options and (
-            not isinstance(options["apiKey"], str)
-            or _ENV_INTERPOLATION_RE.fullmatch(options["apiKey"]) is None
-        ):
-            raise ValueError(
-                f"OpenCode provider {name!r} apiKey must use {{env:VARIABLE_NAME}}"
-            )
-        if "apiKey" in options:
-            match = _ENV_INTERPOLATION_RE.fullmatch(options["apiKey"])
-            if match is None or match.group(1) not in ALLOWED_PROVIDER_API_KEY_ENVS:
-                raise ValueError(
-                    f"OpenCode provider {name!r} apiKey references an unsupported "
-                    "credential environment variable"
-                )
+        _required_provider_envs(options)
         models = config.get("models")
         if not isinstance(models, dict) or not models:
             raise ValueError(
@@ -346,6 +376,57 @@ def validate_subagent_provider_document(
     if not definitions:
         raise ValueError("OpenCode subagent provider document must define a provider")
     return definitions
+
+
+def validate_subagent_configuration(
+    definitions: list[SubagentDefinition],
+    providers: list[SubagentProviderDefinition],
+    primary_model_name: str,
+) -> None:
+    """Validate the complete OpenCode agent/provider/model graph."""
+    if not definitions:
+        if providers:
+            raise ValueError("OpenCode subagent providers require a subagent")
+        return
+    if not isinstance(primary_model_name, str) or not primary_model_name.strip():
+        raise ValueError("OpenCode subagent validation requires a primary model")
+
+    referenced_providers = {
+        definition.model.split("/", 1)[0]
+        for definition in definitions
+        if definition.model is not None
+    }
+    configured_providers = {provider.name for provider in providers}
+    if referenced_providers - {"vllm"} - configured_providers:
+        raise ValueError(
+            "OpenCode subagent model providers are not configured: "
+            + ", ".join(sorted(referenced_providers - {"vllm"} - configured_providers))
+        )
+    if configured_providers - referenced_providers:
+        raise ValueError(
+            "OpenCode subagent providers are not referenced by a subagent: "
+            + ", ".join(sorted(configured_providers - referenced_providers))
+        )
+
+    providers_by_name = {provider.name: provider for provider in providers}
+    for definition in definitions:
+        if definition.model is None:
+            continue
+        provider_name, model_id = definition.model.split("/", 1)
+        if provider_name == "vllm":
+            if model_id != primary_model_name:
+                raise ValueError(
+                    f"OpenCode primary provider does not define subagent model "
+                    f"{model_id!r}"
+                )
+            continue
+        provider = providers_by_name[provider_name]
+        model_ids = set((provider.config.get("models") or {}).keys())
+        if model_id not in model_ids:
+            raise ValueError(
+                f"OpenCode provider {provider_name!r} does not define subagent "
+                f"model {model_id!r}"
+            )
 
 
 def load_subagent_providers(
@@ -419,11 +500,13 @@ def policy_metadata(source: str | Path) -> dict[str, str]:
             raise ValueError(f"OpenCode subagent policy file not found: {path}")
         payload = path.read_bytes()
         source_reference = str(path.resolve())
-    _decode_payload(payload)
+    policy = _decode_payload(payload)
     if len(payload) > MAX_SUBAGENT_PAYLOAD_BYTES:
         raise ValueError(
             f"OpenCode subagent policy exceeds {MAX_SUBAGENT_PAYLOAD_BYTES} bytes"
         )
+    if not policy.strip():
+        raise ValueError("OpenCode subagent policy must not be empty")
     return {
         "source": source_reference,
         "sha256": hashlib.sha256(payload).hexdigest(),

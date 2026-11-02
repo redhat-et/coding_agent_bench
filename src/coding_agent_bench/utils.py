@@ -10,6 +10,7 @@ DEFAULT_STORAGE_ENDPOINT_URL = "http://harbor-storage:9000"
 SENSITIVE_ENV_KEYS = frozenset(
     {
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AZURE_API_KEY",
@@ -26,6 +27,11 @@ SENSITIVE_ENV_KEYS = frozenset(
         "XAI_API_KEY",
     }
 )
+SENSITIVE_JSON_KEYS = SENSITIVE_ENV_KEYS | {
+    "apiKey",
+    "Authorization",
+    "X-API-Key",
+}
 # Keep policy explicit and small. Harbor options are otherwise forwarded
 # dynamically; add a flag name here only when CAB must prevent passthrough.
 BLOCKED_HARBOR_FLAGS: frozenset[str] = frozenset(
@@ -71,8 +77,11 @@ def _redact_command_argument(argument: str) -> str:
     if _is_sensitive_key(key):
         return f"{key}=<redacted>"
     if key in {"OPENCODE_CONFIG_CONTENT", "opencode_config"}:
+        sensitive_keys = "|".join(
+            re.escape(key) for key in sorted(SENSITIVE_JSON_KEYS, key=str.lower)
+        )
         redacted_value = re.sub(
-            r'("apiKey"\s*:\s*")[^"]+(")',
+            rf'("(?:{sensitive_keys})"\s*:\s*")[^"]+(")',
             r"\1<redacted>\2",
             value,
         )

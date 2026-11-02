@@ -20,6 +20,7 @@ from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONF
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import (
     parse_extra_harbor_lines,
+    redact_command_for_display,
     validate_extra_harbor_flags,
     validate_remote_skill_sources,
 )
@@ -37,6 +38,7 @@ from coding_agent_bench.subagents import (
     load_subagent_definitions,
     load_subagent_providers,
     policy_metadata,
+    validate_subagent_configuration,
 )
 
 import getpass
@@ -531,32 +533,7 @@ class CreateJobRequest(BaseModel):
         providers = load_subagent_providers(self.subagent_providers)
         if self.subagent_policy is not None:
             policy_metadata(inline_policy_argument(self.subagent_policy))
-        referenced = {
-            definition.model.split("/", 1)[0]
-            for definition in definitions
-            if definition.model is not None
-        }
-        configured = {provider.name for provider in providers}
-        if referenced - {"vllm"} - configured:
-            raise ValueError(
-                "OpenCode subagent model providers are not configured: "
-                + ", ".join(sorted(referenced - {"vllm"} - configured))
-            )
-        if configured - referenced:
-            raise ValueError(
-                "OpenCode subagent providers are not referenced by a subagent: "
-                + ", ".join(sorted(configured - referenced))
-            )
-        for provider in providers:
-            model_ids = set((provider.config.get("models") or {}).keys())
-            for definition in definitions:
-                if definition.model and definition.model.startswith(provider.name + "/"):
-                    model_id = definition.model.split("/", 1)[1]
-                    if model_id not in model_ids:
-                        raise ValueError(
-                            f"OpenCode provider {provider.name!r} does not define "
-                            f"subagent model {model_id!r}"
-                        )
+        validate_subagent_configuration(definitions, providers, self.model_name)
         return self
 
     @field_validator("extra_harbor_flags")
@@ -2219,12 +2196,25 @@ def _job_create_response(row: dict, message: str) -> CreateJobResponse:
         command = []
     if not isinstance(command, list):
         command = []
+    command = redact_command_for_display(command)
     return CreateJobResponse(
         message=message,
         job_id=row["job_id"],
         job_name=row["job_name"],
         command=command,
     )
+
+
+def _job_response(row: dict) -> JobResponse:
+    """Return job data without echoing credential-bearing command arguments."""
+    public_row = dict(row)
+    try:
+        command = json.loads(public_row["command"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        command = []
+    if isinstance(command, list):
+        public_row["command"] = json.dumps(redact_command_for_display(command))
+    return JobResponse(**public_row)
 
 
 @router.post("/jobs", response_model=CreateJobResponse)
@@ -2338,12 +2328,17 @@ async def create_job(
     _job_event.set()
 
     # Return a success response
-    return CreateJobResponse(message="Job created.", job_id=job_id, job_name=req.job_name, command=command)
+    return CreateJobResponse(
+        message="Job created.",
+        job_id=job_id,
+        job_name=req.job_name,
+        command=redact_command_for_display(command),
+    )
 
 @router.get("/jobs", response_model=list[JobResponse])
 async def get_jobs(status: JobStatus | None = None):
     """List all jobs or filter by status."""
-    return [JobResponse(**row) for row in job_store.list(status)]
+    return [_job_response(row) for row in job_store.list(status)]
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
@@ -2352,7 +2347,7 @@ async def get_job(job_id: str):
     row = job_store.get(job_id)
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JobResponse(**row)
+    return _job_response(row)
 
 
 @router.delete("/jobs/{job_id}")
