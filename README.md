@@ -184,6 +184,107 @@ Pin a tag or named branch with `@ref` (or in the full URL) when comparing
 benchmark runs. Harbor resolves the reference to a commit and records that
 commit in the job lock file for reproducibility.
 
+### Automatic leaderboard results
+
+Every job started through the queue UI/API or CAB CLI automatically saves
+`jobs/<job-name>/leaderboard-metadata.json` before Harbor starts. It contains
+the job's model identifier, harness/version, skills, and dataset identity.
+Managed Nebius jobs also record their allocated GPU type/count in
+`model.gpu_type` / `model.gpu_count`; `environment` describes where Harbor runs.
+Saved metadata using the earlier environment GPU fields is moved to `model`
+when a candidate is refreshed. Common facts
+such as harness URLs are resolved by the leaderboard's catalog.
+
+For managed Nebius servers, CAB also records `model.kv_cache_dtype` from the
+vLLM launch arguments, including hardware-specific overrides. This is KV-cache
+storage precision, separate from model weight `precision`. A configured `auto`
+stays `auto`; CAB does not infer the resolved dtype from model names or logs.
+External endpoints and unknown configurations omit this field unless explicitly
+supplied in model metadata. Export/resume preserves the saved value; historical
+results are not backfilled from today's serving configuration.
+
+Dataset names are generic:
+
+- Harbor Hub: the submitted dataset name, for example `owner/dataset`; a
+  requested `@ref` such as `@v2` is kept in `benchmark.version`.
+- GitHub: `owner/repository/subdirectory`. The repository URL, selected
+  directory, requested ref, and resolved commit SHA are kept separately in
+  `benchmark.dataset_source`.
+
+After **any exit**, including failure, pause, or stop, an available Harbor
+`result.json` is combined with that metadata to create
+`jobs/<job-name>/leaderboard-result.json`. No custom metadata is required.
+The file contains:
+
+- `benchmark`, `model`, `harness`, `configuration`, and `environment`: job facts,
+  including Harbor's resolved dataset hash and task filters.
+- `metrics`: recorded score, completed trial count, errors, tokens, costs, and
+  available timings. Unknown values are null, not fabricated zeros.
+- `run`: status, exit code, timestamps, selected total and completed trial counts,
+  and whether the run completed.
+
+The selected total is not a claim about the full public benchmark's size.
+Partial runs still get a snapshot. A resume restores the metadata and refreshes
+**the same result file** from the latest Harbor artifacts before upload, whether
+the resume completes or stops again. If Harbor never writes `result.json`, there
+is no result to export. Abrupt pod loss cannot upload files from a lost volume.
+
+Optional `--leaderboard-metadata` / queue `leaderboard_metadata` overrides can
+provide a display label, precision, or known external GPU details. Publication
+remains manual. The CLI uses the same exporter as the queue's pre-upload hook.
+
+### Export from downloaded artifacts
+
+The manual command uses the same result builder as the queue, including partial
+runs. It reads the job's saved metadata automatically; overrides are optional.
+
+```sh
+uv run python scripts/calculate_metrics.py jobs/my-harbor-job \
+  --leaderboard-output candidates/leaderboard-result.json
+```
+
+Running it again refreshes the output atomically. Each export describes exactly
+one Harbor job; separate submissions are never averaged together, even when
+their inputs match. A paused/resumed continuation updates the same Harbor job
+and refreshes its existing result file.
+`--num-gpus` explicitly requests the existing GPU cost estimate and marks it in
+`run.cost_estimated`; otherwise recorded costs (or null) are retained.
+
+The existing Markdown reporting workflow is also available:
+
+```sh
+uv run python scripts/calculate_metrics.py jobs/my-harbor-job --report
+uv run python scripts/calculate_metrics.py jobs/run-1 jobs/run-2 --report
+```
+
+`--report` writes to `benchmarks/` using `scripts/templates/report_template.md`.
+Multiple compatible runs are averaged only for this reporting/metrics command;
+`--leaderboard-output` always accepts exactly one job and never averages submissions.
+
+`benchmark.name` is the readable label, without requested `@latest`, tag, or commit
+suffixes by default. Requested refs and resolved revisions remain in the version,
+source provenance, and environment configuration fields. `benchmark.id` is derived from the source,
+resolved Hub hash/GitHub commit, directory, and Harbor's resolved set of
+canonical selected task names. Equivalent filters that select the same tasks
+share an identity; a different selected task set does not. Display labels,
+requested aliases, and observed result counts do not replace the pinned source
+identity. Exports require task names from a usable `lock.json` and a known
+dataset source; incomplete artifacts without these do not produce a candidate snapshot.
+
+CAB uses the supplied dataset name without benchmark-specific renaming or URL
+lookup. Task subsets keep that name and are distinguished by their hash and
+recorded selection. Optional benchmark metadata can supply a display name or URL.
+
+Timing follows Harbor's serialized phase data: an explicit null agent phase
+means it never started and contributes zero. An absent field, incomplete
+timestamp pair, or negative duration stays null. Multi-step agent timings are
+summed per step; totals and averages remain null if any required timing is unknown.
+Queued trials cancelled before starting contribute zero execution time.
+
+Publication remains manual: review the snapshot and copy it into the leaderboard
+repository when ready. Direct standalone `harbor jobs resume` can use the manual
+command above to refresh its snapshot afterward.
+
 ## Queue Service
 
 The queue service is a FastAPI application that can be deployed on OpenShift to queue and run benchmarks automatically.

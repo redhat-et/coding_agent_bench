@@ -9,6 +9,7 @@ import shlex
 import tempfile
 
 from coding_agent_bench.models import (
+    ModelConfig,
     get_model_config,
     Qwen_Qwen3_8_27B,
     Qwen_Qwen3_8_27B_FP8,
@@ -37,6 +38,8 @@ class ResourceConfig(ABC):
     """Platform ID."""
     preset: str
     """Hardware preset."""
+    gpu_type: str
+    """GPU model used by this resource configuration."""
     tensor_parallel_size: int
     """Tensor parallel size on this hardware (= num GPUs)."""
     is_preemptible: bool
@@ -53,6 +56,7 @@ class B200(ResourceConfig):
     name = "b200"
     platform = "gpu-b200-sxm"
     preset = "1gpu-20vcpu-224gb"
+    gpu_type = "B200"
     tensor_parallel_size = 1
     is_preemptible = True
     model_concurrency = {
@@ -75,6 +79,7 @@ class B200x8(ResourceConfig):
     name = "b200x8"
     platform = "gpu-b200-sxm"
     preset = "8gpu-160vcpu-1792gb"
+    gpu_type = "B200"
     tensor_parallel_size = 8
     is_preemptible = True
     model_extra_args = {
@@ -97,6 +102,7 @@ class H200(ResourceConfig):
     name = "h200"
     platform = "gpu-h200-sxm"
     preset = "1gpu-16vcpu-200gb"
+    gpu_type = "H200"
     tensor_parallel_size = 1
     is_preemptible = True
     
@@ -105,6 +111,7 @@ class H200x8(ResourceConfig):
     name = "h200x8"
     platform = "gpu-h200-sxm"
     preset = "8gpu-128vcpu-1600gb"
+    gpu_type = "H200"
     tensor_parallel_size = 8
     is_preemptible = True
     model_concurrency = {
@@ -126,6 +133,28 @@ RESOURCE_CONFIGS: list[ResourceConfig] = [
 
 RESOURCE_CONFIG_REGISTRY: dict[str, ResourceConfig] = {c.name: c for c in RESOURCE_CONFIGS}
 RESOURCE_CONFIG_HARDWARE_REGISTRY: dict[tuple[str, str], ResourceConfig] = {(c.platform, c.preset): c for c in RESOURCE_CONFIGS}
+
+
+def get_vllm_args(model_config: ModelConfig, resource_config: type[ResourceConfig]) -> list[str]:
+    """Build the managed server arguments in their launch-time precedence order."""
+    return [
+        *model_config.args,
+        *model_config.default_args,
+        "--tensor-parallel-size", str(resource_config.tensor_parallel_size),
+        *resource_config.model_extra_args.get(model_config.name, []),
+    ]
+
+
+def get_kv_cache_dtype(args: list[str]) -> str | None:
+    """Read the configured cache dtype, not a runtime resolution of 'auto'."""
+    value = None
+    for index, argument in enumerate(args):
+        if argument.startswith("--kv-cache-dtype="):
+            value = argument.partition("=")[2] or None
+        elif argument == "--kv-cache-dtype":
+            value = args[index + 1] if index + 1 < len(args) and not args[index + 1].startswith("-") else None
+    return value
+
 
 def get_model_max_concurrency(gpu_config: str, model_name: str) -> int:
     """Get the maximum concurrency for a model on an instance."""
@@ -562,10 +591,6 @@ class NebiusInstanceManager:
         if resource_config is None:
             raise ValueError(f"Instance does not match any configured resource spec - {platform} - {preset}")
 
-        # Add extra arguments from the resource
-        resource_extra_args = ["--tensor-parallel-size", str(resource_config.tensor_parallel_size)]
-        resource_extra_args += resource_config.model_extra_args.get(model_config.name, [])
-
         # Build the vLLM command — HF_TOKEN is exported on the remote shell
         # so it never appears in command args, logs, or `docker inspect`.
         docker_cmd = [
@@ -579,8 +604,7 @@ class NebiusInstanceManager:
             "--ipc=host",
         ]
         docker_cmd += [model_config.image]
-        docker_cmd += model_config.args + model_config.default_args
-        docker_cmd += resource_extra_args
+        docker_cmd += get_vllm_args(model_config, resource_config)
 
         hf_token = os.environ.get("HF_TOKEN", "")
         shell_command = f"export HF_TOKEN={shlex.quote(hf_token)} && {shlex.join(docker_cmd)}"
