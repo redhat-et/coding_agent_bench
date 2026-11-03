@@ -1,11 +1,17 @@
 from pathlib import Path
 import json
 import argparse
+import re
 from pydantic import BaseModel, computed_field, model_validator
 from datetime import datetime
 import shlex
 
 from coding_agent_bench.models import MODEL_REGISTRY
+from coding_agent_bench.utils import (
+    SENSITIVE_ENV_KEYS,
+    _is_sensitive_key,
+    redact_command_for_display,
+)
 
 DEFAULT_GPU_COST_USD_PER_HOUR = 4
 
@@ -315,6 +321,7 @@ def average_metrics(metrics_list: list[Metrics], concurrencies: list[int] | None
 
 def prettify_command(args: list[str]):
     """Prettify a shell command with line breaks for easier reading."""
+    args = redact_command_for_display(args)
     lines = []
     i = 0
 
@@ -329,6 +336,37 @@ def prettify_command(args: list[str]):
 
     pretty_command = " \\\n  ".join(lines)
     return pretty_command
+
+
+def _redact_sensitive_json(value):
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if _is_sensitive_key(str(key)) else _redact_sensitive_json(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_json(item) for item in value]
+    return value
+
+
+def _redact_json_text(text: str) -> str:
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    return json.dumps(_redact_sensitive_json(document), indent=4)
+
+
+def _redact_report_text(text: str) -> str:
+    sensitive_keys = "|".join(
+        re.escape(key)
+        for key in SENSITIVE_ENV_KEYS | {"Authorization", "X-API-Key"}
+    )
+    return re.sub(
+        rf'("(?:apiKey|{sensitive_keys})"\s*:\s*")[^"]+(")',
+        r"\1<redacted>\2",
+        text,
+    )
 
 def _reward_outcome_counts(result_dict: dict) -> tuple[int, int, int] | None:
     """(full, partial, zero) reward counts from a run's reward distribution.
@@ -406,6 +444,7 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
     model = (agent_config.get("model_name") or (agent_config.get("env") or {}).get("ANTHROPIC_MODEL") or "<TODO>").replace("vllm/", "")
     harness = agent_config["name"]
     job_name = ", ".join(c["job_name"] for c in run_configs)
+    subagent_section = _subagent_report_section(agent_config, n_runs)
 
     # Results heading (marked as averaged when multiple runs)
     results_suffix = f" (avg of {n_runs} runs)" if n_runs > 1 else ""
@@ -475,8 +514,8 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
     # Build config/result sections: identical to the old single-run layout for 1 run,
     # labeled "Run N" subsections (ordered by start time) for multiple runs
     if n_runs == 1:
-        config_section = f"**`config.json`:**\n\n```json\n{config_json}\n```"
-        result_section = f"```json\n{result_json}\n```"
+        config_section = f"**`config.json`:**\n\n```json\n{_redact_json_text(config_json)}\n```"
+        result_section = f"```json\n{_redact_json_text(result_json)}\n```"
     else:
         config_section = "\n\n".join(
             f"### Run {i + 1}: {run_configs[i]['job_name']}\n\n**`config.json`:**\n\n```json\n{(d / 'config.json').read_text()}\n```"
@@ -487,6 +526,9 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
             for i, d in enumerate(job_dirs)
         )
     
+    config_section = _redact_report_text(config_section)
+    result_section = _redact_report_text(result_section)
+
     # Create report
     report = report_template.format(
         run_date=run_date,
@@ -495,6 +537,7 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
         environment=environment,
         model=model,
         harness=harness,
+        subagent_section=subagent_section,
         job_name=job_name,
         score=round(metrics.score*100, 1),
         score_string=score_string,
@@ -529,14 +572,77 @@ def create_job_report(job_dirs: list[Path], metrics: Metrics, num_gpus: int = No
     return report
 
 
+def _subagent_report_section(agent_config: dict, n_runs: int = 1) -> str:
+    kwargs = agent_config.get("kwargs") or {}
+    metadata = kwargs.get("subagent_metadata")
+    if not metadata:
+        return ""
+
+    lines = ["", "## Subagents", f"**Harness Version:** {kwargs.get('version', 'unknown')}"]
+    if n_runs > 1:
+        lines.append(f"**Aggregated Runs:** {n_runs}")
+    for definition in metadata.get("definitions", []):
+        model = definition.get("model") or "primary model"
+        lines.append(
+            f"- **{definition.get('name', 'unknown')}:** {model} "
+            f"(sha256 `{definition.get('markdown_sha256', 'unknown')}`)"
+        )
+    policy = metadata.get("escalation_policy")
+    if policy:
+        lines.append(
+            f"**Escalation Policy:** sha256 `{policy.get('sha256', 'unknown')}`"
+        )
+    lines.append(
+        "**Subagent invocation and cost metrics:** not collected by Harbor's "
+        "OpenCode adapter."
+    )
+    lines.append(
+        "**Invocation status:** not validated by this report; inspect OpenCode "
+        "tool errors before interpreting multi-agent results."
+    )
+    return "\n".join(lines)
+
+
 def run_identity(job_dir: Path) -> tuple:
-    """Identity of a run for averaging compatibility: dataset, model, harness."""
+    """Identity of a run for averaging compatibility."""
     config = json.loads((job_dir / "config.json").read_text())
     agent_config = config["agents"][0]
     dataset = config["datasets"][0].get("name") or config["datasets"][0].get("path")
     model = (agent_config.get("model_name") or (agent_config.get("env") or {}).get("ANTHROPIC_MODEL") or "").replace("vllm/", "")
     harness = agent_config["name"]
-    return (dataset, model, harness)
+    kwargs = agent_config.get("kwargs") or {}
+    metadata = kwargs.get("subagent_metadata")
+    opencode_config = kwargs.get("opencode_config")
+    if isinstance(opencode_config, str):
+        opencode_config = json.loads(opencode_config)
+    if metadata is None and opencode_config is None:
+        subagent_identity = None
+    else:
+        canonical_metadata = json.loads(json.dumps(metadata or {}))
+        for definition in canonical_metadata.get("definitions", []):
+            definition.pop("source", None)
+        for provider in canonical_metadata.get("providers", []):
+            provider.pop("source", None)
+            provider.pop("sha256", None)
+        canonical_policy = canonical_metadata.get("escalation_policy")
+        if isinstance(canonical_policy, dict):
+            canonical_policy.pop("source", None)
+        canonical_config = json.loads(json.dumps(opencode_config or {}))
+        for provider in (canonical_config.get("provider") or {}).values():
+            if isinstance(provider, dict):
+                options = provider.get("options")
+                if isinstance(options, dict):
+                    options.pop("baseURL", None)
+        subagent_identity = json.dumps(
+            {
+                "version": kwargs.get("version"),
+                "metadata": canonical_metadata,
+                "opencode_config": canonical_config,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return (dataset, model, harness, subagent_identity)
 
 def main():
     args = parse_args()

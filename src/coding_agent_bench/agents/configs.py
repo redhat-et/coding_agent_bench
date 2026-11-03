@@ -10,6 +10,13 @@ from coding_agent_bench.providers import (
     is_openrouter,
     resolve_provider,
 )
+from coding_agent_bench.subagents import (
+    load_subagent_definitions,
+    load_subagent_providers,
+    policy_metadata,
+    subagents_to_opencode_config,
+    validate_subagent_configuration,
+)
 
 
 def _restored_agent_mount(
@@ -161,7 +168,7 @@ class OpenCodeAgentConfig(AgentConfig):
         output_limit = int(model_max_len * 0.25)
         options = {"baseURL": base_url.rstrip("/").removesuffix("/v1") + "/v1"}
         if api_key:
-            options["apiKey"] = api_key
+            options["apiKey"] = "{env:OPENROUTER_API_KEY}"
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model,
@@ -180,10 +187,51 @@ class OpenCodeAgentConfig(AgentConfig):
             },
         }
 
+        subagents = load_subagent_definitions(kwargs.get("subagents"))
+        providers = load_subagent_providers(kwargs.get("subagent_providers"))
+        agent_kwargs = None
         agent_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
         }
-        return AgentConfigResult(model=model, agent_env=agent_env)
+        if providers and not subagents:
+            raise ValueError("OpenCode subagent providers require a subagent")
+        if subagents:
+            validate_subagent_configuration(subagents, providers, model_name)
+            required_envs = {
+                variable
+                for provider in providers
+                for variable in provider.required_api_key_envs()
+            }
+            for provider in providers:
+                opencode_config["provider"][provider.name] = provider.config
+            for variable in sorted(required_envs):
+                value = os.environ.get(variable)
+                if not value:
+                    raise ValueError(
+                        f"OpenCode subagent provider requires {variable} to be set"
+                    )
+                agent_env[variable] = value
+            opencode_config["agent"] = subagents_to_opencode_config(subagents)
+            metadata = {
+                "definitions": [
+                    definition.to_metadata() for definition in subagents
+                ],
+                "providers": [provider.to_metadata() for provider in providers],
+            }
+            if kwargs.get("subagent_policy") is not None:
+                metadata["escalation_policy"] = policy_metadata(
+                    kwargs["subagent_policy"]
+                )
+            agent_kwargs = {
+                "opencode_config": opencode_config,
+                "subagent_metadata": metadata,
+            }
+
+        if is_openrouter(server_url) and api_key:
+            agent_env[OPENROUTER_API_KEY_ENV] = api_key
+        return AgentConfigResult(
+            model=model, agent_env=agent_env, agent_kwargs=agent_kwargs
+        )
 
 
 class OpenHandsSdkAgentConfig(AgentConfig):

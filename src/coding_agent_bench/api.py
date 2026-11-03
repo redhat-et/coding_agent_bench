@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, SecretStr, field_validator
-from typing import Optional
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from typing import Any, Optional
 
 import asyncio
 import logging
@@ -20,6 +20,7 @@ from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONF
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import (
     parse_extra_harbor_lines,
+    redact_command_for_display,
     validate_extra_harbor_flags,
     validate_remote_skill_sources,
 )
@@ -30,6 +31,15 @@ from coding_agent_bench.ui import build_submit_form_html
 from coding_agent_bench import VERSION
 from coding_agent_bench.preemption import CANCELLED_ERROR_TYPE, PAUSE_PLUGIN
 from coding_agent_bench.resume import is_resume_command, resume_options, results_job_name
+from coding_agent_bench.subagents import (
+    inline_policy_argument,
+    inline_provider_argument,
+    inline_subagent_argument,
+    load_subagent_definitions,
+    load_subagent_providers,
+    policy_metadata,
+    validate_subagent_configuration,
+)
 
 import getpass
 import json
@@ -487,6 +497,18 @@ class CreateJobRequest(BaseModel):
         default_factory=list,
         description="Public Git skill sources in org/name[@ref] or HTTP(S) URL form",
     )
+    subagents: list[str] = Field(
+        default_factory=list,
+        description="OpenCode subagent Markdown definitions",
+    )
+    subagent_policy: Optional[str] = Field(
+        None,
+        description="Markdown policy appended to each task instruction",
+    )
+    subagent_providers: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="OpenCode provider mappings used by subagents",
+    )
     extra_harbor_flags: list[str] = Field(
         default_factory=list,
         description="Extra Harbor CLI arguments, one shell-style argument fragment per line",
@@ -496,6 +518,23 @@ class CreateJobRequest(BaseModel):
         max_length=256,
         description="Stable key used to safely retry creation of the same job",
     )
+
+    @model_validator(mode="after")
+    def validate_subagents(self):
+        if not (self.subagents or self.subagent_policy or self.subagent_providers):
+            return self
+        if self.agent != SupportedAgent.opencode:
+            raise ValueError("Subagents are only supported for OpenCode")
+        if not self.subagents:
+            raise ValueError("Subagent policy and providers require a subagent")
+        definitions = load_subagent_definitions(
+            [inline_subagent_argument(markdown) for markdown in self.subagents]
+        )
+        providers = load_subagent_providers(self.subagent_providers)
+        if self.subagent_policy is not None:
+            policy_metadata(inline_policy_argument(self.subagent_policy))
+        validate_subagent_configuration(definitions, providers, self.model_name)
+        return self
 
     @field_validator("extra_harbor_flags")
     @classmethod
@@ -2125,6 +2164,12 @@ def build_cli_command(req: CreateJobRequest):
             command += ["--retry-include", exc]
     for skill in req.skills:
         command += ["--skill", skill]
+    for markdown in req.subagents:
+        command += ["--subagent", inline_subagent_argument(markdown)]
+    if req.subagent_policy is not None:
+        command += ["--subagent-policy", inline_policy_argument(req.subagent_policy)]
+    for provider in req.subagent_providers:
+        command += ["--subagent-provider", inline_provider_argument(provider)]
     if req.extra_harbor_flags:
         from coding_agent_bench.cli import get_cab_option_names
 
@@ -2151,12 +2196,25 @@ def _job_create_response(row: dict, message: str) -> CreateJobResponse:
         command = []
     if not isinstance(command, list):
         command = []
+    command = redact_command_for_display(command)
     return CreateJobResponse(
         message=message,
         job_id=row["job_id"],
         job_name=row["job_name"],
         command=command,
     )
+
+
+def _job_response(row: dict) -> JobResponse:
+    """Return job data without echoing credential-bearing command arguments."""
+    public_row = dict(row)
+    try:
+        command = json.loads(public_row["command"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        command = []
+    if isinstance(command, list):
+        public_row["command"] = json.dumps(redact_command_for_display(command))
+    return JobResponse(**public_row)
 
 
 @router.post("/jobs", response_model=CreateJobResponse)
@@ -2270,12 +2328,17 @@ async def create_job(
     _job_event.set()
 
     # Return a success response
-    return CreateJobResponse(message="Job created.", job_id=job_id, job_name=req.job_name, command=command)
+    return CreateJobResponse(
+        message="Job created.",
+        job_id=job_id,
+        job_name=req.job_name,
+        command=redact_command_for_display(command),
+    )
 
 @router.get("/jobs", response_model=list[JobResponse])
 async def get_jobs(status: JobStatus | None = None):
     """List all jobs or filter by status."""
-    return [JobResponse(**row) for row in job_store.list(status)]
+    return [_job_response(row) for row in job_store.list(status)]
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
@@ -2284,7 +2347,7 @@ async def get_job(job_id: str):
     row = job_store.get(job_id)
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JobResponse(**row)
+    return _job_response(row)
 
 
 @router.delete("/jobs/{job_id}")

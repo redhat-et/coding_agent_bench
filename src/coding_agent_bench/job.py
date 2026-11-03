@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from coding_agent_bench.github_datasets import DATASET_ROOT, GitHubDataset
 
 from coding_agent_bench.preemption import PAUSE_REQUEST_PATH
+from coding_agent_bench.subagents import load_subagent_providers
 from coding_agent_bench.utils import storage_endpoint_url
 from coding_agent_bench import VERSION
 
@@ -24,6 +25,23 @@ def _job_image() -> str:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _command_requires_openrouter(command: list[str]) -> bool:
+    """Read encoded subagent providers without exposing credentials."""
+    for index, argument in enumerate(command):
+        if argument == "--subagent-provider" and index + 1 < len(command):
+            source = command[index + 1]
+        elif argument.startswith("--subagent-provider="):
+            source = argument.split("=", 1)[1]
+        else:
+            continue
+        if any(
+            "OPENROUTER_API_KEY" in provider.required_api_key_envs()
+            for provider in load_subagent_providers([source])
+        ):
+            return True
+    return False
 
 
 def _build_logged_shell_step(command: list[str], job_dir: str) -> str:
@@ -152,6 +170,7 @@ class OpenshiftJob:
             {"name": "CAB_PAUSE_REQUEST_PATH", "value": PAUSE_REQUEST_PATH},
             {"name": "STORAGE_ENDPOINT_URL", "value": storage_endpoint_url()},
         ]
+        openrouter = openrouter or _command_requires_openrouter(command)
         if openrouter:
             env.append(
                 {

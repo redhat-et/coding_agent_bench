@@ -8,7 +8,6 @@ commented out. Safe to run multiple times (idempotent).
 
 import site
 import sys
-import textwrap
 from pathlib import Path
 
 RELATIVE_PATH = Path("harbor/agents/installed/opencode.py")

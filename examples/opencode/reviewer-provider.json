@@ -1,0 +1,19 @@
+{
+  "openrouter": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "OpenRouter reviewer",
+    "options": {
+      "baseURL": "https://openrouter.ai/api/v1",
+      "apiKey": "{env:OPENROUTER_API_KEY}"
+    },
+    "models": {
+      "REPLACE_WITH_REVIEWER_MODEL_ID": {
+        "name": "REPLACE_WITH_REVIEWER_MODEL_ID",
+        "limit": {
+          "context": 196500,
+          "output": 65500
+        }
+      }
+    }
+  }
+}

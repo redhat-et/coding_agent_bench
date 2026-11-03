@@ -184,6 +184,95 @@ Pin a tag or named branch with `@ref` (or in the full URL) when comparing
 benchmark runs. Harbor resolves the reference to a commit and records that
 commit in the job lock file for reproducibility.
 
+### Use OpenCode Subagents
+
+OpenCode custom subagents are Markdown files with YAML frontmatter. Coding Agent
+Bench requires `name`, `description`, and `mode: subagent` metadata. The Markdown
+body becomes the subagent prompt. An optional `model` can select a stronger
+reviewer model in OpenCode's `provider/model` format; if omitted, the subagent
+uses the primary model. Optional `permission` metadata is preserved.
+
+Use the repeatable `--subagent` option. Subagents are intentionally supported
+only with `--agent opencode`; other harnesses reject the option.
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-primary-model \
+    --server-url openrouter \
+    --subagent ./examples/opencode/reviewer-subagent.md
+```
+
+Edit `examples/opencode/reviewer-subagent.md` and replace
+`REPLACE_WITH_REVIEWER_MODEL_ID` with the reviewer model you want to evaluate.
+When the reviewer uses a provider other than the primary `vllm` provider, also
+pass an OpenCode provider mapping. `examples/opencode/reviewer-provider.json`
+shows an independent OpenRouter reviewer endpoint, model, and context/output
+limits:
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-primary-model \
+    --server-url http://my-primary-server:8000 \
+    --subagent ./examples/opencode/reviewer-subagent.md \
+    --subagent-provider ./examples/opencode/reviewer-provider.json
+```
+
+The example is read-only: it denies edit and bash permissions and asks for
+actionable review findings. There is no silent fallback to the primary
+model. OpenCode 1.18.1 may instead report an unavailable reviewer model as a
+tool error while exiting zero, and Harbor 0.20.0 may consequently treat the
+trial as successful. Inspect OpenCode tool errors before considering such an
+experimental run valid.
+
+Escalation behavior is opt-in and separately configurable. The policy is a
+Markdown file appended to each task instruction, so different policies can be
+compared without changing the subagent definition:
+
+```sh
+uv run coding-agent-bench run \
+    --agent opencode \
+    --dataset swe-bench/swe-bench-verified \
+    --model-name my-primary-model \
+    --server-url openrouter \
+    --subagent ./examples/opencode/reviewer-subagent.md \
+    --subagent-policy ./examples/opencode/reviewer-escalation-policy.md
+```
+
+The example policy asks the primary model to request review after repeated
+failed repairs, before finalizing complex changes, or when uncertainty remains.
+It does not force a review on every task.
+
+Provider credentials use OpenCode environment-variable interpolation. For an
+OpenRouter reviewer, set `OPENROUTER_API_KEY`; a primary local model plus an
+OpenRouter reviewer is supported, and remote OpenShift runs scope the
+OpenRouter secret to jobs that need it. Other cross-provider credentials must
+already be available in the execution environment because the initial
+integration does not add a generic per-provider secret store. Never place raw
+API keys in provider definitions.
+Generated OpenCode configuration uses environment-variable interpolation, and
+generated reports redact known credential values. Harbor's existing agent
+environment forwarding may still place the raw environment value in process
+arguments and lock artifacts, so credential isolation is not claimed beyond the
+OpenCode configuration and rendered reports.
+
+Harbor records the OpenCode version, primary model, subagent names and models,
+definition SHA-256 hashes, provider source/configuration hashes, and
+escalation-policy hash in the job configuration. Generated reports include these
+details. Endpoint-only changes are excluded from aggregation compatibility while
+remaining visible in the full configuration. Harbor's current OpenCode adapter does
+not collect per-subagent invocation counts or costs, so reports explicitly say
+that those metrics are unavailable rather than estimating them.
+
+OpenCode 1.18.1 reports an unavailable subagent model as a JSON tool error and
+may still exit zero; Harbor 0.20.0 raises only for top-level OpenCode error
+events. The integration test captures this behavior so there is no silent
+fallback, but making unavailable reviewer models fail the Harbor trial requires
+an upstream Harbor or OpenCode change.
+
 ## Queue Service
 
 The queue service is a FastAPI application that can be deployed on OpenShift to queue and run benchmarks automatically.

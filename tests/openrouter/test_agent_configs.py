@@ -48,15 +48,21 @@ def test_pi_default_placeholder(monkeypatch, tmp_path):
 
 
 def test_opencode_openrouter(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    fake_key = "sk-or-distinctive-fake-key"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
     result = OpenCodeAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter"
+        model_name="openai/gpt-4o",
+        server_url="openrouter",
+        subagents=["examples/opencode/reviewer-subagent.md"],
+        subagent_providers=["examples/opencode/reviewer-provider.json"],
     )
     cfg = json.loads(result.agent_env["OPENCODE_CONFIG_CONTENT"])
     provider = cfg["provider"]["vllm"]
     assert provider["options"]["baseURL"] == "https://openrouter.ai/api/v1"
-    assert provider["options"]["apiKey"] == "sk-or-test"
+    assert provider["options"]["apiKey"] == "{env:OPENROUTER_API_KEY}"
     assert "openai/gpt-4o" in provider["models"]
+    assert fake_key not in json.dumps(result.agent_kwargs)
+    assert fake_key not in result.agent_env["OPENCODE_CONFIG_CONTENT"]
 
 
 def test_opencode_default_no_key(monkeypatch):

@@ -257,6 +257,18 @@ async function submitJob(event) {{
             .map((skill) => skill.trim())
             .filter(Boolean);
         if (skills.length) formData.skills = skills;
+        if (formData.agent === 'opencode') {{
+            const subagentMarkdown = document.getElementById('opencode_subagent').value.trim();
+            if (subagentMarkdown) formData.subagents = [subagentMarkdown];
+
+            const subagentPolicy = document.getElementById('opencode_subagent_policy').value.trim();
+            if (subagentPolicy) formData.subagent_policy = subagentPolicy;
+
+            const providerJson = document.getElementById('opencode_subagent_provider').value.trim();
+            if (providerJson) {{
+                formData.subagent_providers = [JSON.parse(providerJson)];
+            }}
+        }}
         if (githubRepository) {{
             formData.github_dataset = {{
                 repository_url: githubRepositoryUrl,
@@ -496,6 +508,25 @@ def _build_advanced_fields_html(
                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
                       placeholder="Comma-separated Git sources, e.g. org/repo@main"></textarea>
             <small style="color: #666;">Provide Git sources separated by commas.</small>
+        </div>
+        <div style="grid-column: 1 / -1;">
+            <label for="opencode_subagent" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">OpenCode Subagent (Markdown)</label>
+            <textarea id="opencode_subagent" name="opencode_subagent" rows="6"
+                      style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
+                      placeholder="OpenCode-only. Include YAML frontmatter with name, description, and mode: subagent."></textarea>
+        </div>
+        <div style="grid-column: 1 / -1;">
+            <label for="opencode_subagent_policy" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">OpenCode Escalation Policy (Markdown)</label>
+            <textarea id="opencode_subagent_policy" name="opencode_subagent_policy" rows="4"
+                      style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
+                      placeholder="Optional guidance appended to each task instruction. Requires a subagent."></textarea>
+        </div>
+        <div style="grid-column: 1 / -1;">
+            <label for="opencode_subagent_provider" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">OpenCode Subagent Provider (JSON)</label>
+            <textarea id="opencode_subagent_provider" name="opencode_subagent_provider" rows="6"
+                      style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
+                      placeholder='OpenCode provider mapping, e.g. {"reviewer":{"npm":"...","options":{"baseURL":"https://...","apiKey":"{env:OPENROUTER_API_KEY}"},"models":{...}}}'></textarea>
+            <small style="color: #666;">Credentials must use OpenCode environment-variable interpolation, never a raw API key.</small>
         </div>
         <div style="grid-column: 1 / -1;">
             <label for="before_script" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Before Script</label>

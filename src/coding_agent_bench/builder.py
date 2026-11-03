@@ -5,6 +5,11 @@ from enum import Enum
 import os
 
 from coding_agent_bench.agents import get_agent_config
+from coding_agent_bench.subagents import (
+    SUBAGENT_POLICY_INLINE_PREFIX,
+    load_subagent_providers,
+    materialize_inline_policy,
+)
 
 
 class SupportedAgent(str, Enum):
@@ -47,6 +52,8 @@ class HarborCommandBuilder:
         max_retries: int = None,
         retry_include: list[str] = None,
         skills: list[str] = None,
+        subagent_policy: str | Path | None = None,
+        allow_agent_host: list[str] = None,
         extra_harbor_args: list[str] = None,
         **kwargs,
     ) -> list[str]:
@@ -72,6 +79,8 @@ class HarborCommandBuilder:
             args += ["-d", dataset]
         if task_include_pattern is not None:
             args += ["-i", task_include_pattern]
+        if subagent_policy is not None:
+            args += ["--extra-instruction-path", str(subagent_policy)]
 
         # Add model
         args += ["--model", model]
@@ -83,7 +92,12 @@ class HarborCommandBuilder:
         # Add agent kwargs
         if agent_kwargs is not None:
             for key, value in agent_kwargs.items():
-                args += ["--ak", f"{key}={value}"]
+                serialized_value = (
+                    json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    if not isinstance(value, str)
+                    else value
+                )
+                args += ["--ak", f"{key}={serialized_value}"]
         # Add environment
         args += ["--env", environment]
         harbor_parent = os.environ.get("HARBOR_PARENT")
@@ -99,6 +113,9 @@ class HarborCommandBuilder:
         # Add agent skills using Harbor's repeatable native flag.
         for skill in skills or []:
             args += ["--skill", skill]
+
+        for host in allow_agent_host or []:
+            args += ["--allow-agent-host", host]
 
         # Add number of concurrent tasks when explicitly requested. Omitting the
         # flag lets the Harbor/queue defaults apply.
@@ -148,6 +165,9 @@ class HarborCommandBuilder:
         max_retries: int = None,
         retry_include: list[str] = None,
         skills: list[str] = None,
+        subagents: list[str | Path] | None = None,
+        subagent_policy: str | Path | None = None,
+        subagent_providers: list[str | Path | dict] | None = None,
         extra_harbor_args: list[str] = None,
         **kwargs,
     ) -> tuple[list[str], Path]:
@@ -160,7 +180,12 @@ class HarborCommandBuilder:
         """
         if environment not in ["docker", "openshift"]:
             raise ValueError(f"Invalid environment: {environment}")
-
+        if (subagents or subagent_policy or subagent_providers) and agent != SupportedAgent.opencode:
+            raise ValueError("Subagents are only supported with --agent opencode")
+        if (subagent_policy is not None or subagent_providers) and not subagents:
+            raise ValueError(
+                "--subagent-policy and --subagent-provider require at least one --subagent"
+            )
         if model_max_len is None:
             # Keep model-specific limits in the queue's ModelConfig registry rather
             # than requiring every caller to duplicate them in its request.
@@ -170,31 +195,59 @@ class HarborCommandBuilder:
             model_max_len = model_config.model_max_len if model_config else 262000
 
         agent_config = get_agent_config(agent)
+        provider_definitions = load_subagent_providers(subagent_providers)
+        extra_allowed_hosts = list(
+            dict.fromkeys(
+                host
+                for host in (
+                    provider.network_host() for provider in provider_definitions
+                )
+                if host is not None
+            )
+        )
         result = agent_config.configure(
             model_name=model_name,
             server_url=server_url,
             model_max_len=model_max_len,
+            subagents=subagents,
+            subagent_policy=subagent_policy,
+            subagent_providers=subagent_providers,
             **kwargs,
         )
 
-        cmd = self._build_command(
-            agent=agent,
-            dataset=dataset,
-            model=result.model,
-            environment=environment,
-            mounts=result.mounts,
-            n_concurrent=n_concurrent,
-            agent_env=result.agent_env,
-            agent_kwargs=result.agent_kwargs,
-            task_include_pattern=dataset_pattern,
-            n_tasks=n_tasks,
-            job_name=job_name,
-            agent_version=agent_version,
-            max_retries=max_retries,
-            retry_include=retry_include,
-            skills=skills,
-            extra_harbor_args=extra_harbor_args,
+        effective_subagent_policy = (
+            materialize_inline_policy(subagent_policy)
+            if subagent_policy is not None
+            else None
         )
+        try:
+            cmd = self._build_command(
+                agent=agent,
+                dataset=dataset,
+                model=result.model,
+                environment=environment,
+                mounts=result.mounts,
+                n_concurrent=n_concurrent,
+                agent_env=result.agent_env,
+                agent_kwargs=result.agent_kwargs,
+                task_include_pattern=dataset_pattern,
+                n_tasks=n_tasks,
+                job_name=job_name,
+                agent_version=agent_version,
+                max_retries=max_retries,
+                retry_include=retry_include,
+                skills=skills,
+                subagent_policy=effective_subagent_policy,
+                allow_agent_host=extra_allowed_hosts,
+                extra_harbor_args=extra_harbor_args,
+            )
+        except Exception:
+            if (
+                subagent_policy is not None
+                and str(subagent_policy).startswith(SUBAGENT_POLICY_INLINE_PREFIX)
+            ):
+                effective_subagent_policy.unlink(missing_ok=True)
+            raise
 
         job_path = self.jobs_dir / job_name
         return cmd, job_path
