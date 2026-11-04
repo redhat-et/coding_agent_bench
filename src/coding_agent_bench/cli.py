@@ -109,23 +109,16 @@ def get_cab_option_names() -> set[str]:
     }
 
 
-@app.command(
-    cls=NoDuplicateOptionsCommand,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
-from coding_agent_bench.utils import cmd_to_string, envs_to_export_lines, parse_envs, validate_remote_skill_sources
-
-app = typer.Typer()
-
-
 def _redact_command(command: list[str], secret: str | None) -> list[str]:
     """Prevent a model key embedded in Harbor config arguments from being printed."""
     if not secret:
         return command
     return [argument.replace(secret, "<redacted>") for argument in command]
 
-
-@app.command()
+@app.command(
+    cls=NoDuplicateOptionsCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 def run(
     ctx: typer.Context,
     agent: Annotated[
