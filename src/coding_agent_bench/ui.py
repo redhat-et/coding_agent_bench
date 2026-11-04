@@ -105,10 +105,12 @@ function validateForm() {{
     const githubRepo = document.getElementById('github_repo').value.trim();
     const modelName = document.getElementById('model_name').value;
     const serverUrl = document.getElementById('server_url').value.trim();
+    const jobName = document.getElementById('job_name').value.trim();
 
     if (!agent) errors.push('Agent is required');
     if (!dataset && !githubRepo) errors.push('Enter a Harbor dataset or GitHub repository');
     if (githubRepo && !parseGitHubRepository(githubRepo)) errors.push('GitHub repository must be owner/repo or an HTTPS URL like https://github.com/owner/repo');
+    if (!isPathSafeJobName(jobName)) errors.push('Job name must contain only letters, numbers, underscores, and hyphens');
     if (!modelName) errors.push('Model name is required');
     if (!serverUrl) errors.push('Server URL is required');
 
@@ -141,6 +143,11 @@ function validateForm() {{
     if (modelMaxLen && (isNaN(modelMaxLen) || parseInt(modelMaxLen) < 1)) {{
         errors.push('model_max_len must be a positive integer');
     }}
+    const maxRetries = document.getElementById('max_retries').value.trim();
+    const parsedMaxRetries = Number(maxRetries);
+    if (maxRetries && (!Number.isInteger(parsedMaxRetries) || parsedMaxRetries < 0)) {{
+        errors.push('max_retries must be a non-negative integer');
+    }}
 
     if (errors.length > 0) {{
         alert('Validation errors:\\n' + errors.join('\\n'));
@@ -153,12 +160,49 @@ function sanitizeJobNamePart(value) {{
     return value.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 }}
 
+function isPathSafeJobName(value) {{
+    return /^[a-zA-Z0-9_-]+$/.test(value);
+}}
+
+function updateJobNameWarning() {{
+    const jobName = document.getElementById('job_name').value.trim();
+    const warning = document.getElementById('job-name-warning');
+    warning.textContent = jobName && !isPathSafeJobName(jobName)
+        ? 'Job name must contain only letters, numbers, underscores, and hyphens.'
+        : '';
+}}
+
+let jobNameManuallyEdited = false;
+
 function updateJobName() {{
+    const jobNameInput = document.getElementById('job_name');
+    if (jobNameManuallyEdited && jobNameInput.value.trim()) return;
+
     const modelName = document.getElementById('model_name').value;
-    const dataset = document.getElementById('dataset').value.trim();
+    const githubRepository = parseGitHubRepository(document.getElementById('github_repo').value || '');
+    const dataset = githubRepository
+        ? `${{githubRepository.owner}}-${{githubRepository.repo}}`
+        : document.getElementById('dataset').value.trim();
     const agent = document.getElementById('agent').value;
     const jobName = [modelName, dataset, agent].map(sanitizeJobNamePart).join('-');
-    document.getElementById('job_name').value = jobName;
+    jobNameInput.value = jobName;
+    updateJobNameWarning();
+}}
+
+function parseKeyValueLines(fieldId) {{
+    // Values may themselves contain commas (e.g. JSON), so only newlines separate entries.
+    return document.getElementById(fieldId).value
+        .split(/\\r?\\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+}}
+
+function parseListField(fieldId) {{
+    // Hosts and error-type names never contain commas, so accept both separators.
+    return document.getElementById(fieldId).value
+        .split(/[\\n,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
 }}
 
 async function submitJob(event) {{
@@ -195,7 +239,8 @@ async function submitJob(event) {{
 
         if (githubRepository) {{
             dataset = `github.com/${{githubRepository.owner}}/${{githubRepository.repo}}${{githubRef ? `@${{githubRef}}` : ''}}`;
-            if (githubTokenInput.value) headers['X-GitHub-Token'] = githubTokenInput.value;
+            const githubToken = githubTokenInput.value.trim();
+            if (githubToken) headers['X-GitHub-Token'] = githubToken;
         }}
         if (modelApiKeyInput.value) headers['X-Model-API-Key'] = modelApiKeyInput.value;
         modelApiKeyInput.value = '';
@@ -238,6 +283,15 @@ async function submitJob(event) {{
 
         const agentVersion = document.getElementById('agent_version').value.trim();
         if (agentVersion) formData.agent_version = agentVersion;
+
+        const extraHarborFlags = parseKeyValueLines('extra_harbor_flags');
+        if (extraHarborFlags.length) formData.extra_harbor_flags = extraHarborFlags;
+
+        const retryInclude = parseListField('retry_include');
+        if (retryInclude.length) formData.retry_include = retryInclude;
+
+        const maxRetries = document.getElementById('max_retries').value.trim();
+        if (maxRetries !== '') formData.max_retries = Number(maxRetries);
 
         const response = await fetch('/jobs', {{
             method: 'POST',
@@ -330,6 +384,11 @@ document.getElementById('server_url').addEventListener('change', startMaxConcurr
 document.getElementById('model_name').addEventListener('change', updateJobName);
 document.getElementById('agent').addEventListener('change', updateJobName);
 document.getElementById('dataset').addEventListener('input', updateJobName);
+document.getElementById('github_repo').addEventListener('input', updateJobName);
+document.getElementById('job_name').addEventListener('input', () => {{
+    jobNameManuallyEdited = true;
+    updateJobNameWarning();
+}});
 
 updateJobName();
 checkApiKey();
@@ -364,9 +423,10 @@ def _build_basic_fields_html(
     return f"""
         <div>
             <label for="job_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Job Name</label>
-            <input type="text" id="job_name" name="job_name" readonly
+            <input type="text" id="job_name" name="job_name"
                    style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
                    placeholder="Generated from model, benchmark, and agent">
+            <small id="job-name-warning" style="display: block; color: #cc6600; margin-top: 0.25rem;"></small>
         </div>
         <div>
             <label for="agent" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Agent *</label>
@@ -454,6 +514,26 @@ def _build_advanced_fields_html(
             <textarea id="before_script" name="before_script" rows="3"
                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
                       placeholder="Commands to run before execution..."></textarea>
+        </div>
+        <div>
+            <label for="max_retries" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Max Retries</label>
+            <input type="number" id="max_retries" name="max_retries" min="0"
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="Leave empty for default (1)">
+        </div>
+        <div>
+            <label for="retry_include" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Retry Error Types</label>
+            <textarea id="retry_include" name="retry_include" rows="2"
+                      style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
+                      placeholder="One per line or comma-separated, e.g. AgentTimeoutError"></textarea>
+            <small style="color: #666;">Error types to retry (Harbor's --retry-include). Leave empty for defaults.</small>
+        </div>
+        <div style="grid-column: 1 / -1;">
+            <label for="extra_harbor_flags" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Extra Harbor Flags</label>
+            <textarea id="extra_harbor_flags" name="extra_harbor_flags" rows="5"
+                      style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-family: monospace;"
+                      placeholder="One Harbor argument or shell-style fragment per line, e.g.&#10;--agent-timeout-multiplier=2&#10;--ae 'CLAUDE_CODE_USE_VERTEX=1'&#10;--some-future-harbor-flag"></textarea>
+            <small style="color: #666;">Appended to the final Harbor command. Use --flag=value when possible; CAB-owned or blocked flags are rejected.</small>
         </div>
         <div id="github-dataset-fields" style="grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 1rem; border: 1px solid #ddd; border-radius: 6px; background: #f7f9fc; box-sizing: border-box;">
             <div style="grid-column: 1 / -1;">

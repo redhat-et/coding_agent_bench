@@ -18,7 +18,11 @@ from coding_agent_bench.intake.validation import validate_server_url
 from coding_agent_bench.job import OpenshiftJob, _build_logged_shell_step
 from coding_agent_bench.nebius_utils import NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY, get_model_max_concurrency
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
-from coding_agent_bench.utils import validate_remote_skill_sources
+from coding_agent_bench.utils import (
+    parse_extra_harbor_lines,
+    validate_extra_harbor_flags,
+    validate_remote_skill_sources,
+)
 from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
 from coding_agent_bench.agents import AGENT_REGISTRY
 from coding_agent_bench.github_datasets import GitHubDataset
@@ -484,11 +488,25 @@ class CreateJobRequest(BaseModel):
         default_factory=list,
         description="Public Git skill sources in org/name[@ref] or HTTP(S) URL form",
     )
+    extra_harbor_flags: list[str] = Field(
+        default_factory=list,
+        description="Extra Harbor CLI arguments, one shell-style argument fragment per line",
+    )
     idempotency_key: Optional[str] = Field(
         None,
         max_length=256,
         description="Stable key used to safely retry creation of the same job",
     )
+
+    @field_validator("extra_harbor_flags")
+    @classmethod
+    def validate_extra_flags(cls, values: list[str]) -> list[str]:
+        """Validate extra Harbor fragments without restricting Harbor options."""
+        from coding_agent_bench.cli import get_cab_option_names
+
+        tokens = parse_extra_harbor_lines(values)
+        validate_extra_harbor_flags(tokens, get_cab_option_names())
+        return values
 
 
 class ResumeJobRequest(BaseModel):
@@ -2206,6 +2224,12 @@ def build_cli_command(req: CreateJobRequest):
             command += ["--retry-include", exc]
     for skill in req.skills:
         command += ["--skill", skill]
+    if req.extra_harbor_flags:
+        from coding_agent_bench.cli import get_cab_option_names
+
+        extra_args = parse_extra_harbor_lines(req.extra_harbor_flags)
+        validate_extra_harbor_flags(extra_args, get_cab_option_names())
+        command += ["--", *extra_args]
 
     return command
 

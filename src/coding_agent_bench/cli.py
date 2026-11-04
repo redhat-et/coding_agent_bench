@@ -7,14 +7,112 @@ import asyncio
 from typing import Annotated, Optional
 import shlex
 
+import click
 import typer
 from pydantic import SecretStr
+from typer.core import TyperCommand
 
 from coding_agent_bench.builder import HarborCommandBuilder, SupportedAgent
 from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.providers import MODEL_API_KEY_ENV
 from coding_agent_bench.manifest import deploy as deploy_model
 from coding_agent_bench.manifest import generate
+from coding_agent_bench.utils import (
+    cmd_to_string,
+    envs_to_export_lines,
+    parse_envs,
+    validate_extra_harbor_flags,
+    validate_remote_skill_sources,
+)
+
+def _duplicate_option(args: list[str], parameters) -> str | None:
+    """Find the first repeated non-repeatable option in raw arguments."""
+    option_params = {
+        option: parameter
+        for parameter in parameters
+        for option in (
+            list(getattr(parameter, "opts", []))
+            + list(getattr(parameter, "secondary_opts", []))
+        )
+    }
+    seen: set[str] = set()
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            break
+        option = token.split("=", 1)[0] if token.startswith("-") else None
+        parameter = option_params.get(option)
+        if parameter is not None:
+            canonical = parameter.name
+            if not getattr(parameter, "multiple", False):
+                if canonical in seen:
+                    return option
+                seen.add(canonical)
+            if (
+                not getattr(parameter, "is_flag", False)
+                and "=" not in token
+                and index + 1 < len(args)
+            ):
+                index += 1
+        index += 1
+    return None
+
+
+class NoDuplicateOptionsCommand(TyperCommand):
+    """Reject repeated non-repeatable CAB options before Click overwrites them."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        duplicate = _duplicate_option(args, self.params)
+        if duplicate:
+            raise click.UsageError(
+                f"Option {duplicate!r} was provided more than once", ctx
+            )
+        return super().parse_args(ctx, args)
+
+
+class DuplicateCheckingTyper(typer.Typer):
+    """Print duplicate-option errors cleanly for the installed console script."""
+
+    def __call__(self, *args, **kwargs):
+        if len(sys.argv) > 1 and sys.argv[1] == "run":
+            from typer.main import get_command
+
+            command = get_command(self)
+            run_command = command.commands["run"]
+            duplicate = _duplicate_option(sys.argv[2:], run_command.params)
+            if duplicate:
+                typer.echo(
+                    f"Error: option {duplicate!r} was provided more than once",
+                    err=True,
+                )
+                raise SystemExit(2)
+        return super().__call__(*args, **kwargs)
+
+
+app = DuplicateCheckingTyper()
+
+
+def get_cab_option_names() -> set[str]:
+    """Return all option spellings registered on the CAB CLI command."""
+    from typer.main import get_command
+
+    command = get_command(app)
+    command = command.commands["run"] if hasattr(command, "commands") else command
+    return {
+        option
+        for parameter in command.params
+        for option in (
+            list(getattr(parameter, "opts", []))
+            + list(getattr(parameter, "secondary_opts", []))
+        )
+    }
+
+
+@app.command(
+    cls=NoDuplicateOptionsCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 from coding_agent_bench.utils import cmd_to_string, envs_to_export_lines, parse_envs, validate_remote_skill_sources
 
 app = typer.Typer()
@@ -29,6 +127,7 @@ def _redact_command(command: list[str], secret: str | None) -> list[str]:
 
 @app.command()
 def run(
+    ctx: typer.Context,
     agent: Annotated[
         SupportedAgent,
         typer.Option(help="Agent to use"),
@@ -78,23 +177,11 @@ def run(
             help="Path or git source (org/name[@ref], URL) for skill directories. Can be used multiple times.",
         ),
     ] = None,
-    agent_timeout_multiplier: Annotated[
-        Optional[float],
-        typer.Option(help="Multiplier for the task's agent execution timeout (Harbor's --agent-timeout-multiplier)"),
-    ] = None,
-    thinking: Annotated[
-        Optional[str],
-        typer.Option(help="Agent thinking/reasoning level, e.g. off, minimal, low, medium, high, xhigh (agent-dependent; passed as --ak thinking=<value>)"),
-    ] = None,
-    allow_agent_host: Annotated[
+    envs: Annotated[
         Optional[list[str]],
         typer.Option(
-            help="Allow hostname or IP/CIDR during agent execution only, extending the task's agent-phase network allowlist (Harbor's --allow-agent-host). Repeatable."
+            help="Extra environment variables for the harbor process, KEY=VALUE entries (repeatable; each entry may also contain comma-separated pairs, e.g. --envs FOO=bar --envs BAZ=qux)"
         ),
-    ] = None,
-    envs: Annotated[
-        Optional[str],
-        typer.Option(help="Extra environment variables for the harbor process, comma-separated key=value pairs (e.g. --envs FOO=bar,BAZ=qux)"),
     ] = None,
     dry_run: Annotated[
         bool, typer.Option(help="Dry run mode, does not execute the job")
@@ -114,10 +201,12 @@ def run(
 
     try:
         extra_envs = parse_envs(envs)
+        extra_harbor_args = list(ctx.args)
+        validate_extra_harbor_flags(extra_harbor_args, get_cab_option_names())
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from e
-    
+
     # If remote, run as a job
     if remote:
         try:
@@ -194,9 +283,7 @@ def run(
             max_retries=max_retries,
             retry_include=retry_include,
             skills=skills,
-            agent_timeout_multiplier=agent_timeout_multiplier,
-            thinking=thinking,
-            allow_agent_host=allow_agent_host,
+            extra_harbor_args=extra_harbor_args,
             api_key=model_api_key.get_secret_value() if model_api_key else None,
         )
         preview = ""

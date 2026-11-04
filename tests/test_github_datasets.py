@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -698,6 +699,116 @@ def test_ui_submits_directly_without_archive_staging():
     assert 'placeholder="owner/repository or https://github.com/owner/repository"' in html
     assert "repository_url: githubRepositoryUrl" in html
     assert html.index("const formData = {") < html.index("if (skills.length) formData.skills = skills;")
+
+
+def test_github_submission_names_are_unique_and_token_is_trimmed():
+    html = build_submit_form_html(["model"], ["oracle"], [], False)
+    submit_job = html.split("async function submitJob(event) {", 1)[1].split(
+        "function checkApiKey()", 1
+    )[0]
+
+    assert "`${githubRepository.owner}-${githubRepository.repo}`" in html
+    assert "document.getElementById('github_repo').addEventListener('input', updateJobName);" in html
+    assert "const githubToken = githubTokenInput.value.trim();" in submit_job
+    assert "if (githubToken) headers['X-GitHub-Token'] = githubToken;" in submit_job
+    assert submit_job.count("try {") == 1
+    assert submit_job.count("} catch (err) {") == 1
+    assert submit_job.count("} finally {") == 1
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the generated submission script")
+
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    runtime_test = f"""
+const assert = require("assert").strict;
+const vm = require("vm");
+const {{ URL, URLSearchParams }} = require("url");
+const script = {json.dumps(script)};
+const elements = new Map();
+const requests = [];
+const alerts = [];
+const responses = [
+    {{ ok: true, status: 200, json: async () => ({{ job_id: "job-1" }}) }},
+    {{ ok: false, status: 400, json: async () => ({{ detail: "rejected" }}) }},
+];
+
+function getElementById(id) {{
+    if (!elements.has(id)) {{
+        elements.set(id, {{
+            value: "",
+            style: {{}},
+            textContent: "",
+            disabled: false,
+            addEventListener() {{}},
+            reset() {{}},
+        }});
+    }}
+    return elements.get(id);
+}}
+
+getElementById("model_name").value = "model";
+getElementById("agent").value = "oracle";
+getElementById("dataset").value = "";
+getElementById("github_repo").value = "acme/private-data";
+getElementById("github_ref").value = "main";
+getElementById("github_token").value = "  ghp-first-token  ";
+getElementById("server_url").value = "https://model.example.com";
+getElementById("n_concurrent").value = "1";
+getElementById("max_retries").value = "1e2";
+
+const context = vm.createContext({{
+    document: {{ getElementById }},
+    URL,
+    URLSearchParams,
+    localStorage: {{ getItem: () => "queue-key" }},
+    alert: (message) => alerts.push(message),
+    fetch: async (url, options) => {{
+        requests.push({{
+            url,
+            method: options.method,
+            headers: {{ ...options.headers }},
+            body: options.body,
+        }});
+        return responses.shift();
+    }},
+    setTimeout: () => 0,
+    location: {{ reload() {{}} }},
+    console,
+}});
+
+(async () => {{
+    vm.runInContext(script, context);
+    await vm.runInContext("submitJob({{ preventDefault() {{}} }})", context);
+
+    assert.equal(requests[0].url, "/jobs");
+    assert.equal(requests[0].headers["X-API-Key"], "queue-key");
+    assert.equal(requests[0].headers["X-GitHub-Token"], "ghp-first-token");
+    const payload = JSON.parse(requests[0].body);
+    assert.equal(payload.job_name, "model-acme-private-data-oracle");
+    assert.equal(payload.dataset, "github.com/acme/private-data@main");
+    assert.equal(payload.github_dataset.repository_url, "https://github.com/acme/private-data");
+    assert.equal(payload.max_retries, 100);
+    assert.equal(getElementById("github_token").value, "");
+
+    getElementById("github_token").value = "  ghp-second-token  ";
+    await vm.runInContext("submitJob({{ preventDefault() {{}} }})", context);
+    assert.equal(requests[1].headers["X-GitHub-Token"], "ghp-second-token");
+    assert.equal(getElementById("github_token").value, "");
+    assert.equal(getElementById("submit-btn").disabled, false);
+    assert.equal(getElementById("submit-status").textContent, "Error: rejected");
+
+    getElementById("max_retries").value = "1.5";
+    const result = await vm.runInContext("submitJob({{ preventDefault() {{}} }})", context);
+    assert.equal(result, false);
+    assert.equal(requests.length, 2);
+    assert.match(alerts[alerts.length - 1], /max_retries must be a non-negative integer/);
+}})().catch((error) => {{
+    console.error(error);
+    process.exitCode = 1;
+}});
+"""
+    subprocess.run([node, "-e", runtime_test], check=True, capture_output=True, text=True)
 
 
 def test_paused_private_github_job_ui_requests_fresh_token(client):
