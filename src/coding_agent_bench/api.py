@@ -1703,29 +1703,7 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             server_url, model_name = row["server_url"], row["model_name"]
         model_api_key_required = bool(row.get("model_api_key_required"))
         model_api_key_secret = oj.model_api_key_secret_name if model_api_key_required else None
-        if model_api_key_required:
-            if queued.model_api_key:
-                await oj.create_model_api_key_secret(queued.model_api_key, queue_owned=True)
-            elif adopt_existing and not await oj.model_api_key_secret_exists():
-                job_store.update_status(
-                    job_id, JobStatus.FAILED,
-                    error="Model API credential is unavailable; manual resume requires a fresh key",
-                )
-                return
-            elif not adopt_existing:
-                job_store.update_status(
-                    job_id, JobStatus.FAILED,
-                    error="Model API credential is unavailable; submit a new job with a fresh key",
-                )
-                return
-        if row["status"] == JobStatus.PAUSED.value:
-            if not await _recover_paused_job(row):
-                return
-            adopt_existing = False
-            row = job_store.get(job_id)
         nebius_gpu_config = _parse_nebius_url(server_url)
-        job_server_url: str | None = server_url
-        managed_endpoint = False
 
         if row["status"] in (JobStatus.COMPLETING.value, JobStatus.FAILING.value):
             final_status = JobStatus.COMPLETED if row["status"] == JobStatus.COMPLETING.value else JobStatus.FAILED
@@ -1760,6 +1738,30 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                     )
             await _retry_pause_finalize(job_id, oj)
             return
+
+        if model_api_key_required:
+            if queued.model_api_key:
+                await oj.create_model_api_key_secret(queued.model_api_key, queue_owned=True)
+            elif adopt_existing and not await oj.model_api_key_secret_exists():
+                job_store.update_status(
+                    job_id, JobStatus.FAILED,
+                    error="Model API credential is unavailable; manual resume requires a fresh key",
+                )
+                return
+            elif not adopt_existing:
+                job_store.update_status(
+                    job_id, JobStatus.FAILED,
+                    error="Model API credential is unavailable; submit a new job with a fresh key",
+                )
+                return
+        if row["status"] == JobStatus.PAUSED.value:
+            if not await _recover_paused_job(row):
+                return
+            adopt_existing = False
+            row = job_store.get(job_id)
+        nebius_gpu_config = _parse_nebius_url(server_url)
+        job_server_url: str | None = server_url
+        managed_endpoint = False
 
         if nebius_gpu_config is not None and not _nebius:
             job_store.update_status(

@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from coding_agent_bench.builder import HarborCommandBuilder
 
 
@@ -55,3 +57,55 @@ def test_cleanup_deletes_only_inactive_queue_owned_secrets(monkeypatch):
     asyncio.run(api._cleanup_model_api_key_secrets())
 
     assert deleted == [["delete", "secret", "queue-old", "--ignore-not-found"]]
+
+
+@pytest.mark.parametrize("status", [
+    "completing", "failing", "cancelling", "pausing",
+])
+def test_adopt_existing_reconciles_transitional_state_without_model_key(monkeypatch, status):
+    from coding_agent_bench import api
+
+    class Store:
+        row = {
+            "status": status,
+            "command": "[]",
+            "server_url": "https://model.example",
+            "model_name": "model",
+            "model_api_key_required": 1,
+            "error": None,
+        }
+
+        def get(self, _job_id):
+            return self.row
+
+    calls = []
+
+    class Job:
+        model_api_key_secret_name = "secret"
+
+        async def delete_model_api_key_secret(self):
+            pass
+
+    async def terminal(*_args, **_kwargs):
+        calls.append("terminal")
+
+    async def cancellation(*_args, **_kwargs):
+        calls.append("cancellation")
+
+    async def pause(*_args, **_kwargs):
+        calls.append("pause")
+
+    monkeypatch.setattr(api, "job_store", Store())
+    monkeypatch.setattr(api, "OpenshiftJob", lambda **_kwargs: Job())
+    monkeypatch.setattr(api, "_retry_terminal_job", terminal)
+    monkeypatch.setattr(api, "_retry_cancellation", cancellation)
+    monkeypatch.setattr(api, "_retry_pause_finalize", pause)
+
+    asyncio.run(api._process_queued_job(
+        api.QueuedJob("job", [], "https://model.example", "model", adopt_existing=True)
+    ))
+
+    assert calls == [{
+        "completing": "terminal", "failing": "terminal",
+        "cancelling": "cancellation", "pausing": "pause",
+    }[status]]
