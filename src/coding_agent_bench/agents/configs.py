@@ -257,7 +257,7 @@ class PiAgentConfig(AgentConfig):
                 "providers": {
                     provider_id: {
                         "api": "openai-responses" if native_openai else "openai-completions",
-                        "apiKey": "NONE",
+                        "apiKey": os.environ.get(MODEL_API_KEY_ENV, "NONE"),
                         "models": [{"id": model, "name": model}],
                     }
                 }

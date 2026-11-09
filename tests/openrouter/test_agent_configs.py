@@ -45,6 +45,20 @@ def test_pi_default_placeholder(monkeypatch, tmp_path):
     assert cfg["providers"]["vllm"]["apiKey"] == "NONE"
 
 
+def test_pi_restore_missing_file_uses_model_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAB_MODEL_API_KEY", "sk-restore-test")
+    source = tmp_path / "models.json"
+    config = {
+        "agents": [{"name": "pi", "model_name": "m"}],
+        "environment": {"mounts": [{"source": str(source), "target": "/root/.pi/agent/models.json"}]},
+    }
+
+    PiAgentConfig().restore_mounts(config, "http://vllm:8000")
+
+    provider = json.loads(source.read_text())["providers"]["vllm"]
+    assert provider["apiKey"] == "sk-restore-test"
+
+
 def test_pi_openai_uses_responses_api(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     result = PiAgentConfig().configure(
