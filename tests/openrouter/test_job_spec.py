@@ -6,28 +6,25 @@ def _env_by_name(spec):
     return {e["name"]: e for e in container.get("env", [])}
 
 
-def test_job_spec_injects_openrouter_secret_only_when_openrouter():
+def test_job_spec_injects_generic_model_secret():
     job = OpenshiftJob(job_name="test")
-    env = _env_by_name(job._job_spec(["echo", "hi"], openrouter=True))
-    assert "OPENROUTER_API_KEY" in env
-    ref = env["OPENROUTER_API_KEY"]["valueFrom"]["secretKeyRef"]
-    assert ref["name"] == "job-queue-secret"
-    assert ref["key"] == "OPENROUTER_API_KEY"
-    assert ref["optional"] is True
+    env = _env_by_name(job._job_spec(["echo", "hi"], model_api_key_secret="cab-model-key-test"))
+    assert "CAB_MODEL_API_KEY" in env
+    ref = env["CAB_MODEL_API_KEY"]["valueFrom"]["secretKeyRef"]
+    assert ref["name"] == "cab-model-key-test"
+    assert ref["key"] == "key"
 
 
-def test_job_spec_omits_openrouter_secret_for_non_openrouter():
+def test_job_spec_omits_model_secret_without_key():
     job = OpenshiftJob(job_name="test")
-    env = _env_by_name(job._job_spec(["echo", "hi"]))  # openrouter defaults to False
-    assert "OPENROUTER_API_KEY" not in env
+    env = _env_by_name(job._job_spec(["echo", "hi"]))
+    assert "CAB_MODEL_API_KEY" not in env
 
 
-def test_resume_job_spec_never_injects_openrouter_secret():
-    # Resuming an OpenRouter job is rejected at the API (400), so resume pods
-    # never need the key.
+def test_resume_job_spec_injects_model_secret_when_requested():
     job = OpenshiftJob(job_name="test")
-    env = _env_by_name(job._resume_job_spec("echo hi"))
-    assert "OPENROUTER_API_KEY" not in env
+    env = _env_by_name(job._resume_job_spec("echo hi", "cab-model-key-test"))
+    assert env["CAB_MODEL_API_KEY"]["valueFrom"]["secretKeyRef"]["key"] == "key"
 
 
 def test_storage_endpoint_is_passed_to_both_job_types(monkeypatch):

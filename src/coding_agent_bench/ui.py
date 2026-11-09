@@ -217,6 +217,7 @@ async function submitJob(event) {{
     status.textContent = '';
     status.style.color = '#666';
     const githubTokenInput = document.getElementById('github_token');
+    const modelApiKeyInput = document.getElementById('model_api_key');
     const headers = {{ 'Content-Type': 'application/json' }};
 
     try {{
@@ -241,6 +242,8 @@ async function submitJob(event) {{
             const githubToken = githubTokenInput.value.trim();
             if (githubToken) headers['X-GitHub-Token'] = githubToken;
         }}
+        if (modelApiKeyInput.value) headers['X-Model-API-Key'] = modelApiKeyInput.value;
+        modelApiKeyInput.value = '';
         githubTokenInput.value = '';
         headers['X-API-Key'] = apiKey;
 
@@ -315,7 +318,9 @@ async function submitJob(event) {{
         btn.textContent = 'Submit Job';
     }} finally {{
         githubTokenInput.value = '';
+        modelApiKeyInput.value = '';
         delete headers['X-GitHub-Token'];
+        delete headers['X-Model-API-Key'];
     }}
 }}
 
@@ -438,10 +443,10 @@ def _build_basic_fields_html(
         </div>
         <div>
             <label for="model_name" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Model *</label>
-            <select id="model_name" name="model_name" required
+            <input type="text" id="model_name" name="model_name" required
+                    list="model-options"
                     style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                {model_options}
-            </select>
+            <datalist id="model-options">{model_options}</datalist>
         </div>
         <div>
             <label for="server_url" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Server URL *</label>
@@ -451,6 +456,13 @@ def _build_basic_fields_html(
                    placeholder="http://localhost:8000">
             <datalist id="nebius-config-options">{nebius_config_options}</datalist>
             {nebius_help}
+        </div>
+        <div>
+            <label for="model_api_key" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Model API Key (optional)</label>
+            <input type="password" id="model_api_key" name="model_api_key" autocomplete="new-password" autocapitalize="off" spellcheck="false"
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;"
+                   placeholder="Required for authenticated model endpoints">
+            <small style="color: #666;">Sent only in the request header and cleared after submission.</small>
         </div>
         <div>
             <label for="n_concurrent" style="display: block; font-weight: bold; margin-bottom: 0.25rem;">Concurrent Tasks</label>

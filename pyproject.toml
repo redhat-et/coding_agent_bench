@@ -36,3 +36,6 @@ dev = [
 
 [tool.uv.sources]
 harbor = { git = "https://github.com/redhat-et/harbor.git" }
+
+[tool.pytest.ini_options]
+addopts = "--ignore=jobs/"

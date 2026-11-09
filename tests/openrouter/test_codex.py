@@ -15,30 +15,28 @@ def test_codex_toml_default_no_key(tmp_path):
 def test_codex_toml_openrouter(tmp_path):
     out = tmp_path / "config.toml"
     codex_create_toml(
-        "openai/gpt-4o", "https://openrouter.ai/api/v1", out, openrouter=True
+        "openai/gpt-4o", "https://openrouter.ai/api/v1", out, requires_auth=True
     )
     content = out.read_text()
-    assert 'wire_api = "chat"' in content
+    assert 'wire_api = "responses"' in content
     assert "requires_openai_auth = true" in content
     # Only the env var NAME is written; codex resolves the value at runtime.
-    assert 'env_key = "OPENROUTER_API_KEY"' in content
+    assert 'env_key = "CAB_MODEL_API_KEY"' in content
     assert 'base_url = "https://openrouter.ai/api/v1"' in content
 
 
 def test_codex_agent_openrouter(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     result = CodexAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter"
+        model_name="openai/gpt-4o", server_url="https://openrouter.ai/api", api_key="sk-or-test"
     )
-    assert result.agent_env["OPENROUTER_API_KEY"] == "sk-or-test"
+    assert result.agent_env["CAB_MODEL_API_KEY"] == "sk-or-test"
     content = (tmp_path / "config.toml").read_text()
-    assert 'wire_api = "chat"' in content
+    assert 'wire_api = "responses"' in content
 
 
 def test_codex_agent_default(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     result = CodexAgentConfig().configure(
         model_name="my-model", server_url="http://vllm:8000"
     )

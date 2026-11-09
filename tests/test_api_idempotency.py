@@ -3,6 +3,7 @@
 import asyncio
 import socket
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +17,6 @@ def isolated_queue(tmp_path, monkeypatch):
     previous_queue = list(api._job_queue)
     api.job_store = api.JobStore(tmp_path / "jobs.db")
     api._job_queue.clear()
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     try:
         yield
     finally:
@@ -31,7 +31,7 @@ def _request(key: str = "intake-test-key") -> api.CreateJobRequest:
         agent="codex",
         dataset="swe-bench/swe-bench-verified",
         model_name="Qwen/Qwen3-32B",
-        server_url="openrouter",
+        server_url="https://openrouter.ai/api",
         idempotency_key=key,
     )
 
@@ -45,7 +45,7 @@ def test_job_store_enforces_unique_idempotency_keys(tmp_path):
         "oracle",
         "dataset",
         "model",
-        "openrouter",
+        "https://openrouter.ai/api",
         ["command"],
     )
     store.insert(*args, idempotency_key="same-key")
@@ -55,8 +55,9 @@ def test_job_store_enforces_unique_idempotency_keys(tmp_path):
 
 def test_repeated_create_request_returns_original_job(isolated_queue):
     """Return the original job and enqueue it only once on a repeated request."""
-    first = asyncio.run(api.create_job(_request()))
-    second = asyncio.run(api.create_job(_request()))
+    request = SimpleNamespace(headers={"X-Model-API-Key": "sk-or-test"})
+    first = asyncio.run(api.create_job(_request(), request=request))
+    second = asyncio.run(api.create_job(_request(), request=request))
 
     assert second.job_id == first.job_id
     assert second.message == "Job already exists."

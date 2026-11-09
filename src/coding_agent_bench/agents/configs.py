@@ -6,7 +6,10 @@ from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
 from coding_agent_bench.helpers.codex import codex_create_toml
 from coding_agent_bench.models.configs import Qwen_Qwen3_8_27B, Qwen_Qwen3_8_27B_FP8
 from coding_agent_bench.providers import (
-    OPENROUTER_API_KEY_ENV,
+    ANTHROPIC_AUTH_HEADER,
+    BEARER_AUTH_HEADER,
+    MODEL_API_KEY_ENV,
+    is_openai,
     is_openrouter,
     resolve_provider,
 )
@@ -34,8 +37,8 @@ class OracleAgentConfig(AgentConfig):
     name = "oracle"
 
     def configure(self, **kwargs) -> AgentConfigResult:
-        if is_openrouter(kwargs["server_url"]):
-            raise ValueError("oracle is a non-LLM agent and cannot use OpenRouter")
+        if kwargs.get("api_key"):
+            raise ValueError("oracle is a non-LLM agent and cannot use a model API key")
         return AgentConfigResult(model=kwargs["model_name"])
 
 
@@ -48,7 +51,8 @@ class ClaudeCodeAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
+        auth_header = BEARER_AUTH_HEADER if is_openrouter(server_url) else ANTHROPIC_AUTH_HEADER
         agent_env = {
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": model_name,
@@ -60,10 +64,12 @@ class ClaudeCodeAgentConfig(AgentConfig):
         if model_name in (Qwen_Qwen3_8_27B.name, Qwen_Qwen3_8_27B_FP8.name):
             agent_kwargs = {"reasoning_effort": "xhigh"}
         if api_key:
-            # OpenRouter's Claude Code integration expects a blank
-            # ANTHROPIC_API_KEY and the key in ANTHROPIC_AUTH_TOKEN.
-            agent_env["ANTHROPIC_API_KEY"] = ""
-            agent_env["ANTHROPIC_AUTH_TOKEN"] = api_key
+            if auth_header == ANTHROPIC_AUTH_HEADER:
+                agent_env["ANTHROPIC_API_KEY"] = api_key
+            elif auth_header == BEARER_AUTH_HEADER:
+                # Bearer-auth gateways use Claude Code's auth token variable.
+                agent_env["ANTHROPIC_API_KEY"] = ""
+                agent_env["ANTHROPIC_AUTH_TOKEN"] = api_key
         else:
             agent_env["ANTHROPIC_API_KEY"] = "sk-no-key-required"
         return AgentConfigResult(
@@ -91,20 +97,20 @@ class CodexAgentConfig(AgentConfig):
             model_name=str(agent.get("model_name") or "").removeprefix("vllm/"),
             server_url=server_url,
             outpath=path,
-            openrouter=OPENROUTER_API_KEY_ENV in (agent.get("env") or {}),
+            requires_auth=MODEL_API_KEY_ENV in (agent.get("env") or {}),
         )
 
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
 
         outpath = Path("config.toml").absolute()
         codex_create_toml(
             model_name=model_name,
             server_url=base_url,
             outpath=outpath,
-            openrouter=bool(api_key),
+            requires_auth=bool(api_key),
         )
         print(f"Created config.toml at {outpath}")
 
@@ -118,7 +124,7 @@ class CodexAgentConfig(AgentConfig):
 
         agent_env = {"CODEX_HOME": "/root/.codex/"}
         if api_key:
-            agent_env[OPENROUTER_API_KEY_ENV] = api_key
+            agent_env[MODEL_API_KEY_ENV] = api_key
 
         return AgentConfigResult(
             model="vllm/" + model_name,
@@ -136,7 +142,7 @@ class OpenClawAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
         agent_env = {
             "OPENAI_BASE_URL": base_url.rstrip("/").removesuffix("/v1") + "/v1",
             "OPENAI_API_KEY": api_key or "sk-no-key-required",
@@ -154,36 +160,54 @@ class OpenCodeAgentConfig(AgentConfig):
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
 
-        model = "vllm/" + model_name
-        context_limit = int(model_max_len * 0.75)
-        output_limit = int(model_max_len * 0.25)
+        native_openai = is_openai(server_url)
+        provider_id = "openai" if native_openai else "vllm"
+        model = provider_id + "/" + model_name
         options = {"baseURL": base_url.rstrip("/").removesuffix("/v1") + "/v1"}
         if api_key:
-            options["apiKey"] = api_key
+            # Let OpenCode resolve the credential from the task environment.
+            # This is its supported substitution syntax and avoids embedding
+            # the key in OPENCODE_CONFIG_CONTENT itself.
+            options["apiKey"] = "{env:" + MODEL_API_KEY_ENV + "}"
+        model_config = {"name": model_name}
+        if not native_openai:
+            model_config["limit"] = {
+                "context": int(model_max_len * 0.75),
+                "output": int(model_max_len * 0.25),
+            }
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model,
             "provider": {
-                "vllm": {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "name": "vLLM",
+                provider_id: {
+                    "npm": "@ai-sdk/openai" if native_openai else "@ai-sdk/openai-compatible",
+                    "name": "OpenAI" if native_openai else "vLLM",
                     "options": options,
-                    "models": {
-                        model_name: {
-                            "name": model_name,
-                            "limit": {"context": context_limit, "output": output_limit},
-                        }
-                    },
+                    "models": {model_name: model_config},
                 }
             },
         }
 
+        # Harbor's OpenCode adapter writes this native config file immediately
+        # before execution. Supplying the provider here avoids relying solely
+        # on OPENCODE_CONFIG_CONTENT, which can be absent from the adapter's
+        # per-command environment in some task environments.
+        # Harbor parses --ak values as JSON; keep this as JSON text so nested
+        # provider options are reconstructed as a dictionary in the adapter.
+        agent_kwargs = {"opencode_config": json.dumps(opencode_config)}
+
         agent_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
         }
-        return AgentConfigResult(model=model, agent_env=agent_env)
+        if api_key:
+            agent_env[MODEL_API_KEY_ENV] = api_key
+        return AgentConfigResult(
+            model=model,
+            agent_env=agent_env,
+            agent_kwargs=agent_kwargs,
+        )
 
 
 class OpenHandsSdkAgentConfig(AgentConfig):
@@ -221,23 +245,31 @@ class PiAgentConfig(AgentConfig):
         if restored is None:
             return
         agent, path = restored
-        model = str(agent.get("model_name") or "").removeprefix("vllm/")
+        native_openai = is_openai(server_url)
+        provider_id = "openai" if native_openai else "vllm"
+        model = str(agent.get("model_name") or "")
+        model = model.removeprefix("vllm/").removeprefix("openai/")
         if path.exists():
             models_json = json.loads(path.read_text())
         else:
             models_json = {
                 "providers": {
-                    "vllm": {
-                        "api": "openai-completions",
-                        "apiKey": "NONE",
+                    provider_id: {
+                        "api": "openai-responses" if native_openai else "openai-completions",
+                        "apiKey": (
+                            "${" + MODEL_API_KEY_ENV + "}"
+                            if os.environ.get(MODEL_API_KEY_ENV)
+                            else "NONE"
+                        ),
                         "models": [{"id": model, "name": model}],
                     }
                 }
             }
-        provider = models_json.setdefault("providers", {}).setdefault("vllm", {})
+        provider = models_json.setdefault("providers", {}).setdefault(provider_id, {})
         provider["baseUrl"] = (
             server_url.rstrip("/").removesuffix("/v1") + "/v1"
         )
+        provider["api"] = "openai-responses" if native_openai else "openai-completions"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(models_json))
 
@@ -245,14 +277,18 @@ class PiAgentConfig(AgentConfig):
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url)
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
+        native_openai = is_openai(server_url)
+        provider_id = "openai" if native_openai else "vllm"
 
         models_json = {
             "providers": {
-                "vllm": {
+                provider_id: {
                     "baseUrl": base_url.rstrip("/").removesuffix("/v1") + "/v1",
-                    "api": "openai-completions",
-                    "apiKey": api_key or "NONE",
+                    "api": "openai-responses" if native_openai else "openai-completions",
+                    "apiKey": (
+                        "${" + MODEL_API_KEY_ENV + "}" if api_key else "NONE"
+                    ),
                     "models": [
                         {
                             "id": model_name,
@@ -278,4 +314,6 @@ class PiAgentConfig(AgentConfig):
         ]
 
         agent_env = {"PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": "/root/.pi/agent"}
-        return AgentConfigResult(model="vllm/" + model_name, agent_env=agent_env, mounts=mounts)
+        return AgentConfigResult(
+            model=provider_id + "/" + model_name, agent_env=agent_env, mounts=mounts
+        )

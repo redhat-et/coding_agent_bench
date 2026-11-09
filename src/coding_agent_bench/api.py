@@ -23,7 +23,6 @@ from coding_agent_bench.utils import (
     validate_extra_harbor_flags,
     validate_remote_skill_sources,
 )
-from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
 from coding_agent_bench.agents import AGENT_REGISTRY
 from coding_agent_bench.github_datasets import GitHubDataset
 from coding_agent_bench.ui import build_submit_form_html
@@ -56,6 +55,7 @@ class QueuedJob:
     adopt_existing: bool = False
     github_dataset: GitHubDataset | None = None
     github_token: SecretStr | None = field(default=None, repr=False)
+    model_api_key: SecretStr | None = field(default=None, repr=False)
 
 _job_queue: list[QueuedJob] = []
 _job_event = asyncio.Event()
@@ -85,7 +85,7 @@ def _worker_server_url_errors(
     generated IP endpoint is checked for public reachability without applying the
     normal HTTPS-only requirement.
     """
-    if not server_url or server_url.lower() == "openrouter":
+    if not server_url:
         return []
     if managed_endpoint:
         parsed = urlparse(server_url)
@@ -471,7 +471,7 @@ class CreateJobRequest(BaseModel):
     agent: SupportedAgent = Field(..., description="Agent to use")
     dataset: str = Field(..., description="Dataset name or path")
     model_name: str = Field(..., description="Model name")
-    server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' (e.g. nebius-h200) for managed Nebius instances; or 'openrouter' to use OpenRouter (requires OPENROUTER_API_KEY on the server)")
+    server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' for managed Nebius instances")
     dataset_pattern: Optional[str] = Field(None, description="Pattern to filter dataset tasks")
     n_concurrent: int | None = Field(None, description="Number of concurrent tasks")
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
@@ -586,7 +586,8 @@ class JobStore:
                 results_job_name TEXT,
                 resumed_by_job_id TEXT,
                 github_dataset TEXT,
-                github_token_required INTEGER NOT NULL DEFAULT 0
+                github_token_required INTEGER NOT NULL DEFAULT 0,
+                model_api_key_required INTEGER NOT NULL DEFAULT 0
             )"""
         )
         # Migrate columns when upgrading from an older schema.
@@ -632,6 +633,10 @@ class JobStore:
                         JobStatus.PAUSED.value,
                     ),
                 )
+        if "model_api_key_required" not in columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN model_api_key_required INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency_key "
             "ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
@@ -653,6 +658,7 @@ class JobStore:
         resume_parent_id: str | None = None,
         github_dataset: GitHubDataset | None = None,
         github_token_required: bool = False,
+        model_api_key_required: bool = False,
     ) -> bool:
         """Insert a job, optionally claiming a failed checkpoint in the same transaction.
 
@@ -671,8 +677,8 @@ class JobStore:
                     return False
             conn.execute(
                 "INSERT INTO jobs "
-                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required, model_api_key_required) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     job_name,
@@ -686,6 +692,7 @@ class JobStore:
                     results_job_name or job_name,
                     github_dataset.model_dump_json() if github_dataset else None,
                     int(github_token_required),
+                    int(model_api_key_required),
                 ),
             )
             conn.commit()
@@ -742,17 +749,20 @@ class JobStore:
         server_url: str,
         artifact_name: str,
         github_token_required: bool = False,
+        model_api_key_required: bool = False,
     ) -> bool:
         """Claim an existing paused row atomically against automatic recovery."""
         conn = self._connect()
         try:
             cur = conn.execute(
                 "UPDATE jobs SET status = ?, command = ?, server_url = ?, "
-                "results_job_name = ?, error = ?, github_token_required = MAX(github_token_required, ?) "
+                "results_job_name = ?, error = ?, github_token_required = MAX(github_token_required, ?), "
+                "model_api_key_required = MAX(model_api_key_required, ?) "
                 "WHERE job_id = ? AND status = ?",
                 (
                     JobStatus.QUEUED.value, json.dumps(command), server_url,
                     artifact_name, "Manual resume requested", int(github_token_required),
+                    int(model_api_key_required),
                     job_id, JobStatus.PAUSED.value,
                 ),
             )
@@ -927,6 +937,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.info("Nebius orchestrator initialized")
 
     has_recoverable_nebius = await _restore_jobs()
+    await _cleanup_model_api_key_secrets()
     if _nebius is not None and not has_recoverable_nebius:
         background_tasks.append(asyncio.create_task(_delete_recovered_nebius("startup")))
     if _nebius is not None:
@@ -946,6 +957,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             pass
     for queued in _job_queue:
         queued.github_token = None
+        queued.model_api_key = None
     _job_queue.clear()
     # Do not delete Nebius instances here: OpenShift jobs survive queue restarts
     # and the next queue process must be able to adopt their deterministic VM.
@@ -998,6 +1010,38 @@ async def _build_pod_cleanup_loop():
                     await _run_oc(["delete", "pods", *pods, "--ignore-not-found"])
         except Exception:
             logger.exception("Build pod cleanup failed")
+
+
+async def _cleanup_model_api_key_secrets() -> None:
+    """Remove transient model credentials whose jobs are no longer recoverable."""
+    try:
+        raw = await _run_oc([
+            "get", "secrets", "-l", "coding-agent-bench-purpose=model-api-key", "-o", "json",
+        ])
+        secrets = json.loads(raw or "{}").get("items", [])
+        active = {
+            row["job_id"] for row in job_store.list()
+            if row["status"] in {
+                JobStatus.QUEUED.value, JobStatus.RUNNING.value,
+                JobStatus.COMPLETING.value, JobStatus.FAILING.value,
+                JobStatus.CANCELLING.value, JobStatus.PAUSING.value,
+                JobStatus.PAUSED.value,
+            }
+        }
+        for secret in secrets:
+            metadata = secret.get("metadata", {})
+            labels = metadata.get("labels", {})
+            job_id = labels.get("coding-agent-bench-job")
+            name = metadata.get("name")
+            if (
+                name
+                and labels.get("coding-agent-bench-owner") == "queue"
+                and job_id
+                and job_id not in active
+            ):
+                await _run_oc(["delete", "secret", name, "--ignore-not-found"])
+    except Exception:
+        logger.exception("Model API Secret cleanup failed")
 
 
 async def _resume_paused_jobs_loop():
@@ -1399,10 +1443,10 @@ async def _run_job(
     command: list[str],
     server_url: str | None = None,
     managed_endpoint: bool = False,
-    openrouter: bool = False,
     adopt_existing: bool = False,
     nebius_instance_name: str | None = None,
     queued_job: QueuedJob | None = None,
+    model_api_key_secret: str | None = None,
 ):
     """Validate, run, and monitor an OpenShift Job."""
     if server_url:
@@ -1424,9 +1468,17 @@ async def _run_job(
         if not adopt_existing:
             is_resume = is_resume_command(command)
             if is_resume:
-                job_spec = oj._resume_job_spec(command[2])
+                job_spec = (
+                    oj._resume_job_spec(command[2], model_api_key_secret=model_api_key_secret)
+                    if model_api_key_secret
+                    else oj._resume_job_spec(command[2])
+                )
             else:
-                job_spec = oj._job_spec(command, openrouter=openrouter)
+                job_spec = (
+                    oj._job_spec(command, model_api_key_secret=model_api_key_secret)
+                    if model_api_key_secret
+                    else oj._job_spec(command)
+                )
             if queued_job and queued_job.github_dataset:
                 job_spec = oj.with_github_dataset(job_spec)
             await oj._run_oc_command(
@@ -1634,9 +1686,11 @@ async def _process_queued_job(queued: QueuedJob) -> None:
     server_url, model_name = queued.server_url, queued.model_name
     adopt_existing = queued.adopt_existing
     oj = OpenshiftJob(job_name=job_id, clean_legacy_pods=adopt_existing)
+    retain_model_api_key_secret = False
 
     model_config: ModelConfig | None = None
     nebius_instance_name: str | None = None
+    row: dict | None = None
     try:
         row = job_store.get(job_id)
         if not row:
@@ -1647,14 +1701,9 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             # A manual resume may replace a scheduled recovery's saved command.
             command = json.loads(row["command"])
             server_url, model_name = row["server_url"], row["model_name"]
-        if row["status"] == JobStatus.PAUSED.value:
-            if not await _recover_paused_job(row):
-                return
-            adopt_existing = False
-            row = job_store.get(job_id)
+        model_api_key_required = bool(row.get("model_api_key_required"))
+        model_api_key_secret = oj.model_api_key_secret_name if model_api_key_required else None
         nebius_gpu_config = _parse_nebius_url(server_url)
-        job_server_url: str | None = server_url
-        managed_endpoint = False
 
         if row["status"] in (JobStatus.COMPLETING.value, JobStatus.FAILING.value):
             final_status = JobStatus.COMPLETED if row["status"] == JobStatus.COMPLETING.value else JobStatus.FAILED
@@ -1689,6 +1738,30 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                     )
             await _retry_pause_finalize(job_id, oj)
             return
+
+        if model_api_key_required:
+            if queued.model_api_key:
+                await oj.create_model_api_key_secret(queued.model_api_key, queue_owned=True)
+            elif adopt_existing and not await oj.model_api_key_secret_exists():
+                job_store.update_status(
+                    job_id, JobStatus.FAILED,
+                    error="Model API credential is unavailable; manual resume requires a fresh key",
+                )
+                return
+            elif not adopt_existing:
+                job_store.update_status(
+                    job_id, JobStatus.FAILED,
+                    error="Model API credential is unavailable; submit a new job with a fresh key",
+                )
+                return
+        if row["status"] == JobStatus.PAUSED.value:
+            if not await _recover_paused_job(row):
+                return
+            adopt_existing = False
+            row = job_store.get(job_id)
+        nebius_gpu_config = _parse_nebius_url(server_url)
+        job_server_url: str | None = server_url
+        managed_endpoint = False
 
         if nebius_gpu_config is not None and not _nebius:
             job_store.update_status(
@@ -1783,9 +1856,9 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 command,
                 server_url=None if adopt_existing else job_server_url,
                 managed_endpoint=managed_endpoint,
-                openrouter=is_openrouter(server_url),
                 adopt_existing=adopt_existing,
                 nebius_instance_name=nebius_instance_name,
+                model_api_key_secret=model_api_key_secret,
                 **({"queued_job": queued} if queued.github_dataset else {}),
             )
         except InstancePreempted as e:
@@ -1794,6 +1867,11 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 "checkpointing results to object storage and parking the job as paused"
             )
             await _handle_pause(job_id, oj, nebius_instance_name)
+            paused = job_store.get(job_id) or {}
+            retain_model_api_key_secret = (
+                paused.get("status") in {JobStatus.PAUSING.value, JobStatus.PAUSED.value}
+                and "manual resume" not in (paused.get("error") or "").lower()
+            )
             # A cancel may have raced the pause (which then skipped): finish it.
             if job_store.get(job_id)["status"] == JobStatus.CANCELLING.value:
                 await _retry_cancellation(job_id, oj)
@@ -1811,6 +1889,25 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             await _delete_recovered_nebius(job_id)
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
+    finally:
+        latest_row = job_store.get(job_id) if row else None
+        recoverable = {
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+            JobStatus.COMPLETING.value,
+            JobStatus.FAILING.value,
+            JobStatus.CANCELLING.value,
+            JobStatus.PAUSING.value,
+            JobStatus.PAUSED.value,
+        }
+        retain_model_api_key_secret = retain_model_api_key_secret or (
+            latest_row is not None and latest_row["status"] in recoverable
+        )
+        if not retain_model_api_key_secret and row and row.get("model_api_key_required"):
+            try:
+                await oj.delete_model_api_key_secret()
+            except Exception:
+                logger.exception("Failed to delete model API Secret for %s", job_id)
 
 
 async def _worker():
@@ -1836,9 +1933,11 @@ async def _worker():
             )
             if not row or (adopt_existing and row["status"] not in recoverable_statuses):
                 queued.github_token = None
+                queued.model_api_key = None
                 continue
             if not adopt_existing and row["status"] != JobStatus.QUEUED.value:
                 queued.github_token = None
+                queued.model_api_key = None
                 continue
             processing_task = asyncio.create_task(_process_queued_job(queued))
             _active_job = (job_id, processing_task)
@@ -1859,6 +1958,7 @@ async def _worker():
                 logger.exception(f"Queue handler crashed while processing {job_id}")
             finally:
                 queued.github_token = None
+                queued.model_api_key = None
                 if _active_job and _active_job[0] == job_id:
                     _active_job = None
 
@@ -1889,16 +1989,24 @@ async def ui():
             if include_resume_action:
                 job_id = html.escape(str(job.get("job_id", "")), quote=True)
                 needs_token = bool(job.get("github_token_required"))
+                needs_model_key = bool(job.get("model_api_key_required"))
                 token_input = (
                     '<input type="password" data-github-token-input autocomplete="new-password" '
                     'placeholder="Fresh GitHub token" aria-label="Fresh GitHub token" '
                     'style="width: 220px; padding: 0.4rem; margin-right: 0.4rem;">'
                     if needs_token else ""
                 )
-                button_text = "Resume with token" if needs_token else "Resume from checkpoint"
+                model_key_input = (
+                    '<input type="password" data-model-api-key-input autocomplete="new-password" '
+                    'placeholder="Fresh model API key" aria-label="Fresh model API key" '
+                    'style="width: 220px; padding: 0.4rem; margin-right: 0.4rem;">'
+                    if needs_model_key else ""
+                )
+                button_text = "Resume with credentials" if needs_token or needs_model_key else "Resume from checkpoint"
                 cells += (
-                    f'<td>{token_input}<button type="button" data-resume-job-id="{job_id}" '
-                    f'data-requires-github-token="{str(needs_token).lower()}">{button_text}</button></td>'
+                    f'<td>{token_input}{model_key_input}<button type="button" data-resume-job-id="{job_id}" '
+                    f'data-requires-github-token="{str(needs_token).lower()}" '
+                    f'data-requires-model-api-key="{str(needs_model_key).lower()}">{button_text}</button></td>'
                 )
             rows += f"<tr>{cells}</tr>"
         if not jobs:
@@ -2016,9 +2124,15 @@ document.addEventListener('click', async (event) => {
     }
 
     const tokenInput = button.closest('tr').querySelector('[data-github-token-input]');
+    const modelKeyInput = button.closest('tr').querySelector('[data-model-api-key-input]');
     let githubToken = tokenInput ? tokenInput.value.trim() : '';
+    let modelApiKey = modelKeyInput ? modelKeyInput.value.trim() : '';
     if (button.dataset.requiresGithubToken === 'true' && !githubToken) {
         window.alert('Enter a fresh GitHub token to resume this dataset job.');
+        return;
+    }
+    if (button.dataset.requiresModelApiKey === 'true' && !modelApiKey) {
+        window.alert('Enter a fresh model API key to resume this job.');
         return;
     }
 
@@ -2027,6 +2141,7 @@ document.addEventListener('click', async (event) => {
         const jobId = button.dataset.resumeJobId;
         const headers = {'X-API-Key': apiKey};
         if (githubToken) headers['X-GitHub-Token'] = githubToken;
+        if (modelApiKey) headers['X-Model-API-Key'] = modelApiKey;
         const response = await fetch(`/jobs/${encodeURIComponent(jobId)}/resume`, {
             method: 'POST',
             headers,
@@ -2041,6 +2156,8 @@ document.addEventListener('click', async (event) => {
     } finally {
         if (tokenInput) tokenInput.value = '';
         githubToken = '';
+        modelApiKey = '';
+        if (modelKeyInput) modelKeyInput.value = '';
     }
 });
 </script>
@@ -2079,7 +2196,7 @@ h1 svg {{ flex-shrink: 0; }}
 {nebius_section}
 {build_table("Running", running)}
 {build_table("Paused (awaiting Nebius recovery)", paused)}
-<p>Paused jobs requiring GitHub credentials wait for manual resume. Enter a fresh token in the action column. Other paused jobs await automatic Nebius recovery; exhausted recoveries appear under “Manual resume required”.</p>
+<p>Paused jobs requiring credentials wait for manual resume. Enter fresh credentials in the action column. Other paused jobs await automatic Nebius recovery; exhausted recoveries appear under “Manual resume required”.</p>
 {build_table("Manual resume required", manual_resume_required, include_resume_action=True)}
 {build_table("Queued", queued)}
 {build_table("Completed", completed)}
@@ -2143,6 +2260,14 @@ def _github_token(request: Request | None) -> SecretStr | None:
     return SecretStr(value) if value else None
 
 
+def _model_api_key(request: Request | None) -> SecretStr | None:
+    """Read the request-scoped model credential without entering a JSON model."""
+    value = request.headers.get("X-Model-API-Key", "") if request else ""
+    if len(value) > 4096 or any(ord(char) < 33 or ord(char) > 126 for char in value):
+        raise HTTPException(status_code=400, detail="Invalid model API key header")
+    return SecretStr(value) if value else None
+
+
 def _job_create_response(row: dict, message: str) -> CreateJobResponse:
     """Reconstruct a create response from a job persisted in the queue store."""
     try:
@@ -2192,6 +2317,9 @@ async def create_job(
     submitted_dataset = req.dataset
     if req.github_dataset:
         req.dataset = req.github_dataset.local_path
+    model_api_key = _model_api_key(request)
+    if model_api_key and req.agent.value == "oracle":
+        raise HTTPException(status_code=400, detail="oracle cannot use a model API key")
 
     # Skip harbor command validation for nebius jobs (server_url is a placeholder)
     nebius_gpu_config = _parse_nebius_url(req.server_url)
@@ -2203,23 +2331,17 @@ async def create_job(
                 status_code=400,
                 detail=f"Unknown resource config '{nebius_gpu_config}'. Choose from: {', '.join(RESOURCE_CONFIG_REGISTRY)}",
             )
-    elif is_openrouter(req.server_url):
-        # Skip HarborCommandBuilder().build() for openrouter jobs: build() runs
-        # each agent's configure(), and PiAgentConfig.configure() writes the
-        # real OpenRouter key to models.json on the API host's CWD as a side
-        # effect. Validate cheaply instead, deferring dataset-existence checks
-        # to run time (same trade-off as the nebius branch above).
-        try:
-            resolve_provider(req.server_url)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if req.agent.value in OPENROUTER_UNSUPPORTED_AGENTS:
-            raise HTTPException(status_code=400, detail=f"agent '{req.agent.value}' cannot use OpenRouter")
+    elif model_api_key:
+        # Building agent configs during validation would write the supplied key
+        # to files on the API host. Validate the URL and defer configuration to
+        # the isolated parent pod.
+        server_url_errors = validate_server_url(req.server_url)
+        if server_url_errors:
+            raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
     else:
-        if req.server_url.lower() != "openrouter":
-            server_url_errors = validate_server_url(req.server_url)
-            if server_url_errors:
-                raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
+        server_url_errors = validate_server_url(req.server_url)
+        if server_url_errors:
+            raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
         try:
             HarborCommandBuilder().build(
                 agent=req.agent,
@@ -2253,6 +2375,7 @@ async def create_job(
             idempotency_key=idempotency_key,
             github_dataset=req.github_dataset,
             github_token_required=token is not None,
+            model_api_key_required=model_api_key is not None,
         )
     except sqlite3.IntegrityError:
         # A concurrent retry may win the unique-key race between the lookup above
@@ -2265,7 +2388,8 @@ async def create_job(
         raise HTTPException(status_code=409, detail="Job already exists")
     _job_queue.append(
         QueuedJob(job_id, command, req.server_url, req.model_name,
-                  github_dataset=req.github_dataset, github_token=token)
+                  github_dataset=req.github_dataset, github_token=token,
+                  model_api_key=model_api_key)
     )
     _job_event.set()
 
@@ -2337,6 +2461,8 @@ async def delete_job(job_id: str):
         # race was lost, fall through to the normal cancel path with a
         # refreshed row.
         if job_store.update_status_if(job_id, JobStatus.PAUSED, JobStatus.CANCELLED):
+            if job_row.get("model_api_key_required"):
+                await OpenshiftJob(job_id).delete_model_api_key_secret()
             return {"message": "Job cancelled", "job_id": job_id}
         job_row = job_store.get(job_id)
         if not job_row:
@@ -2351,6 +2477,7 @@ async def delete_job(job_id: str):
             ):
                 _job_queue.pop(i)
                 queued.github_token = None
+                queued.model_api_key = None
                 job_store.update_status(job_id, JobStatus.CANCELLED)
                 return {"message": "Job cancelled", "job_id": job_id}
             if job_row["status"] in (
@@ -2414,11 +2541,9 @@ def _build_resume_shell_command(
         resume_command += ["-f", error_type]
 
     # URL replacement only applies to real, changing hostnames (e.g. a new
-    # nebius instance IP). It is skipped for nebius placeholders (deferred to
-    # the worker) and for the openrouter sentinel, whose URL is static and
-    # already baked into the restored config.
+    # nebius instance IP). Nebius placeholders are deferred to the worker.
     url_replace_step = ""
-    if server_url and _parse_nebius_url(server_url) is None and not is_openrouter(server_url):
+    if server_url and _parse_nebius_url(server_url) is None:
         url_replace_step = _build_url_replace_shell_step(server_url, py_job_dir)
 
     completion_check = shlex.join([
@@ -2503,6 +2628,15 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
         if not source.commit:
             raise HTTPException(status_code=400, detail="Dataset preparation never completed; submit a new job")
     token = _github_token(request) if source else None
+    model_api_key = _model_api_key(request)
+    model_api_key_required = bool(job_row.get("model_api_key_required") or model_api_key)
+    if model_api_key and job_row.get("agent") == "oracle":
+        raise HTTPException(status_code=400, detail="oracle cannot use a model API key")
+    if model_api_key_required and model_api_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="A fresh model API key is required to resume this job",
+        )
     github_token_required = bool(
         source and (job_row.get("github_token_required") or token is not None)
     )
@@ -2546,6 +2680,7 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
             effective_server_url,
             original_job_name,
             github_token_required=github_token_required,
+            model_api_key_required=model_api_key_required,
         ):
             raise HTTPException(status_code=409, detail="Job left the paused state; refresh before retrying")
         # Replace any scheduled automatic recovery so it cannot consume this
@@ -2553,9 +2688,11 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
         for queued in _job_queue:
             if queued.job_id == job_id:
                 queued.github_token = None
+                queued.model_api_key = None
         _job_queue[:] = [queued for queued in _job_queue if queued.job_id != job_id]
         _job_queue.append(QueuedJob(job_id, command, effective_server_url, job_row["model_name"],
-                                    github_dataset=source, github_token=token))
+                                    github_dataset=source, github_token=token,
+                                    model_api_key=model_api_key))
         _job_event.set()
         return {"message": "Paused job queued for resume", "job_id": job_id, "job_name": job_row["job_name"]}
     claim_checkpoint = (
@@ -2571,12 +2708,14 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
         results_job_name=original_job_name,
         github_dataset=source,
         github_token_required=github_token_required,
+        model_api_key_required=model_api_key_required,
         **({"resume_parent_id": job_id} if claim_checkpoint else {}),
     )
     if claim_checkpoint and not inserted:
         raise HTTPException(status_code=409, detail="Checkpoint was claimed or job state changed; refresh before retrying")
     _job_queue.append(QueuedJob(resume_job_id, command, effective_server_url, job_row["model_name"],
-                                github_dataset=source, github_token=token))
+                                github_dataset=source, github_token=token,
+                                model_api_key=model_api_key))
     _job_event.set()
 
     return {

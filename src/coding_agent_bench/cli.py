@@ -3,16 +3,18 @@ import os
 import signal
 import subprocess
 import sys
+import asyncio
 from typing import Annotated, Optional
 import shlex
 
 import click
 import typer
+from pydantic import SecretStr
 from typer.core import TyperCommand
 
 from coding_agent_bench.builder import HarborCommandBuilder, SupportedAgent
 from coding_agent_bench.job import OpenshiftJob
-from coding_agent_bench.providers import is_openrouter
+from coding_agent_bench.providers import MODEL_API_KEY_ENV
 from coding_agent_bench.manifest import deploy as deploy_model
 from coding_agent_bench.manifest import generate
 from coding_agent_bench.utils import (
@@ -107,6 +109,12 @@ def get_cab_option_names() -> set[str]:
     }
 
 
+def _redact_command(command: list[str], secret: str | None) -> list[str]:
+    """Prevent a model key embedded in Harbor config arguments from being printed."""
+    if not secret:
+        return command
+    return [argument.replace(secret, "<redacted>") for argument in command]
+
 @app.command(
     cls=NoDuplicateOptionsCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -120,6 +128,8 @@ def run(
     dataset: Annotated[str, typer.Option(help="Dataset name or path")],
     model_name: Annotated[str, typer.Option(help="Model name")],
     server_url: Annotated[str, typer.Option(help="Model server URL")],
+    api_key: Annotated[Optional[str], typer.Option(help="Model API key (prefer --api-key-env)")] = None,
+    api_key_env: Annotated[Optional[str], typer.Option(help="Environment variable containing the model API key")] = None,
     environment: Annotated[
         str, typer.Option(help="Environment: docker or openshift")
     ] = "docker",
@@ -171,6 +181,13 @@ def run(
     ] = False,
 ):
     """Run a benchmark with full Harbor configuration support."""
+    if api_key is not None and api_key_env is not None:
+        raise typer.BadParameter("Use only one of --api-key or --api-key-env")
+    if api_key_env:
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise typer.BadParameter(f"Environment variable {api_key_env} is not set")
+    model_api_key = SecretStr(api_key) if api_key else None
     # Raise error if remote is used and environment is not openshift
     if remote and environment != "openshift":
         raise ValueError("Remote mode is only available with `--environment=openshift`")
@@ -193,7 +210,20 @@ def run(
             typer.echo("Error: Cannot use `--remote` with `--dry-run`. Dry run mode is not available on remote")
         typer.echo("Running job on remote server...")
         job = OpenshiftJob(job_name=job_name)
-        remote_args = [a for a in sys.argv[1:] if a not in ("--remote", "--dry-run")]
+        remote_args = []
+        skip_next = False
+        for arg in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in ("--remote", "--dry-run"):
+                continue
+            if arg in ("--api-key", "--api-key-env"):
+                skip_next = True
+                continue
+            if arg.startswith("--api-key=") or arg.startswith("--api-key-env="):
+                continue
+            remote_args.append(arg)
         command = ["coding-agent-bench", "run", *remote_args]
         
         # Parse before script if provided
@@ -206,14 +236,30 @@ def run(
         
         # Create the job
         try:
-            job.run(command, _before_script, openrouter=is_openrouter(server_url))
+            if model_api_key:
+                asyncio.run(job.create_model_api_key_secret(model_api_key))
+            job.run(
+                command,
+                _before_script,
+                model_api_key_secret=(job.model_api_key_secret_name if model_api_key else None),
+            )
         except KeyboardInterrupt:
             typer.echo("\nInterrupted — cleaning up remote job...")
             job.cleanup()
             raise SystemExit(130)
+        except BaseException:
+            if model_api_key:
+                asyncio.run(job.delete_model_api_key_secret())
+            raise
         typer.echo("Job started successfully")
 
     else:
+        # Harbor redacts sensitive --ae values when serializing its job config
+        # unless the matching host environment variable is present. Export the
+        # generic key in this process so it is templated as ${CAB_MODEL_API_KEY}
+        # and remains resolvable by the agent process.
+        if model_api_key:
+            os.environ[MODEL_API_KEY_ENV] = model_api_key.get_secret_value()
         builder = HarborCommandBuilder()
         harbor_command, job_dir = builder.build(
             agent=agent,
@@ -231,12 +277,16 @@ def run(
             retry_include=retry_include,
             skills=skills,
             extra_harbor_args=extra_harbor_args,
+            api_key=model_api_key.get_secret_value() if model_api_key else None,
         )
         preview = ""
         if dry_run:
             export_lines = envs_to_export_lines(extra_envs)
             preview = f"{export_lines}\n" if export_lines else ""
-        typer.echo(f"Job command:\n{preview}{cmd_to_string(harbor_command)}\n")
+        typer.echo(
+            f"Job command:\n{preview}"
+            f"{cmd_to_string(_redact_command(harbor_command, api_key or os.environ.get(MODEL_API_KEY_ENV)))}\n"
+        )
 
         if dry_run:
             return

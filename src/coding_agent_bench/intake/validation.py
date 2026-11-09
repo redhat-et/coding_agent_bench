@@ -129,7 +129,7 @@ def validate_row(
 
     if not server_url:
         errors.append("Server URL is empty")
-    elif server_url.lower() != "openrouter":
+    else:
         nebius_errors = _validate_nebius_resource(server_url)
         if nebius_errors is not None:
             errors.extend(nebius_errors)

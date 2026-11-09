@@ -7,6 +7,8 @@ from pathlib import Path
 import shlex
 from urllib.parse import urlsplit
 
+from coding_agent_bench.providers import MODEL_API_KEY_ENV
+
 
 def is_resume_command(command: list[str]) -> bool:
     """Recognize the queue's shell-command representation of a resume."""
@@ -127,6 +129,22 @@ def _update_agent_endpoint(agent: dict, server_url: str) -> None:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode)
 
 
+def _update_claude_auth(agent: dict) -> None:
+    """Use the resume pod's fresh key instead of saved/redacted Claude auth."""
+    if agent.get("name") == "openclaw" and os.environ.get(MODEL_API_KEY_ENV):
+        agent.setdefault("env", {})["OPENAI_API_KEY"] = "${" + MODEL_API_KEY_ENV + "}"
+        return
+    if agent.get("name") != "claude-code" or not os.environ.get(MODEL_API_KEY_ENV):
+        return
+    env = agent.setdefault("env", {})
+    key_ref = "${" + MODEL_API_KEY_ENV + "}"
+    if "ANTHROPIC_AUTH_TOKEN" in env:
+        env["ANTHROPIC_API_KEY"] = ""
+        env["ANTHROPIC_AUTH_TOKEN"] = key_ref
+    else:
+        env["ANTHROPIC_API_KEY"] = key_ref
+
+
 def _restore_agent_mounts(config: dict, server_url: str) -> None:
     """Let each registered agent recreate its own external bind-mounted files."""
     from coding_agent_bench.agents import AGENT_REGISTRY
@@ -147,6 +165,7 @@ def update_endpoint(job_dir: Path, server_url: str) -> None:
         before = json.dumps(document)
         for config in _config_documents(document):
             for agent in _agents(config):
+                _update_claude_auth(agent)
                 _update_agent_endpoint(agent, server_url)
         if json.dumps(document) != before:
             _write_metadata(path, document)

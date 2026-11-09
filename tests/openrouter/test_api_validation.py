@@ -2,11 +2,7 @@
 
 These exercise the full FastAPI app via TestClient rather than just the unit
 helpers in `providers.py` / `agents/configs.py`, to confirm `POST /jobs`
-actually returns clean 400s for the two openrouter validation cases handled
-in `create_job` (unsupported agent, missing OPENROUTER_API_KEY) instead of
-falling through to HarborCommandBuilder().build() (which would write the real
-key to disk for the `pi` agent — see providers.OPENROUTER_UNSUPPORTED_AGENTS
-and api.create_job).
+uses OpenRouter's hostname as an ordinary server URL.
 
 Env vars that gate app import-time and lifespan behavior (JOB_STORE_PATH,
 API_KEY) must be set BEFORE `coding_agent_bench.api` is imported, since
@@ -17,11 +13,11 @@ network access.
 
 import os
 import tempfile
+import json
 
 _tmp_dir = tempfile.mkdtemp(prefix="cab-openrouter-api-test-")
 os.environ["JOB_STORE_PATH"] = os.path.join(_tmp_dir, "jobs.db")
 os.environ.setdefault("API_KEY", "test-api-key")
-os.environ.pop("OPENROUTER_API_KEY", None)
 os.environ.pop("NEBIUS_ENABLED", None)
 
 import pytest  # noqa: E402
@@ -44,25 +40,22 @@ def client():
         yield c
 
 
-def test_create_job_openrouter_unsupported_agent_returns_400(client, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+def test_create_job_openrouter_uses_hostname(client):
     resp = client.post(
         "/jobs",
-        headers=HEADERS,
+        headers={**HEADERS, "X-Model-API-Key": "sk-or-test"},
         json={
             "job_name": "test-oracle-openrouter",
-            "agent": "oracle",
+            "agent": "codex",
             "dataset": "some-dataset",
             "model_name": "openai/gpt-4o",
-            "server_url": "openrouter",
+            "server_url": "https://openrouter.ai/api",
         },
     )
-    assert resp.status_code == 400, resp.text
-    assert "openrouter" in resp.text.lower()
+    assert resp.status_code == 200, resp.text
 
 
-def test_create_job_openrouter_missing_key_returns_400(client, monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_create_job_rejects_the_removed_openrouter_sentinel(client):
     resp = client.post(
         "/jobs",
         headers=HEADERS,
@@ -75,23 +68,24 @@ def test_create_job_openrouter_missing_key_returns_400(client, monkeypatch):
         },
     )
     assert resp.status_code == 400, resp.text
-    assert "OPENROUTER_API_KEY" in resp.text
+    assert "https" in resp.text.lower()
 
 
-def test_resume_openrouter_job_is_allowed(client, monkeypatch):
-    # Resuming an OpenRouter job works: the restored config already carries the
-    # OpenRouter URL and key, so no URL rewrite is needed (same as a static
-    # vLLM-route resume).
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+def test_resume_openrouter_job_is_allowed(client):
+    # Resuming an OpenRouter job uses the same URL rewrite path as other
+    # explicitly configured endpoints.
     from coding_agent_bench.api import JobStatus, job_store
 
     job_id = "resume-openrouter-test"
     job_store.insert(
         job_id, "or-job", "codex", "some-dataset", "openai/gpt-4o",
-        "openrouter", ["sh", "-c", "echo hi"],
+        "https://openrouter.ai/api", ["sh", "-c", "echo hi"],
     )
     job_store.update_status(job_id, JobStatus.COMPLETED)
 
-    resp = client.post(f"/jobs/{job_id}/resume", headers=HEADERS)
+    resp = client.post(f"/jobs/{job_id}/resume", headers={**HEADERS, "X-Model-API-Key": "sk-or-test"})
     assert resp.status_code == 200, resp.text
     assert "not supported" not in resp.text.lower()
+    row = job_store.get(resp.json()["job_id"])
+    assert row["model_api_key_required"] == 1
+    assert "sk-or-test" not in json.dumps(row)

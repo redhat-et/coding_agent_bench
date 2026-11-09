@@ -115,6 +115,38 @@ def test_transport_changes_update_all_metadata_but_not_artifacts(tmp_path, new_u
     assert {path: path.read_bytes() for path in documents} == first
 
 
+@pytest.mark.parametrize("auth_env", [
+    {"ANTHROPIC_API_KEY": "redacted"},
+    {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "redacted"},
+])
+def test_resume_restores_claude_auth_from_fresh_model_key(tmp_path, monkeypatch, auth_env):
+    monkeypatch.setenv("CAB_MODEL_API_KEY", "fresh-key")
+    config = {"agents": [{"name": "claude-code", "env": auth_env}]}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    update_endpoint(tmp_path, "https://model.example.com")
+
+    restored = json.loads((tmp_path / "config.json").read_text())["agents"][0]["env"]
+    if "ANTHROPIC_AUTH_TOKEN" in auth_env:
+        assert restored["ANTHROPIC_API_KEY"] == ""
+        assert restored["ANTHROPIC_AUTH_TOKEN"] == "${CAB_MODEL_API_KEY}"
+    else:
+        assert restored["ANTHROPIC_API_KEY"] == "${CAB_MODEL_API_KEY}"
+    assert "fresh-key" not in (tmp_path / "config.json").read_text()
+
+
+def test_resume_restores_openclaw_auth_from_fresh_model_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAB_MODEL_API_KEY", "fresh-key")
+    config = {"agents": [{"name": "openclaw", "env": {"OPENAI_API_KEY": "saved-key"}}]}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    update_endpoint(tmp_path, "https://model.example.com")
+
+    restored = json.loads((tmp_path / "config.json").read_text())["agents"][0]["env"]
+    assert restored["OPENAI_API_KEY"] == "${CAB_MODEL_API_KEY}"
+    assert "fresh-key" not in (tmp_path / "config.json").read_text()
+
+
 @pytest.mark.parametrize("name,target,filename", [
     ("codex", "/root/.codex/config.toml", "config.toml"),
     ("pi", "/root/.pi/agent/models.json", "models.json"),
@@ -157,7 +189,7 @@ def test_ui_explains_and_offers_manual_resume_for_exhausted_checkpoint(store, mo
 
     page = asyncio.run(api.ui())
 
-    assert "Paused jobs requiring GitHub credentials wait for manual resume" in page
+    assert "Paused jobs requiring credentials wait for manual resume" in page
     assert "Manual resume required" in page
     assert 'data-resume-job-id="manual"' in page
     assert "Resume from checkpoint" in page
