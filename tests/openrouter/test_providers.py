@@ -1,6 +1,8 @@
 import pytest
 
 from coding_agent_bench.providers import (
+    ANTHROPIC_AUTH_HEADER,
+    BEARER_AUTH_HEADER,
     OPENROUTER_BASE_URL,
     is_openai,
     is_openrouter,
@@ -29,9 +31,10 @@ def test_openrouter_base_url_excludes_v1():
 
 
 def test_resolve_openrouter_returns_url_and_key():
-    base_url, api_key = resolve_provider("openrouter", "sk-or-test")
+    base_url, api_key, auth_header = resolve_provider("openrouter", "sk-or-test")
     assert base_url == OPENROUTER_BASE_URL
     assert api_key == "sk-or-test"
+    assert auth_header == BEARER_AUTH_HEADER
 
 
 def test_resolve_openrouter_missing_key_raises():
@@ -41,6 +44,12 @@ def test_resolve_openrouter_missing_key_raises():
 
 def test_resolve_non_openrouter_passthrough(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    base_url, api_key = resolve_provider("https://vllm.example.com")
+    base_url, api_key, auth_header = resolve_provider("https://vllm.example.com")
     assert base_url == "https://vllm.example.com"
     assert api_key is None
+    assert auth_header == ANTHROPIC_AUTH_HEADER
+
+
+def test_resolve_anthropic_compatible_endpoint_uses_api_key_header():
+    _, _, auth_header = resolve_provider("https://anthropic.example.com", "sk-ant-test")
+    assert auth_header == ANTHROPIC_AUTH_HEADER

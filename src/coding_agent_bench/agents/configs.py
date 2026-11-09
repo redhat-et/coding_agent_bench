@@ -6,6 +6,8 @@ from coding_agent_bench.agents.base import AgentConfig, AgentConfigResult
 from coding_agent_bench.helpers.codex import codex_create_toml
 from coding_agent_bench.models.configs import Qwen_Qwen3_8_27B, Qwen_Qwen3_8_27B_FP8
 from coding_agent_bench.providers import (
+    ANTHROPIC_AUTH_HEADER,
+    BEARER_AUTH_HEADER,
     MODEL_API_KEY_ENV,
     is_openai,
     is_openrouter,
@@ -51,7 +53,7 @@ class ClaudeCodeAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
+        base_url, api_key, auth_header = resolve_provider(server_url, kwargs.get("api_key"))
         agent_env = {
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": model_name,
@@ -63,10 +65,12 @@ class ClaudeCodeAgentConfig(AgentConfig):
         if model_name in (Qwen_Qwen3_8_27B.name, Qwen_Qwen3_8_27B_FP8.name):
             agent_kwargs = {"reasoning_effort": "xhigh"}
         if api_key:
-            # OpenRouter's Claude Code integration expects a blank
-            # ANTHROPIC_API_KEY and the key in ANTHROPIC_AUTH_TOKEN.
-            agent_env["ANTHROPIC_API_KEY"] = ""
-            agent_env["ANTHROPIC_AUTH_TOKEN"] = api_key
+            if auth_header == ANTHROPIC_AUTH_HEADER:
+                agent_env["ANTHROPIC_API_KEY"] = api_key
+            elif auth_header == BEARER_AUTH_HEADER:
+                # Bearer-auth gateways use Claude Code's auth token variable.
+                agent_env["ANTHROPIC_API_KEY"] = ""
+                agent_env["ANTHROPIC_AUTH_TOKEN"] = api_key
         else:
             agent_env["ANTHROPIC_API_KEY"] = "sk-no-key-required"
         return AgentConfigResult(
@@ -100,7 +104,7 @@ class CodexAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
 
         outpath = Path("config.toml").absolute()
         codex_create_toml(
@@ -139,7 +143,7 @@ class OpenClawAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
         agent_env = {
             "OPENAI_BASE_URL": base_url.rstrip("/").removesuffix("/v1") + "/v1",
             "OPENAI_API_KEY": api_key or "sk-no-key-required",
@@ -157,7 +161,7 @@ class OpenCodeAgentConfig(AgentConfig):
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
 
         native_openai = is_openai(server_url)
         provider_id = "openai" if native_openai else "vllm"
@@ -270,7 +274,7 @@ class PiAgentConfig(AgentConfig):
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
-        base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
         native_openai = is_openai(server_url)
         provider_id = "openai" if native_openai else "vllm"
 

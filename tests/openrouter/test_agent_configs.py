@@ -139,6 +139,15 @@ def test_claude_code_default_vllm(monkeypatch):
     assert result.agent_kwargs is None
 
 
+def test_claude_code_anthropic_compatible_endpoint_uses_api_key(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    result = ClaudeCodeAgentConfig().configure(
+        model_name="m", server_url="https://anthropic.example.com", api_key="sk-ant-test"
+    )
+    assert result.agent_env["ANTHROPIC_API_KEY"] == "sk-ant-test"
+    assert "ANTHROPIC_AUTH_TOKEN" not in result.agent_env
+
+
 def test_claude_code_qwen38_uses_xhigh_effort(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     result = ClaudeCodeAgentConfig().configure(
