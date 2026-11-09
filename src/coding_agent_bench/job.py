@@ -585,7 +585,11 @@ class OpenshiftJob:
     async def _wait_for_job_terminal(self) -> None:
         """Wait until the Job completes or fails before releasing its Secret."""
         while True:
-            job = await self._get_job()
+            try:
+                job = await self._get_job()
+            except RuntimeError:
+                await asyncio.sleep(5)
+                continue
             conditions = {
                 condition.get("type")
                 for condition in (job or {}).get("status", {}).get("conditions", [])

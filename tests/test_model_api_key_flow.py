@@ -235,3 +235,30 @@ def test_remote_job_deletes_attached_model_secret_after_failure(monkeypatch):
     asyncio.run(job.run_async(["echo", "ok"], model_api_key_secret="secret"))
 
     assert calls == ["apply", "attach", "ready", "terminal", "terminal", "delete-secret"]
+
+
+def test_remote_job_retries_transient_terminal_lookup_failure(monkeypatch):
+    from coding_agent_bench.job import OpenshiftJob
+
+    job = OpenshiftJob("remote")
+    states = iter([
+        RuntimeError("temporary API failure"),
+        {"status": {"conditions": [{"type": "Complete", "status": "True"}]}},
+    ])
+    sleeps = []
+
+    async def get_job():
+        state = next(states)
+        if isinstance(state, Exception):
+            raise state
+        return state
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(job, "_get_job", get_job)
+    monkeypatch.setattr("coding_agent_bench.job.asyncio.sleep", sleep)
+
+    asyncio.run(job._wait_for_job_terminal())
+
+    assert sleeps == [5]
