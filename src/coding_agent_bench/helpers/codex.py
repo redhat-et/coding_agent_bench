@@ -27,11 +27,7 @@ def _toml_string(value: str) -> str:
 
 def codex_create_toml(
     model_name: str, server_url: str, outpath: Path, requires_auth: bool = False,
-    openrouter: bool | None = None,
 ):
-    # ``openrouter`` remains a harmless compatibility alias for callers that
-    # used the old provider-specific option; authentication is now generic.
-    requires_auth = requires_auth or bool(openrouter)
     base_url = server_url.rstrip("/").removesuffix("/v1") + "/v1"
     wire_api = "responses"
     requires_openai_auth = "true" if requires_auth else "false"

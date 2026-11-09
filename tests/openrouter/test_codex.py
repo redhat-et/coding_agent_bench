@@ -15,7 +15,7 @@ def test_codex_toml_default_no_key(tmp_path):
 def test_codex_toml_openrouter(tmp_path):
     out = tmp_path / "config.toml"
     codex_create_toml(
-        "openai/gpt-4o", "https://openrouter.ai/api/v1", out, openrouter=True
+        "openai/gpt-4o", "https://openrouter.ai/api/v1", out, requires_auth=True
     )
     content = out.read_text()
     assert 'wire_api = "responses"' in content
@@ -28,7 +28,7 @@ def test_codex_toml_openrouter(tmp_path):
 def test_codex_agent_openrouter(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     result = CodexAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test"
+        model_name="openai/gpt-4o", server_url="https://openrouter.ai/api", api_key="sk-or-test"
     )
     assert result.agent_env["CAB_MODEL_API_KEY"] == "sk-or-test"
     content = (tmp_path / "config.toml").read_text()

@@ -17,7 +17,7 @@ def test_job_spec_injects_generic_model_secret():
 
 def test_job_spec_omits_model_secret_without_key():
     job = OpenshiftJob(job_name="test")
-    env = _env_by_name(job._job_spec(["echo", "hi"]))  # openrouter defaults to False
+    env = _env_by_name(job._job_spec(["echo", "hi"]))
     assert "CAB_MODEL_API_KEY" not in env
 
 

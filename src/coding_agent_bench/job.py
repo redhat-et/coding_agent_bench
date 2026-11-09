@@ -194,7 +194,6 @@ class OpenshiftJob:
         self,
         command: list[str],
         before_script: list[str] = None,
-        openrouter: bool = False,
         model_api_key_secret: str | None = None,
     ) -> dict:
         """Build a benchmark pod that logs output and uploads results before exit."""
@@ -642,11 +641,10 @@ class OpenshiftJob:
         self,
         command: list[str],
         before_script: list[str] = None,
-        openrouter: bool = False,
         model_api_key_secret: str | None = None,
     ):
         job_spec = self._job_spec(
-            command, before_script, openrouter=openrouter,
+            command, before_script,
             model_api_key_secret=model_api_key_secret,
         )
         job_json = json.dumps(job_spec)
@@ -672,11 +670,10 @@ class OpenshiftJob:
         self,
         command: list[str],
         before_script: list[str] = None,
-        openrouter: bool = False,
         model_api_key_secret: str | None = None,
     ):
         return asyncio.run(
-            self.run_async(command, before_script, openrouter=openrouter,
+            self.run_async(command, before_script,
                            model_api_key_secret=model_api_key_secret)
         )
 

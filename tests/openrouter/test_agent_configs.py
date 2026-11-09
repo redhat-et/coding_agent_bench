@@ -13,14 +13,13 @@ from coding_agent_bench.agents.configs import (
 
 def test_openclaw_openrouter():
     result = OpenClawAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test"
+        model_name="openai/gpt-4o", server_url="https://openrouter.ai/api", api_key="sk-or-test"
     )
     assert result.agent_env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
     assert result.agent_env["OPENAI_API_KEY"] == "sk-or-test"
 
 
-def test_openclaw_default_placeholder(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_openclaw_default_placeholder():
     result = OpenClawAgentConfig().configure(
         model_name="m", server_url="http://vllm:8000"
     )
@@ -30,7 +29,7 @@ def test_openclaw_default_placeholder(monkeypatch):
 
 def test_pi_openrouter(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    PiAgentConfig().configure(model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test")
+    PiAgentConfig().configure(model_name="openai/gpt-4o", server_url="https://openrouter.ai/api", api_key="sk-or-test")
     cfg = json.loads((tmp_path / "models.json").read_text())
     provider = cfg["providers"]["vllm"]
     assert provider["baseUrl"] == "https://openrouter.ai/api/v1"
@@ -39,7 +38,6 @@ def test_pi_openrouter(monkeypatch, tmp_path):
 
 def test_pi_default_placeholder(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     PiAgentConfig().configure(model_name="m", server_url="http://vllm:8000")
     cfg = json.loads((tmp_path / "models.json").read_text())
     assert cfg["providers"]["vllm"]["apiKey"] == "NONE"
@@ -77,7 +75,7 @@ def test_pi_openai_uses_responses_api(monkeypatch, tmp_path):
 
 def test_opencode_openrouter():
     result = OpenCodeAgentConfig().configure(
-        model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test"
+        model_name="openai/gpt-4o", server_url="https://openrouter.ai/api", api_key="sk-or-test"
     )
     cfg = json.loads(result.agent_env["OPENCODE_CONFIG_CONTENT"])
     provider = cfg["provider"]["vllm"]
@@ -88,8 +86,7 @@ def test_opencode_openrouter():
     assert "openai/gpt-4o" in provider["models"]
 
 
-def test_opencode_default_no_key(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_opencode_default_no_key():
     result = OpenCodeAgentConfig().configure(
         model_name="m", server_url="http://vllm:8000"
     )
@@ -126,14 +123,14 @@ def test_opencode_openai_detection_does_not_match_other_hosts():
     assert "limit" in provider["models"]["m"]
 
 
-def test_oracle_rejects_openrouter():
-    with pytest.raises(ValueError, match="OpenRouter"):
-        OracleAgentConfig().configure(model_name="m", server_url="openrouter")
+def test_oracle_uses_generic_server_url():
+    result = OracleAgentConfig().configure(model_name="m", server_url="https://openrouter.ai/api")
+    assert result.model == "m"
 
 
 def test_claude_code_openrouter():
     result = ClaudeCodeAgentConfig().configure(
-        model_name="anthropic/claude-opus-5", server_url="openrouter", api_key="sk-or-test"
+        model_name="anthropic/claude-opus-5", server_url="https://openrouter.ai/api", api_key="sk-or-test"
     )
     # OpenRouter's Claude Code integration: base URL without /v1, blank
     # ANTHROPIC_API_KEY, key in ANTHROPIC_AUTH_TOKEN.
@@ -142,8 +139,7 @@ def test_claude_code_openrouter():
     assert result.agent_env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-test"
 
 
-def test_claude_code_default_vllm(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_claude_code_default_vllm():
     result = ClaudeCodeAgentConfig().configure(
         model_name="m", server_url="http://vllm:8000"
     )
@@ -153,8 +149,7 @@ def test_claude_code_default_vllm(monkeypatch):
     assert result.agent_kwargs is None
 
 
-def test_claude_code_anthropic_compatible_endpoint_uses_api_key(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_claude_code_anthropic_compatible_endpoint_uses_api_key():
     result = ClaudeCodeAgentConfig().configure(
         model_name="m", server_url="https://anthropic.example.com", api_key="sk-ant-test"
     )
@@ -162,8 +157,7 @@ def test_claude_code_anthropic_compatible_endpoint_uses_api_key(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN" not in result.agent_env
 
 
-def test_claude_code_qwen38_uses_xhigh_effort(monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_claude_code_qwen38_uses_xhigh_effort():
     result = ClaudeCodeAgentConfig().configure(
         model_name="Qwen/Qwen3.8-27B", server_url="http://vllm:8000"
     )

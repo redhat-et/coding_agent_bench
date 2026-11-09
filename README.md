@@ -161,6 +161,13 @@ shell history or process listings. Remote CLI runs and queue API jobs use a
 per-job OpenShift Secret; the key is not included in the persisted command or
 jobs database. OpenRouter uses the same per-job key flow.
 
+OpenRouter is configured as a normal model endpoint using its URL, for example
+`https://openrouter.ai/api`, together with `--api-key-env` or `--api-key`. The
+legacy `openrouter` server URL value is not supported. Claude Code uses
+OpenRouter's bearer-token authentication automatically when the endpoint
+hostname is `openrouter.ai`; other agents use their normal OpenAI-compatible
+configuration.
+
 > [!note]
 > Additional configuration options are available, use `uv run coding-agent-bench run --help` to see them.
 

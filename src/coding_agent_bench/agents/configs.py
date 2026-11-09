@@ -39,8 +39,6 @@ class OracleAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         if kwargs.get("api_key"):
             raise ValueError("oracle is a non-LLM agent and cannot use a model API key")
-        if is_openrouter(kwargs["server_url"]):
-            raise ValueError("oracle is a non-LLM agent and cannot use OpenRouter")
         return AgentConfigResult(model=kwargs["model_name"])
 
 
@@ -53,7 +51,8 @@ class ClaudeCodeAgentConfig(AgentConfig):
     def configure(self, **kwargs) -> AgentConfigResult:
         model_name = kwargs["model_name"]
         server_url = kwargs["server_url"]
-        base_url, api_key, auth_header = resolve_provider(server_url, kwargs.get("api_key"))
+        base_url, api_key, _ = resolve_provider(server_url, kwargs.get("api_key"))
+        auth_header = BEARER_AUTH_HEADER if is_openrouter(server_url) else ANTHROPIC_AUTH_HEADER
         agent_env = {
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": model_name,

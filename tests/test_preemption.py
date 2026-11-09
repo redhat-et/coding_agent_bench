@@ -117,7 +117,7 @@ class FlowJob:
         self.pauses = []
         self.ready_waits = 0
 
-    def _job_spec(self, command, openrouter=False):
+    def _job_spec(self, command):
         return {}
 
     def _resume_job_spec(self, shell_command):

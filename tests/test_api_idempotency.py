@@ -31,7 +31,7 @@ def _request(key: str = "intake-test-key") -> api.CreateJobRequest:
         agent="codex",
         dataset="swe-bench/swe-bench-verified",
         model_name="Qwen/Qwen3-32B",
-        server_url="openrouter",
+        server_url="https://openrouter.ai/api",
         idempotency_key=key,
     )
 
@@ -45,7 +45,7 @@ def test_job_store_enforces_unique_idempotency_keys(tmp_path):
         "oracle",
         "dataset",
         "model",
-        "openrouter",
+        "https://openrouter.ai/api",
         ["command"],
     )
     store.insert(*args, idempotency_key="same-key")

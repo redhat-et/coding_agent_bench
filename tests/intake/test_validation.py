@@ -77,11 +77,11 @@ def test_empty_url():
 
 
 def test_openrouter_url_accepted():
-    """Allow the OpenRouter sentinel without URL parsing."""
+    """Validate OpenRouter as an ordinary HTTPS endpoint."""
     errors = validate_row(
         agent="codex",
         dataset="swe-bench/swe-bench-verified",
-        server_url="openrouter",
+        server_url="https://openrouter.ai/api",
     )
     assert errors == []
 

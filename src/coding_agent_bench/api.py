@@ -23,7 +23,6 @@ from coding_agent_bench.utils import (
     validate_extra_harbor_flags,
     validate_remote_skill_sources,
 )
-from coding_agent_bench.providers import is_openrouter, resolve_provider, OPENROUTER_UNSUPPORTED_AGENTS
 from coding_agent_bench.agents import AGENT_REGISTRY
 from coding_agent_bench.github_datasets import GitHubDataset
 from coding_agent_bench.ui import build_submit_form_html
@@ -86,7 +85,7 @@ def _worker_server_url_errors(
     generated IP endpoint is checked for public reachability without applying the
     normal HTTPS-only requirement.
     """
-    if not server_url or server_url.lower() == "openrouter":
+    if not server_url:
         return []
     if managed_endpoint:
         parsed = urlparse(server_url)
@@ -472,7 +471,7 @@ class CreateJobRequest(BaseModel):
     agent: SupportedAgent = Field(..., description="Agent to use")
     dataset: str = Field(..., description="Dataset name or path")
     model_name: str = Field(..., description="Model name")
-    server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' for managed Nebius instances, or 'openrouter' for OpenRouter")
+    server_url: str = Field(..., description="Model server URL; 'nebius-<resource>' for managed Nebius instances")
     dataset_pattern: Optional[str] = Field(None, description="Pattern to filter dataset tasks")
     n_concurrent: int | None = Field(None, description="Number of concurrent tasks")
     n_tasks: Optional[int] = Field(None, description="Total number of tasks to run")
@@ -1438,7 +1437,6 @@ async def _run_job(
     command: list[str],
     server_url: str | None = None,
     managed_endpoint: bool = False,
-    openrouter: bool = False,
     adopt_existing: bool = False,
     nebius_instance_name: str | None = None,
     queued_job: QueuedJob | None = None,
@@ -1473,7 +1471,7 @@ async def _run_job(
                 job_spec = (
                     oj._job_spec(command, model_api_key_secret=model_api_key_secret)
                     if model_api_key_secret
-                    else oj._job_spec(command, openrouter=openrouter)
+                    else oj._job_spec(command)
                 )
             if queued_job and queued_job.github_dataset:
                 job_spec = oj.with_github_dataset(job_spec)
@@ -1850,7 +1848,6 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 command,
                 server_url=None if adopt_existing else job_server_url,
                 managed_endpoint=managed_endpoint,
-                openrouter=is_openrouter(server_url),
                 adopt_existing=adopt_existing,
                 nebius_instance_name=nebius_instance_name,
                 model_api_key_secret=model_api_key_secret,
@@ -2313,31 +2310,17 @@ async def create_job(
                 status_code=400,
                 detail=f"Unknown resource config '{nebius_gpu_config}'. Choose from: {', '.join(RESOURCE_CONFIG_REGISTRY)}",
             )
-    elif is_openrouter(req.server_url):
-        # Skip HarborCommandBuilder().build() for openrouter jobs: build() runs
-        # each agent's configure(), and PiAgentConfig.configure() writes the
-        # real OpenRouter key to models.json on the API host's CWD as a side
-        # effect. Validate cheaply instead, deferring dataset-existence checks
-        # to run time (same trade-off as the nebius branch above).
-        try:
-            resolve_provider(req.server_url, model_api_key.get_secret_value() if model_api_key else None)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if req.agent.value in OPENROUTER_UNSUPPORTED_AGENTS:
-            raise HTTPException(status_code=400, detail=f"agent '{req.agent.value}' cannot use OpenRouter")
     elif model_api_key:
         # Building agent configs during validation would write the supplied key
         # to files on the API host. Validate the URL and defer configuration to
         # the isolated parent pod.
-        if req.server_url.lower() != "openrouter":
-            server_url_errors = validate_server_url(req.server_url)
-            if server_url_errors:
-                raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
+        server_url_errors = validate_server_url(req.server_url)
+        if server_url_errors:
+            raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
     else:
-        if req.server_url.lower() != "openrouter":
-            server_url_errors = validate_server_url(req.server_url)
-            if server_url_errors:
-                raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
+        server_url_errors = validate_server_url(req.server_url)
+        if server_url_errors:
+            raise HTTPException(status_code=400, detail="; ".join(server_url_errors))
         try:
             HarborCommandBuilder().build(
                 agent=req.agent,
@@ -2537,11 +2520,9 @@ def _build_resume_shell_command(
         resume_command += ["-f", error_type]
 
     # URL replacement only applies to real, changing hostnames (e.g. a new
-    # nebius instance IP). It is skipped for nebius placeholders (deferred to
-    # the worker) and for the openrouter sentinel, whose URL is static and
-    # already baked into the restored config.
+    # nebius instance IP). Nebius placeholders are deferred to the worker.
     url_replace_step = ""
-    if server_url and _parse_nebius_url(server_url) is None and not is_openrouter(server_url):
+    if server_url and _parse_nebius_url(server_url) is None:
         url_replace_step = _build_url_replace_shell_step(server_url, py_job_dir)
 
     completion_check = shlex.join([
