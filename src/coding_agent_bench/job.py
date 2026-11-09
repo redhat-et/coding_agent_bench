@@ -71,18 +71,23 @@ class OpenshiftJob:
     def model_api_key_secret_name(self) -> str:
         return f"cab-model-key-{self._job_name}"[:63]
 
-    async def create_model_api_key_secret(self, api_key: SecretStr) -> None:
+    async def create_model_api_key_secret(
+        self, api_key: SecretStr, *, queue_owned: bool = False
+    ) -> None:
         """Create the per-job credential Secret without putting it in argv."""
+        labels = {
+            "app": "coding-agent-bench",
+            "coding-agent-bench-job": self._job_name,
+            "coding-agent-bench-purpose": "model-api-key",
+        }
+        if queue_owned:
+            labels["coding-agent-bench-owner"] = "queue"
         secret = {
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": {
                 "name": self.model_api_key_secret_name,
-                "labels": {
-                    "app": "coding-agent-bench",
-                    "coding-agent-bench-job": self._job_name,
-                    "coding-agent-bench-purpose": "model-api-key",
-                },
+                "labels": labels,
             },
             "type": "Opaque",
             "stringData": {"key": api_key.get_secret_value()},

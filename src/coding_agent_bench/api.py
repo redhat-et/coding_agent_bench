@@ -1030,9 +1030,15 @@ async def _cleanup_model_api_key_secrets() -> None:
         }
         for secret in secrets:
             metadata = secret.get("metadata", {})
-            job_id = metadata.get("labels", {}).get("coding-agent-bench-job")
+            labels = metadata.get("labels", {})
+            job_id = labels.get("coding-agent-bench-job")
             name = metadata.get("name")
-            if name and job_id not in active:
+            if (
+                name
+                and labels.get("coding-agent-bench-owner") == "queue"
+                and job_id
+                and job_id not in active
+            ):
                 await _run_oc(["delete", "secret", name, "--ignore-not-found"])
     except Exception:
         logger.exception("Model API Secret cleanup failed")
@@ -1699,7 +1705,7 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         model_api_key_secret = oj.model_api_key_secret_name if model_api_key_required else None
         if model_api_key_required:
             if queued.model_api_key:
-                await oj.create_model_api_key_secret(queued.model_api_key)
+                await oj.create_model_api_key_secret(queued.model_api_key, queue_owned=True)
             elif adopt_existing and not await oj.model_api_key_secret_exists():
                 job_store.update_status(
                     job_id, JobStatus.FAILED,
