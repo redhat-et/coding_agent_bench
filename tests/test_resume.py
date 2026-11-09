@@ -135,6 +135,18 @@ def test_resume_restores_claude_auth_from_fresh_model_key(tmp_path, monkeypatch,
     assert "fresh-key" not in (tmp_path / "config.json").read_text()
 
 
+def test_resume_restores_openclaw_auth_from_fresh_model_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAB_MODEL_API_KEY", "fresh-key")
+    config = {"agents": [{"name": "openclaw", "env": {"OPENAI_API_KEY": "saved-key"}}]}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    update_endpoint(tmp_path, "https://model.example.com")
+
+    restored = json.loads((tmp_path / "config.json").read_text())["agents"][0]["env"]
+    assert restored["OPENAI_API_KEY"] == "${CAB_MODEL_API_KEY}"
+    assert "fresh-key" not in (tmp_path / "config.json").read_text()
+
+
 @pytest.mark.parametrize("name,target,filename", [
     ("codex", "/root/.codex/config.toml", "config.toml"),
     ("pi", "/root/.pi/agent/models.json", "models.json"),

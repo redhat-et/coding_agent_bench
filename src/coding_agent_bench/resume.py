@@ -131,6 +131,9 @@ def _update_agent_endpoint(agent: dict, server_url: str) -> None:
 
 def _update_claude_auth(agent: dict) -> None:
     """Use the resume pod's fresh key instead of saved/redacted Claude auth."""
+    if agent.get("name") == "openclaw" and os.environ.get(MODEL_API_KEY_ENV):
+        agent.setdefault("env", {})["OPENAI_API_KEY"] = "${" + MODEL_API_KEY_ENV + "}"
+        return
     if agent.get("name") != "claude-code" or not os.environ.get(MODEL_API_KEY_ENV):
         return
     env = agent.setdefault("env", {})
