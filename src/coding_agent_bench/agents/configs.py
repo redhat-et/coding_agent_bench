@@ -257,7 +257,11 @@ class PiAgentConfig(AgentConfig):
                 "providers": {
                     provider_id: {
                         "api": "openai-responses" if native_openai else "openai-completions",
-                        "apiKey": os.environ.get(MODEL_API_KEY_ENV, "NONE"),
+                        "apiKey": (
+                            "${" + MODEL_API_KEY_ENV + "}"
+                            if os.environ.get(MODEL_API_KEY_ENV)
+                            else "NONE"
+                        ),
                         "models": [{"id": model, "name": model}],
                     }
                 }
@@ -283,7 +287,9 @@ class PiAgentConfig(AgentConfig):
                 provider_id: {
                     "baseUrl": base_url.rstrip("/").removesuffix("/v1") + "/v1",
                     "api": "openai-responses" if native_openai else "openai-completions",
-                    "apiKey": api_key or "NONE",
+                    "apiKey": (
+                        "${" + MODEL_API_KEY_ENV + "}" if api_key else "NONE"
+                    ),
                     "models": [
                         {
                             "id": model_name,

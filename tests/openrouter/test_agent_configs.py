@@ -34,7 +34,7 @@ def test_pi_openrouter(monkeypatch, tmp_path):
     cfg = json.loads((tmp_path / "models.json").read_text())
     provider = cfg["providers"]["vllm"]
     assert provider["baseUrl"] == "https://openrouter.ai/api/v1"
-    assert provider["apiKey"] == "sk-or-test"
+    assert provider["apiKey"] == "${CAB_MODEL_API_KEY}"
 
 
 def test_pi_default_placeholder(monkeypatch, tmp_path):
@@ -56,7 +56,7 @@ def test_pi_restore_missing_file_uses_model_api_key(monkeypatch, tmp_path):
     PiAgentConfig().restore_mounts(config, "http://vllm:8000")
 
     provider = json.loads(source.read_text())["providers"]["vllm"]
-    assert provider["apiKey"] == "sk-restore-test"
+    assert provider["apiKey"] == "${CAB_MODEL_API_KEY}"
 
 
 def test_pi_openai_uses_responses_api(monkeypatch, tmp_path):
@@ -72,7 +72,7 @@ def test_pi_openai_uses_responses_api(monkeypatch, tmp_path):
     assert result.model == "openai/gpt-5.6-luna"
     assert provider["api"] == "openai-responses"
     assert provider["baseUrl"] == "https://api.openai.com/v1"
-    assert provider["apiKey"] == "sk-test"
+    assert provider["apiKey"] == "${CAB_MODEL_API_KEY}"
 
 
 def test_opencode_openrouter():
