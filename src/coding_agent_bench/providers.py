@@ -1,3 +1,6 @@
+from urllib.parse import urlparse
+
+
 OPENROUTER_SENTINEL = "openrouter"
 # Base URL without the /v1 suffix. Agents append /v1 as needed (openclaw,
 # opencode, pi, codex); claude-code uses the base as-is for ANTHROPIC_BASE_URL.
@@ -15,6 +18,12 @@ OPENROUTER_UNSUPPORTED_AGENTS = frozenset({"oracle"})
 def is_openrouter(server_url: str) -> bool:
     """Return True if server_url is the OpenRouter sentinel."""
     return server_url == OPENROUTER_SENTINEL
+
+
+def is_openai(server_url: str) -> bool:
+    """Return True for the official OpenAI API endpoint."""
+    parsed = urlparse(server_url)
+    return parsed.scheme in {"http", "https"} and parsed.hostname == "api.openai.com"
 
 
 def resolve_provider(server_url: str, api_key: str | None = None) -> tuple[str, str | None]:

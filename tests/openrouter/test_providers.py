@@ -2,6 +2,7 @@ import pytest
 
 from coding_agent_bench.providers import (
     OPENROUTER_BASE_URL,
+    is_openai,
     is_openrouter,
     resolve_provider,
 )
@@ -13,6 +14,12 @@ def test_is_openrouter_true():
 
 def test_is_openrouter_false():
     assert is_openrouter("https://vllm.example.com") is False
+
+
+def test_is_openai():
+    assert is_openai("https://api.openai.com/v1") is True
+    assert is_openai("https://api.openai.com/") is True
+    assert is_openai("https://proxy.example.com/v1") is False
 
 
 def test_openrouter_base_url_excludes_v1():

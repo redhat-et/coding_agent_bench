@@ -7,6 +7,7 @@ from coding_agent_bench.helpers.codex import codex_create_toml
 from coding_agent_bench.models.configs import Qwen_Qwen3_8_27B, Qwen_Qwen3_8_27B_FP8
 from coding_agent_bench.providers import (
     MODEL_API_KEY_ENV,
+    is_openai,
     is_openrouter,
     resolve_provider,
 )
@@ -158,29 +159,30 @@ class OpenCodeAgentConfig(AgentConfig):
         model_max_len = kwargs.get("model_max_len", 262000)
         base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
 
-        model = "vllm/" + model_name
-        context_limit = int(model_max_len * 0.75)
-        output_limit = int(model_max_len * 0.25)
+        native_openai = is_openai(server_url)
+        provider_id = "openai" if native_openai else "vllm"
+        model = provider_id + "/" + model_name
         options = {"baseURL": base_url.rstrip("/").removesuffix("/v1") + "/v1"}
         if api_key:
             # Let OpenCode resolve the credential from the task environment.
             # This is its supported substitution syntax and avoids embedding
             # the key in OPENCODE_CONFIG_CONTENT itself.
             options["apiKey"] = "{env:" + MODEL_API_KEY_ENV + "}"
+        model_config = {"name": model_name}
+        if not native_openai:
+            model_config["limit"] = {
+                "context": int(model_max_len * 0.75),
+                "output": int(model_max_len * 0.25),
+            }
         opencode_config = {
             "$schema": "https://opencode.ai/config.json",
             "model": model,
             "provider": {
-                "vllm": {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "name": "vLLM",
+                provider_id: {
+                    "npm": "@ai-sdk/openai" if native_openai else "@ai-sdk/openai-compatible",
+                    "name": "OpenAI" if native_openai else "vLLM",
                     "options": options,
-                    "models": {
-                        model_name: {
-                            "name": model_name,
-                            "limit": {"context": context_limit, "output": output_limit},
-                        }
-                    },
+                    "models": {model_name: model_config},
                 }
             },
         }
@@ -240,23 +242,27 @@ class PiAgentConfig(AgentConfig):
         if restored is None:
             return
         agent, path = restored
-        model = str(agent.get("model_name") or "").removeprefix("vllm/")
+        native_openai = is_openai(server_url)
+        provider_id = "openai" if native_openai else "vllm"
+        model = str(agent.get("model_name") or "")
+        model = model.removeprefix("vllm/").removeprefix("openai/")
         if path.exists():
             models_json = json.loads(path.read_text())
         else:
             models_json = {
                 "providers": {
-                    "vllm": {
-                        "api": "openai-completions",
-                    "apiKey": "NONE",
+                    provider_id: {
+                        "api": "openai-responses" if native_openai else "openai-completions",
+                        "apiKey": "NONE",
                         "models": [{"id": model, "name": model}],
                     }
                 }
             }
-        provider = models_json.setdefault("providers", {}).setdefault("vllm", {})
+        provider = models_json.setdefault("providers", {}).setdefault(provider_id, {})
         provider["baseUrl"] = (
             server_url.rstrip("/").removesuffix("/v1") + "/v1"
         )
+        provider["api"] = "openai-responses" if native_openai else "openai-completions"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(models_json))
 
@@ -265,12 +271,14 @@ class PiAgentConfig(AgentConfig):
         server_url = kwargs["server_url"]
         model_max_len = kwargs.get("model_max_len", 262000)
         base_url, api_key = resolve_provider(server_url, kwargs.get("api_key"))
+        native_openai = is_openai(server_url)
+        provider_id = "openai" if native_openai else "vllm"
 
         models_json = {
             "providers": {
-                "vllm": {
+                provider_id: {
                     "baseUrl": base_url.rstrip("/").removesuffix("/v1") + "/v1",
-                    "api": "openai-completions",
+                    "api": "openai-responses" if native_openai else "openai-completions",
                     "apiKey": api_key or "NONE",
                     "models": [
                         {
@@ -297,4 +305,6 @@ class PiAgentConfig(AgentConfig):
         ]
 
         agent_env = {"PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": "/root/.pi/agent"}
-        return AgentConfigResult(model="vllm/" + model_name, agent_env=agent_env, mounts=mounts)
+        return AgentConfigResult(
+            model=provider_id + "/" + model_name, agent_env=agent_env, mounts=mounts
+        )

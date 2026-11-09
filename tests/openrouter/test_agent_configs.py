@@ -45,6 +45,22 @@ def test_pi_default_placeholder(monkeypatch, tmp_path):
     assert cfg["providers"]["vllm"]["apiKey"] == "NONE"
 
 
+def test_pi_openai_uses_responses_api(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    result = PiAgentConfig().configure(
+        model_name="gpt-5.6-luna",
+        server_url="https://api.openai.com/v1",
+        api_key="sk-test",
+    )
+    cfg = json.loads((tmp_path / "models.json").read_text())
+    provider = cfg["providers"]["openai"]
+
+    assert result.model == "openai/gpt-5.6-luna"
+    assert provider["api"] == "openai-responses"
+    assert provider["baseUrl"] == "https://api.openai.com/v1"
+    assert provider["apiKey"] == "sk-test"
+
+
 def test_opencode_openrouter():
     result = OpenCodeAgentConfig().configure(
         model_name="openai/gpt-4o", server_url="openrouter", api_key="sk-or-test"
@@ -67,6 +83,33 @@ def test_opencode_default_no_key(monkeypatch):
     provider = cfg["provider"]["vllm"]
     assert provider["options"]["baseURL"] == "http://vllm:8000/v1"
     assert "apiKey" not in provider["options"]
+
+
+def test_opencode_openai_uses_native_provider_without_limits():
+    result = OpenCodeAgentConfig().configure(
+        model_name="gpt-5", server_url="https://api.openai.com/v1", api_key="sk-test"
+    )
+    cfg = json.loads(result.agent_env["OPENCODE_CONFIG_CONTENT"])
+    provider = cfg["provider"]["openai"]
+
+    assert result.model == "openai/gpt-5"
+    assert provider["npm"] == "@ai-sdk/openai"
+    assert provider["options"] == {
+        "baseURL": "https://api.openai.com/v1",
+        "apiKey": "{env:CAB_MODEL_API_KEY}",
+    }
+    assert provider["models"]["gpt-5"] == {"name": "gpt-5"}
+
+
+def test_opencode_openai_detection_does_not_match_other_hosts():
+    result = OpenCodeAgentConfig().configure(
+        model_name="m", server_url="https://proxy.example.com/openai/v1"
+    )
+    cfg = json.loads(result.agent_env["OPENCODE_CONFIG_CONTENT"])
+    provider = cfg["provider"]["vllm"]
+
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert "limit" in provider["models"]["m"]
 
 
 def test_oracle_rejects_openrouter():

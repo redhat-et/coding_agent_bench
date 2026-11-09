@@ -33,18 +33,9 @@ def codex_create_toml(
     # used the old provider-specific option; authentication is now generic.
     requires_auth = requires_auth or bool(openrouter)
     base_url = server_url.rstrip("/").removesuffix("/v1") + "/v1"
-    if requires_auth:
-        # Authenticated OpenAI-compatible endpoints use chat-completions. Codex
-        # reads the key from the task environment, so the value itself
-        # is never passed to or written by this function.
-        wire_api = "chat"
-        requires_openai_auth = "true"
-        env_key_line = f"env_key = {_toml_string(MODEL_API_KEY_ENV)}\n\n"
-    else:
-        # Default self-served vLLM: Responses API, no auth.
-        wire_api = "responses"
-        requires_openai_auth = "false"
-        env_key_line = ""
+    wire_api = "responses"
+    requires_openai_auth = "true" if requires_auth else "false"
+    env_key_line = f"env_key = {_toml_string(MODEL_API_KEY_ENV)}\n\n" if requires_auth else ""
 
     toml = TEMPLATE.format(
         model_name=_toml_string(model_name),
