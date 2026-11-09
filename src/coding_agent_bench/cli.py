@@ -285,7 +285,7 @@ def run(
             preview = f"{export_lines}\n" if export_lines else ""
         typer.echo(
             f"Job command:\n{preview}"
-            f"{cmd_to_string(_redact_command(harbor_command, api_key))}\n"
+            f"{cmd_to_string(_redact_command(harbor_command, api_key or os.environ.get(MODEL_API_KEY_ENV)))}\n"
         )
 
         if dry_run:
