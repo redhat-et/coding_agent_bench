@@ -1890,6 +1890,19 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
     finally:
+        latest_row = job_store.get(job_id) if row else None
+        recoverable = {
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+            JobStatus.COMPLETING.value,
+            JobStatus.FAILING.value,
+            JobStatus.CANCELLING.value,
+            JobStatus.PAUSING.value,
+            JobStatus.PAUSED.value,
+        }
+        retain_model_api_key_secret = retain_model_api_key_secret or (
+            latest_row is not None and latest_row["status"] in recoverable
+        )
         if not retain_model_api_key_secret and row and row.get("model_api_key_required"):
             try:
                 await oj.delete_model_api_key_secret()
