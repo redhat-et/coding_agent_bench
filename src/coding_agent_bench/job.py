@@ -582,6 +582,19 @@ class OpenshiftJob:
             f"Job pod for {self._pod_name} not ready after {timeout_sec} seconds"
         )
 
+    async def _wait_for_job_terminal(self) -> None:
+        """Wait until the Job completes or fails before releasing its Secret."""
+        while True:
+            job = await self._get_job()
+            conditions = {
+                condition.get("type")
+                for condition in (job or {}).get("status", {}).get("conditions", [])
+                if condition.get("status") == "True"
+            }
+            if job is None or conditions.intersection({"Complete", "Failed"}):
+                return
+            await asyncio.sleep(5)
+
     async def prepare_github_dataset(self, source: GitHubDataset, token: SecretStr | None) -> str:
         """Pass credentials over exec stdin, never through pod specs or argv."""
         stdout, _ = await self._run_oc_command(
@@ -663,6 +676,11 @@ class OpenshiftJob:
                 await self.attach_model_api_key_secret()
 
             await self._wait_for_job_pod_ready()
+            if model_api_key_secret:
+                try:
+                    await self._wait_for_job_terminal()
+                finally:
+                    await self.delete_model_api_key_secret()
         except (asyncio.CancelledError, KeyboardInterrupt):
             await self._signal_job_pod()
             await self._delete_job()

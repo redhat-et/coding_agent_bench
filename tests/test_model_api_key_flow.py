@@ -197,3 +197,41 @@ def test_shutdown_retains_model_api_key_secret_for_recovery(monkeypatch):
         ))
 
     assert not job.deleted
+
+
+def test_remote_job_deletes_attached_model_secret_after_failure(monkeypatch):
+    from coding_agent_bench.job import OpenshiftJob
+
+    job = OpenshiftJob("remote")
+    calls = []
+    states = iter([
+        {"status": {"conditions": []}},
+        {"status": {"conditions": [{"type": "Failed", "status": "True"}]}},
+    ])
+
+    async def attach():
+        calls.append("attach")
+
+    async def ready():
+        calls.append("ready")
+
+    async def get_job():
+        calls.append("terminal")
+        return next(states)
+
+    async def delete_secret():
+        calls.append("delete-secret")
+
+    async def run_oc(*_args, **_kwargs):
+        calls.append("apply")
+        return "", ""
+
+    monkeypatch.setattr(job, "attach_model_api_key_secret", attach)
+    monkeypatch.setattr(job, "_wait_for_job_pod_ready", ready)
+    monkeypatch.setattr(job, "_get_job", get_job)
+    monkeypatch.setattr(job, "delete_model_api_key_secret", delete_secret)
+    monkeypatch.setattr(job, "_run_oc_command", run_oc)
+
+    asyncio.run(job.run_async(["echo", "ok"], model_api_key_secret="secret"))
+
+    assert calls == ["apply", "attach", "ready", "terminal", "terminal", "delete-secret"]
