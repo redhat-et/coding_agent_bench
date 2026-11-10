@@ -219,6 +219,9 @@ class NebiusOrchestrator:
             # Create the instance if we haven't tracked it yet
             if instance_name not in self._instances:
                 if await self._manager.instance_exists(instance_name):
+                    notify = getattr(self._manager, "_mutation_callback", None)
+                    if notify:
+                        notify("settled", "observe")
                     # A timed-out create may have succeeded remotely. Reconcile
                     # the deterministic VM before issuing another create/delete.
                     details = await self._manager.get_instance(instance_name)
@@ -236,6 +239,9 @@ class NebiusOrchestrator:
                 self._instances[instance_name] = NebiusInstanceState(instance_name=instance_name, gpu_config=gpu_config, last_job_completed_at=time.time())
 
             # Start the instance (noop if already running)
+            notify = getattr(self._manager, "_mutation_callback", None)
+            if notify:
+                notify("settled", "observe")
             logger.info(f"Ensuring nebius instance {instance_name} is running")
             try:
                 await self._manager.start_instance(instance_name)
@@ -300,6 +306,9 @@ class NebiusOrchestrator:
             instance_name = self._pick_instance_name()
             if not await self._manager.instance_exists(instance_name):
                 raise RuntimeError(f"Nebius instance {instance_name} is missing for recovered job")
+            notify = getattr(self._manager, "_mutation_callback", None)
+            if notify:
+                notify("settled", "observe")
             self._instances[instance_name] = NebiusInstanceState(
                 instance_name=instance_name,
                 gpu_config=gpu_config,
@@ -361,6 +370,9 @@ class NebiusOrchestrator:
                 )
                 self._instances.pop(instance_name, None)
                 return None
+            notify = getattr(self._manager, "_mutation_callback", None)
+            if notify:
+                notify("settled", "observe")
             if state is None:
                 self._instances[instance_name] = NebiusInstanceState(
                     instance_name=instance_name,
@@ -381,6 +393,10 @@ class NebiusOrchestrator:
             try:
                 await self._manager.start_instance(instance_name)
             except asyncio.CancelledError:
+                raise
+            except NebiusCommandTimeout:
+                # Do not issue another start while its previous outcome is
+                # unknown. The durable pool owner will reconcile this target.
                 raise
             except Exception as e:
                 logger.warning(
@@ -464,6 +480,8 @@ class NebiusOrchestrator:
     async def cleanup_idle_instances(self):
         """Perform one project-scoped cleanup pass, also usable by regional routing."""
         async with self._lock:
+            if getattr(self, "_pool_guard_active", None) and self._pool_guard_active():
+                return
             now = time.time()
             to_delete = [
                 name for name, state in self._instances.items()
@@ -674,6 +692,12 @@ class JobStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency_key "
             "ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS nebius_pool_guard ("
+            "slot INTEGER PRIMARY KEY CHECK(slot = 1), job_id TEXT NOT NULL, "
+            "state TEXT NOT NULL DEFAULT 'preparing', operation TEXT NOT NULL DEFAULT '', "
+            "location TEXT, mutation_seen INTEGER NOT NULL DEFAULT 0)"
+        )
         conn.commit()
         conn.close()
 
@@ -780,8 +804,60 @@ class JobStore:
                 (json.dumps(location), job_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value,
                  JobStatus.PAUSING.value, JobStatus.PAUSED.value),
             )
+            if cur.rowcount:
+                conn.execute("UPDATE nebius_pool_guard SET location = ? WHERE job_id = ?", (json.dumps(location), job_id))
         conn.close()
         return cur.rowcount > 0
+
+    def nebius_guard(self) -> dict | None:
+        """Return the durable owner of an unresolved shared-pool operation."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM nebius_pool_guard WHERE slot = 1 AND job_id != ''").fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def claim_nebius_guard(self, job_id: str) -> bool:
+        """Claim the single provisioning slot without stealing another owner's VM."""
+        with self._connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO nebius_pool_guard(slot, job_id) VALUES (1, ?)", (job_id,))
+            conn.execute("UPDATE nebius_pool_guard SET job_id = ?, state = 'preparing', operation = '', mutation_seen = 0 WHERE slot = 1 AND job_id = ''", (job_id,))
+            owner = conn.execute("SELECT job_id FROM nebius_pool_guard WHERE slot = 1").fetchone()
+        conn.close()
+        return owner["job_id"] == job_id
+
+    def update_nebius_guard(self, job_id: str, state: str, operation: str = "") -> None:
+        """Persist request uncertainty before sending a mutating provider call."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE nebius_pool_guard SET state = ?, operation = CASE WHEN ? = '' THEN operation ELSE ? END, "
+                "mutation_seen = CASE WHEN ? IN ('settled', 'preparing') AND ? IN ('create', 'start', 'observe') THEN 1 "
+                "WHEN ? = 'settled' AND ? = 'delete' THEN 0 ELSE mutation_seen END WHERE job_id = ?",
+                (state, operation, operation, state, operation, state, operation, job_id),
+            )
+        conn.close()
+
+    def release_nebius_guard(self, job_id: str) -> None:
+        """Release only after a known allocation outcome or confirmed cleanup."""
+        with self._connect() as conn:
+            conn.execute("UPDATE nebius_pool_guard SET job_id = '', state = 'released', operation = '', mutation_seen = 0 WHERE job_id = ?", (job_id,))
+        conn.close()
+
+    def last_nebius_location(self) -> dict | None:
+        """Retain the known pool location even after its provisioning guard settles."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT location FROM nebius_pool_guard WHERE slot = 1").fetchone()
+        conn.close()
+        return json.loads(row["location"]) if row and row["location"] else None
+
+    def wait_nebius_guard(self, job_id: str, error: str, *, delay: bool = True) -> None:
+        """Delay reconciliation without counting blocked jobs as allocation attempts."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET error = ?, nebius_retry_at = CASE WHEN ? THEN ? ELSE nebius_retry_at END "
+                "WHERE job_id = ? AND status IN ('queued', 'cancelling', 'failing', 'paused', 'completing')",
+                (error, delay, time.time() + NEBIUS_CAPACITY_RETRY_SECONDS, job_id),
+            )
+        conn.close()
 
     def update_status_if(
         self,
@@ -1141,10 +1217,16 @@ async def _recover_paused_job(row: dict) -> bool:
         )
     if _nebius is None or _nebius.has_busy_instance():
         return False
+    guarded = isinstance(_nebius, (NebiusOrchestrator, RegionalNebiusOrchestrator))
+    if guarded and not _begin_nebius_provisioning(row["job_id"], gpu):
+        return False
     try:
         instance_name = await _nebius.adopt_paused_instance(row["model_name"], gpu)
         if instance_name is not None:
             await _nebius.recover_stopped_instance(instance_name)
+        if guarded:
+            job_store.release_nebius_guard(row["job_id"])
+            _set_nebius_guard_hook(None)
         attempt_note = f" (attempt {int(row.get('preempt_attempts') or 0)}/{MAX_PREEMPT_RESUMES})" if MAX_PREEMPT_RESUMES else ""
         outcome_note = (
             "VM recovered — resuming"
@@ -1163,6 +1245,15 @@ async def _recover_paused_job(row: dict) -> bool:
             "Nebius still unavailable for paused job %s; retrying next pass",
             row["job_id"],
         )
+        if guarded:
+            guard = job_store.nebius_guard()
+            if guard and guard["job_id"] == row["job_id"]:
+                if guard["state"] in ("inflight", "uncertain") or (guard["mutation_seen"] and guard["state"] != "rejected"):
+                    job_store.update_nebius_guard(row["job_id"], "uncertain")
+                    job_store.wait_nebius_guard(row["job_id"], "Nebius recovery reconciliation pending; other managed allocations are blocked")
+                else:
+                    job_store.release_nebius_guard(row["job_id"])
+                    _set_nebius_guard_hook(None)
         return False
 
 
@@ -1262,16 +1353,178 @@ async def _retry_terminal_job(
     job_store.update_status(job_id, final_status, error=row["error"])
 
 
+def _nebius_placement_claimed_elsewhere(job_id: str | None, location: dict, legacy: bool) -> bool:
+    """Protect durable owners, including paused jobs and pre-location legacy rows."""
+    key = location["project_id"], location["instance_name"]
+    for owner in [*job_store.list_recoverable(), *job_store.list_paused()]:
+        if owner["job_id"] == job_id or _parse_nebius_url(owner["server_url"]) is None:
+            continue
+        saved = owner.get("nebius_location")
+        if saved:
+            saved = json.loads(saved) if isinstance(saved, str) else saved
+            if (saved["project_id"], saved["instance_name"]) == key:
+                return True
+        elif legacy and (
+            owner["status"] != JobStatus.QUEUED.value or owner.get("pause_checkpointed")
+            or is_resume_command(json.loads(owner["command"]))
+        ):
+            return True
+    return False
+
+
+def _set_nebius_guard_hook(job_id: str | None) -> None:
+    """Keep provider mutation tracking and idle cleanup tied to the durable pool."""
+    callback = (lambda state, operation: job_store.update_nebius_guard(job_id, state, operation)) if job_id else None
+    def active():
+        return job_store.nebius_guard() is not None
+    if isinstance(_nebius, RegionalNebiusOrchestrator):
+        _nebius.restore_pool_location(job_store.last_nebius_location())
+        _nebius.set_provisioning_guard(callback, active)
+    elif isinstance(_nebius, NebiusOrchestrator):
+        _nebius._manager._mutation_callback = callback
+        _nebius._pool_guard_active = active
+
+
+def _begin_nebius_provisioning(job_id: str, gpu_config: str) -> bool:
+    """Own the pool before any initial allocation or preemption-recovery start."""
+    if not job_store.claim_nebius_guard(job_id):
+        return False
+    _set_nebius_guard_hook(job_id)
+    if isinstance(_nebius, NebiusOrchestrator) and getattr(_nebius._manager, "_parent_id", None):
+        job_store.record_nebius_location(job_id, {
+            "project_id": _nebius._manager._parent_id, "subnet_id": _nebius._subnet_id,
+            "instance_name": _nebius._pick_instance_name(), "region": "", "project_name": "",
+            "gpu_config": gpu_config,
+        })
+    return True
+
+
+async def _reconcile_nebius_guard(row: dict, *, cleanup: bool = False) -> bool:
+    """Resolve the recorded target without interpreting a lost create as absent."""
+    guard = job_store.nebius_guard()
+    if not guard or guard["job_id"] != row["job_id"]:
+        return guard is None
+    if guard["state"] == "preparing" and not guard["operation"] and not guard["mutation_seen"]:
+        # The durable pre-request hook was never reached (e.g. cancelled during
+        # discovery). No mutating provider request can be outstanding.
+        job_store.release_nebius_guard(row["job_id"])
+        _set_nebius_guard_hook(None)
+        return True
+    _set_nebius_guard_hook(row["job_id"])
+    saved = guard.get("location") or row.get("nebius_location")
+    reason = "provider outcome is still unknown"
+    try:
+        if not saved:
+            raise RuntimeError("no recorded placement; operator reconciliation is required")
+        location = json.loads(saved) if isinstance(saved, str) else saved
+        child = (_nebius.provisioning_child(location) if isinstance(_nebius, RegionalNebiusOrchestrator)
+                 else _nebius)
+        if not isinstance(_nebius, RegionalNebiusOrchestrator) and (
+            getattr(child._manager, "_parent_id", None) != location["project_id"]
+            or child._pick_instance_name() != location["instance_name"]
+        ):
+            raise RuntimeError("saved placement differs from current single-region configuration; restore it or reconcile the saved VM manually")
+        try:
+            details = await child._manager.get_instance(location["instance_name"])
+        except Exception as error:
+            if "NotFound" not in str(error):
+                raise
+            # A known VM deletion can be confirmed by absence. A timed-out
+            # create/start may still materialize later, so absence alone is unsafe.
+            if guard["operation"] in ("delete", "observe") and (guard["mutation_seen"] or guard["state"] == "settled"):
+                job_store.release_nebius_guard(row["job_id"])
+                _set_nebius_guard_hook(None)
+                return True
+            raise RuntimeError("VM not visible yet; a lost create/start response is not proof of absence") from error
+        state = details.get("status", {}).get("state")
+        if state == "DELETED" and guard["operation"] == "delete":
+            job_store.release_nebius_guard(row["job_id"])
+            _set_nebius_guard_hook(None)
+            return True
+        if state not in ("RUNNING", "STOPPED", "ERROR", "CRASHED"):
+            raise RuntimeError(f"VM is still transitioning ({state})")
+        if not cleanup:
+            job_store.update_nebius_guard(row["job_id"], "preparing", "observe")
+            return True
+        legacy = not isinstance(_nebius, RegionalNebiusOrchestrator) or _nebius._key(location) == _nebius._key(_nebius._legacy)
+        if _nebius_placement_claimed_elsewhere(row["job_id"], location, legacy):
+            raise RuntimeError("recorded VM is claimed by another recoverable job; operator reconciliation is required")
+        # Record that a specific VM was observed before deleting it. If that
+        # response is lost, a subsequent NotFound can safely settle this deletion.
+        job_store.update_nebius_guard(row["job_id"], "settled", "observe")
+        job_store.update_nebius_guard(row["job_id"], "inflight", "delete")
+        await child.delete_recovered_instance()
+        if await child._manager.instance_exists(location["instance_name"]):
+            raise RuntimeError("VM deletion is not yet confirmed")
+        job_store.release_nebius_guard(row["job_id"])
+        _set_nebius_guard_hook(None)
+        return True
+    except Exception as error:
+        reason = str(error)
+        logger.warning("Nebius provisioning reconciliation pending for %s: %s", row["job_id"], reason)
+    previous = (row.get("error") or "").split(" | Nebius reconciliation pending:")[0]
+    message = f"Nebius reconciliation pending: {reason}"
+    if cleanup and previous:
+        message = previous + " | " + message
+    job_store.wait_nebius_guard(row["job_id"], message)
+    return False
+
+
+def _bind_regional_nebius_job(row: dict) -> None:
+    """Restore ownership context; a fresh queued intake does not own the legacy VM."""
+    if not isinstance(_nebius, RegionalNebiusOrchestrator):
+        return
+    job_id = row["job_id"]
+    saved = row.get("nebius_location")
+    legacy_recovery = _parse_nebius_url(row["server_url"]) is not None and (
+        row["status"] in (JobStatus.RUNNING.value, JobStatus.COMPLETING.value,
+                          JobStatus.FAILING.value, JobStatus.PAUSING.value, JobStatus.PAUSED.value)
+        or row.get("pause_checkpointed") or is_resume_command(json.loads(row["command"]))
+    )
+    _nebius.bind_job(
+        json.loads(saved) if isinstance(saved, str) else saved,
+        lambda selected: job_store.record_nebius_location(job_id, selected),
+        job_id=job_id, legacy_recovery=legacy_recovery,
+        can_use=lambda selected, legacy: not _nebius_placement_claimed_elsewhere(job_id, selected, legacy),
+    )
+
+
 async def _delete_recovered_nebius(job_id: str) -> None:
     """Retry deletion without blocking recovery forever."""
     assert _nebius is not None
     for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
+        guard = job_store.nebius_guard()
+        if guard:
+            # An unconfirmed provider request is never retired by a blind
+            # name-based sweep, even if its job was cancelled meanwhile.
+            if job_id == guard["job_id"]:
+                row = job_store.get(job_id)
+                if row:
+                    await _reconcile_nebius_guard(row, cleanup=True)
+            return
         if job_id == "startup" and _active_job is not None:
             # A new job now owns the pool. A delayed startup-cleanup retry
             # must not follow its newly bound region and delete its VM.
             return
         try:
-            await _nebius.delete_recovered_instance()
+            if isinstance(_nebius, RegionalNebiusOrchestrator):
+                if job_id == "startup":
+                    # Re-check durable jobs on every retry. Startup cleanup may
+                    # have slept while a paused/queued owner appeared.
+                    if any(_parse_nebius_url(row["server_url"]) is not None
+                           for row in [*job_store.list_recoverable(), *job_store.list_paused()]):
+                        return
+                    await _nebius.cleanup_startup_instances(
+                        can_use=lambda selected, legacy: not _nebius_placement_claimed_elsewhere(None, selected, legacy),
+                    )
+                else:
+                    row = job_store.get(job_id)
+                    if not row or _parse_nebius_url(row["server_url"]) is None:
+                        return
+                    _bind_regional_nebius_job(row)
+                    await _nebius.delete_recovered_instance()
+            else:
+                await _nebius.delete_recovered_instance()
             return
         except Exception:
             logger.exception(
@@ -1459,8 +1712,21 @@ async def _restore_jobs() -> bool:
     """Rebuild the dispatcher without making startup depend on OpenShift."""
     _job_event.clear()
     _job_queue.clear()
+    guard = job_store.nebius_guard()
+    if guard:
+        owner = job_store.get(guard["job_id"])
+        terminal_cleanup = {JobStatus.COMPLETED.value: JobStatus.COMPLETING,
+                            JobStatus.FAILED.value: JobStatus.FAILING,
+                            JobStatus.CANCELLED.value: JobStatus.CANCELLING}
+        if owner and owner["status"] in terminal_cleanup:
+            job_store.update_status(owner["job_id"], terminal_cleanup[owner["status"]], error=owner["error"])
     has_recoverable_nebius = False
-    for row in job_store.list_recoverable():
+    recoverable = job_store.list_recoverable()
+    if guard:
+        owner = job_store.get(guard["job_id"])
+        if owner and owner["status"] == JobStatus.PAUSED.value and not owner.get("github_token_required"):
+            recoverable.append(owner)
+    for row in recoverable:
         has_recoverable_nebius |= _parse_nebius_url(row["server_url"]) is not None
         _job_queue.append(QueuedJob(
             row["job_id"],
@@ -1728,11 +1994,14 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         row = job_store.get(job_id)
         if not row:
             return
-        if isinstance(_nebius, RegionalNebiusOrchestrator):
-            location = row.get("nebius_location")
-            _nebius.bind_job(json.loads(location) if isinstance(location, str) else location,
-                             lambda selected: job_store.record_nebius_location(job_id, selected))
-        if row["status"] == JobStatus.QUEUED.value and row.get("nebius_retry_at", 0) > time.time():
+        guard = job_store.nebius_guard()
+        if guard and guard["job_id"] != job_id:
+            job_store.wait_nebius_guard(job_id, f"Waiting for confirmed Nebius provisioning outcome before starting another job (job {guard['job_id']})", delay=False)
+            return
+        _bind_regional_nebius_job(row)
+        if row.get("nebius_retry_at", 0) > time.time() and (
+            row["status"] == JobStatus.QUEUED.value or (guard and guard["job_id"] == job_id)
+        ):
             return
         if queued.github_dataset is None and row.get("github_dataset"):
             queued.github_dataset = GitHubDataset.model_validate_json(row["github_dataset"])
@@ -1742,9 +2011,17 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             # Tokens never enter SQLite. A restarted private-repository intake
             # cannot prepare its dataset without the caller supplying one again.
             job_store.update_status_if(
-                job_id, JobStatus.QUEUED, JobStatus.FAILED,
+                job_id, JobStatus.QUEUED, JobStatus.FAILING if guard and guard["job_id"] == job_id else JobStatus.FAILED,
                 error="Capacity wait interrupted by restart; resubmit with a fresh GitHub token",
             )
+            if guard and guard["job_id"] == job_id:
+                row = job_store.get(job_id)
+                if await _reconcile_nebius_guard(row, cleanup=True):
+                    await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=row["error"])
+            return
+        if guard and guard["job_id"] == job_id and not await _reconcile_nebius_guard(
+            row, cleanup=row["status"] in (JobStatus.CANCELLING.value, JobStatus.FAILING.value, JobStatus.COMPLETING.value),
+        ):
             return
         if adopt_existing and row["status"] in (JobStatus.PAUSED.value, JobStatus.QUEUED.value):
             # A manual resume may replace a scheduled recovery's saved command.
@@ -1845,9 +2122,23 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 return
         elif nebius_gpu_config is not None and _nebius:
             try:
+                if not _begin_nebius_provisioning(job_id, nebius_gpu_config):
+                    return
                 try:
                     nebius_instance_name, real_url = await _nebius.acquire_instance(model_name, gpu_config=nebius_gpu_config)
                 except (NebiusCapacityError, NebiusCommandTimeout) as error:
+                    if isinstance(error, NebiusCapacityError):
+                        job_store.release_nebius_guard(job_id)
+                        _set_nebius_guard_hook(None)
+                    else:
+                        guard = job_store.nebius_guard()
+                        if guard and not guard["operation"] and not guard["mutation_seen"]:
+                            # Read-only preparation failed before a mutation or
+                            # an existing VM was observed for this attempt.
+                            job_store.release_nebius_guard(job_id)
+                            _set_nebius_guard_hook(None)
+                        else:
+                            job_store.update_nebius_guard(job_id, "uncertain")
                     reason = ("Waiting for Nebius capacity" if isinstance(error, NebiusCapacityError)
                               else "Waiting for Nebius provisioning: CLI attempt timed out")
                     if getattr(error, "regions", None):
@@ -1888,9 +2179,20 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 managed_endpoint = True
                 model_config = MODEL_REGISTRY.get(model_name)
                 await _nebius.mark_job_started(nebius_instance_name)
+                job_store.release_nebius_guard(job_id)
+                _set_nebius_guard_hook(None)
             except Exception as e:
                 logger.exception(f"Nebius provisioning failed for job {job_id}")
-                job_store.update_status_if(job_id, JobStatus(row["status"]), JobStatus.FAILED, error=f"Nebius provisioning failed: {e}")
+                guard = job_store.nebius_guard()
+                uncertain = guard and guard["job_id"] == job_id and (
+                    guard["state"] in ("inflight", "uncertain") or guard["mutation_seen"]
+                )
+                if not uncertain:
+                    job_store.release_nebius_guard(job_id)
+                    _set_nebius_guard_hook(None)
+                job_store.update_status_if(job_id, JobStatus(row["status"]), JobStatus.FAILING if uncertain else JobStatus.FAILED, error=f"Nebius provisioning failed: {e}")
+                if uncertain:
+                    job_store.wait_nebius_guard(job_id, f"Nebius provisioning failed: {e} | Nebius reconciliation pending: cleanup required")
                 return
 
         if not is_resume_command(command) and "--model-max-len" not in command and model_config is not None:
@@ -1927,6 +2229,11 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         if _shutting_down:
             raise
         if _parse_nebius_url(server_url) is not None and _nebius:
+            guard = job_store.nebius_guard()
+            if guard and guard["job_id"] == job_id:
+                job_store.update_status_if(job_id, JobStatus.QUEUED, JobStatus.CANCELLING)
+                if not await _reconcile_nebius_guard(job_store.get(job_id), cleanup=True):
+                    return
             await _delete_recovered_nebius(job_id)
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
@@ -1945,11 +2252,22 @@ async def _worker():
             # capacity waiters, and enqueue/cancel events interrupt the timer.
             now = time.time()
             rows = [job_store.get(item.job_id) for item in _job_queue]
+            guard = job_store.nebius_guard()
+
+            def eligible(row):
+                if not row:
+                    return True
+                return not (guard and row["job_id"] != guard["job_id"])
+
+            for row in rows:
+                if row and not eligible(row):
+                    job_store.wait_nebius_guard(row["job_id"], f"Waiting for confirmed Nebius provisioning outcome before starting another job (job {guard['job_id']})", delay=False)
             ready = next((index for index, row in enumerate(rows)
-                          if not row or row["status"] != JobStatus.QUEUED.value
-                          or row.get("nebius_retry_at", 0) <= now), None)
+                          if eligible(row) and (not row or row.get("nebius_retry_at", 0) <= now
+                          or (row["status"] != JobStatus.QUEUED.value and not (guard and row["job_id"] == guard["job_id"])))), None)
             if ready is None:
-                delay = min(row["nebius_retry_at"] for row in rows) - now
+                deadlines = [row["nebius_retry_at"] for row in rows if row and eligible(row)]
+                delay = max(0.01, min(deadlines) - now) if deadlines else NEBIUS_CAPACITY_RETRY_SECONDS
                 try:
                     await asyncio.wait_for(_job_event.wait(), timeout=delay)
                 except asyncio.TimeoutError:
@@ -1993,11 +2311,28 @@ async def _worker():
                 logger.exception(f"Queue handler crashed while processing {job_id}")
             finally:
                 current = job_store.get(job_id)
-                if (current and current["status"] == JobStatus.QUEUED.value
-                        and current.get("nebius_retry_at", 0) > time.time()):
+                guard = job_store.nebius_guard()
+                owns_guard = guard and guard["job_id"] == job_id
+                if current and owns_guard and current["status"] in (JobStatus.FAILED.value, JobStatus.CANCELLED.value):
+                    job_store.update_status(job_id, JobStatus.CANCELLING if current["status"] == JobStatus.CANCELLED.value else JobStatus.FAILING, error=current["error"])
+                    current = job_store.get(job_id)
+                if (current and owns_guard and current["status"] in (
+                    JobStatus.QUEUED.value, JobStatus.CANCELLING.value, JobStatus.FAILING.value,
+                    JobStatus.COMPLETING.value, JobStatus.PAUSED.value,
+                ) and current.get("nebius_retry_at", 0) <= time.time()):
+                    job_store.wait_nebius_guard(job_id, (current.get("error") or "") + " | Nebius reconciliation pending: dispatch retry")
+                    current = job_store.get(job_id)
+                retrying = current and (
+                    (current["status"] == JobStatus.QUEUED.value and current.get("nebius_retry_at", 0) > time.time())
+                    or (owns_guard and current["status"] in (JobStatus.CANCELLING.value, JobStatus.FAILING.value, JobStatus.COMPLETING.value, JobStatus.PAUSED.value))
+                )
+                if retrying:
                     # Retain volatile GitHub credentials during this process's
                     # capacity wait, but never serialize them to the store.
                     if not any(item.job_id == job_id for item in _job_queue):
+                        if current["status"] != JobStatus.QUEUED.value:
+                            queued.github_token = None
+                            queued.adopt_existing = True
                         _job_queue.append(queued)
                 else:
                     queued.github_token = None
@@ -2436,6 +2771,23 @@ async def delete_job(job_id: str):
     job_row = job_store.get(job_id)
     if not job_row:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    guard = job_store.nebius_guard()
+    if guard and guard["job_id"] == job_id:
+        # The VM request may have succeeded remotely. Retain the durable owner
+        # until cleanup is confirmed instead of retiring a merely queued row.
+        if job_row["status"] != JobStatus.CANCELLING.value:
+            job_store.update_status(job_id, JobStatus.CANCELLING, error="Cancellation requested; confirming Nebius provisioning outcome")
+        for queued in _job_queue:
+            if queued.job_id == job_id:
+                queued.github_token = None
+                queued.adopt_existing = True
+        if _active_job and _active_job[0] == job_id:
+            _active_job[1].cancel()
+        elif not any(queued.job_id == job_id for queued in _job_queue):
+            _job_queue.append(QueuedJob(job_id, json.loads(job_row["command"]), job_row["server_url"], job_row["model_name"], True))
+        _job_event.set()
+        return {"message": "Job cancelling; waiting for confirmed Nebius cleanup", "job_id": job_id}
 
     if job_row["status"] == JobStatus.CANCELLING.value:
         return {"message": "Job cancelling", "job_id": job_id}

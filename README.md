@@ -471,6 +471,38 @@ types or pricing policy; cross-region search requires explicit opt-in below.
 The existing paused/preempted-job recovery remains separate from this
 initial-provisioning retry path.
 
+#### Unknown provisioning outcomes and the shared-pool guard
+
+A timed-out create/start request can have succeeded remotely. CAB therefore
+persists a single provisioning owner in SQLite before making provider changes,
+and records mutating CLI requests before sending them. While that owner's
+outcome is unresolved, **all other jobs remain queued**, including external
+endpoints and requests for different hardware or another region. Reconciliation
+gets dispatch priority so a VM cannot finish allocating and then sit idle behind
+an unrelated external benchmark. Blocked jobs do not increment allocation-attempt counters.
+An explicit capacity rejection releases the guard, allowing a different queued
+hardware request to try its own allocation or an external-endpoint job to run.
+
+The owner is reconciled on the usual retry interval. A visible, stable VM is
+reused to finish preparing that job rather than creating another VM. A single
+`NotFound` after an unconfirmed create/start is not treated as proof that the
+request failed: CAB keeps waiting instead of issuing a duplicate create. There
+is no arbitrary timeout that silently unlocks an uncertain pool; an outcome
+that cannot be established requires operator reconciliation.
+
+Cancellation retains the owner in `cancelling` until its VM is confirmed gone.
+A known deletion can be settled by confirmed absence, including after a lost
+delete response. Startup/idle cleanup do not discard the guard. It survives
+queue-service restarts and also covers uncertain preemption-recovery starts.
+Cancellations during read-only discovery, before any VM request or observation,
+can finish normally because no provider mutation was sent.
+
+The settled pool placement is also retained so an idle VM in a region that does
+not support the next job's different hardware can be cleaned up before a new
+allocation. Pending jobs do not each get their own VM. Changing single-region
+project/name settings while an outcome is unknown fails closed: restore the
+saved configuration or reconcile the recorded VM manually.
+
 #### Automatic regional discovery (optional)
 
 Set `NEBIUS_DISCOVER_REGIONS=1` to let CAB discover regional projects and default
@@ -514,6 +546,12 @@ Use a unique `NEBIUS_INSTANCE_NAME_PREFIX` for each queue deployment. Regional
 VM names include region and a project hash; cleanup only targets these owned
 names (plus the legacy single-region VM name for upgrades). Discovery alone
 does **not** mean a GPU is free, and enabling it does not reserve capacity.
+Cross-project sweeps run only as explicit startup cleanup when no recoverable
+managed jobs exist. Per-job cleanup is limited to its saved placement, or to
+verified legacy recovery, and re-checks other durable job claims before deleting
+a VM. A new job cancelled before selecting a placement deletes no Nebius VM.
+Legacy VMs retain their configured subnet even when discovery finds a different
+default subnet in the same project.
 
 ### (Optional) Set Up the Intake Poller
 

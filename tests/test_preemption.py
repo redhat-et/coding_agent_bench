@@ -46,6 +46,15 @@ class FlowStore:
     def get(self, _job_id):
         return dict(self.row)
 
+    def nebius_guard(self):
+        return None
+
+    def claim_nebius_guard(self, _job_id):
+        return True
+
+    def release_nebius_guard(self, _job_id):
+        pass
+
     def update_status(self, _job_id, status, error=None):
         self.status_updates.append((status.value, error))
         self.row["status"] = status.value
@@ -1111,6 +1120,9 @@ def test_restore_jobs_keeps_vm_for_paused_nebius_job(monkeypatch):
             self.set_calls += 1
 
     class Store:
+        def nebius_guard(self):
+            return None
+
         def list_recoverable(self):
             return []
 

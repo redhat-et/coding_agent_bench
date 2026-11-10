@@ -84,6 +84,33 @@ def regional(manager, **kwargs):
                                       api.NebiusOrchestrator, **kwargs)
 
 
+def seed_vm(manager, selected):
+    """Seed a stopped owned VM without performing provisioning in the test."""
+    resource = RESOURCE_CONFIG_REGISTRY["h200"]
+    manager.cloud[selected["project_id"], selected["instance_name"]] = {
+        "spec": {"resources": {"platform": resource.platform, "preset": resource.preset}},
+        "status": {"state": "STOPPED"},
+    }
+
+
+@pytest.fixture
+def regional_store(tmp_path, monkeypatch):
+    """Provide real durable ownership rows without any live cloud/OpenShift calls."""
+    store = api.JobStore(tmp_path / "ownership.db")
+    monkeypatch.setattr(api, "job_store", store)
+    monkeypatch.setattr(api, "_active_job", None)
+    monkeypatch.setattr(api, "_shutting_down", False)
+    return store
+
+
+def ownership_row(store, job_id, status, selected=None):
+    """Create an owner with the same stored signals used by the queue worker."""
+    store.insert(job_id, job_id, "opencode", "org/bench", "model", "nebius-h200", ["coding-agent-bench", "run"])
+    if selected:
+        store.record_nebius_location(job_id, selected)
+    store.update_status(job_id, status)
+
+
 def test_falls_back_on_capacity_and_records_placement_before_creating_vm():
     manager = RegionalManager()
     manager.failures["primary"].append(capacity())
@@ -109,6 +136,172 @@ def test_falls_back_on_capacity_and_records_placement_before_creating_vm():
     state = orchestrator.get_instance_states()[0]
     assert state.region == "eu-west1"
     assert state.project_id == "secondary"
+
+
+def test_legacy_vm_keeps_configured_subnet_when_discovery_differs():
+    manager = RegionalManager()
+    orchestrator = RegionalNebiusOrchestrator(manager, "configured-custom-subnet", "queue", 600, api.NebiusOrchestrator)
+    seed_vm(manager, orchestrator._legacy)
+    saved = []
+    orchestrator.bind_job(None, lambda item: saved.append(item))
+    name, _ = asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert name == "queue-0"
+    assert saved[-1]["subnet_id"] == "configured-custom-subnet"
+    assert not any(event == "create" for event, _ in manager.events)
+    assert len(manager.cloud) == 1
+
+
+def test_unbound_job_cleanup_never_sweeps_existing_vms():
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    seed_vm(manager, orchestrator._legacy)
+    seed_vm(manager, orchestrator._named(manager.locations[1]))
+    orchestrator.bind_job(None, lambda _: True, job_id="fresh-intake")
+    asyncio.run(orchestrator.delete_recovered_instance())
+    assert len(manager.cloud) == 2
+    assert manager.events == []
+
+
+def test_failed_placement_claim_does_not_authorize_cleanup():
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    seed_vm(manager, orchestrator._legacy)
+    orchestrator.bind_job(None, lambda _: False, job_id="cancelled-before-claim")
+    with pytest.raises(RuntimeError, match="recoverable state"):
+        asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert orchestrator._bound is None
+    manager.events.clear()
+    asyncio.run(orchestrator.delete_recovered_instance())
+    assert len(manager.cloud) == 1
+    assert manager.events == []
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_cancel_during_discovery_preserves_other_paused_vms(regional_store, monkeypatch, legacy):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    selected = orchestrator._legacy if legacy else orchestrator._named(manager.locations[1])
+    seed_vm(manager, selected)
+    ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED, None if legacy else selected)
+    ownership_row(regional_store, "fresh", api.JobStatus.QUEUED)
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    monkeypatch.setattr(api.OpenshiftJob, "_signal_job_pod", AsyncMock())
+    monkeypatch.setattr(api.OpenshiftJob, "_delete_job", AsyncMock())
+
+    async def scenario():
+        entered = asyncio.Event()
+
+        async def discovery(*args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(manager, "discover_locations", discovery)
+        task = asyncio.create_task(api._process_queued_job(api.QueuedJob("fresh", [], "nebius-h200", "model")))
+        await entered.wait()
+        regional_store.update_status("fresh", api.JobStatus.CANCELLING)
+        task.cancel()
+        await asyncio.wait_for(task, 1)
+
+    asyncio.run(scenario())
+    assert regional_store.get("fresh")["status"] == "cancelled"
+    assert regional_store.get("paused-owner")["status"] == "paused"
+    assert len(manager.cloud) == 1
+    assert not any(event == "delete" for event, _ in manager.events)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_per_job_cleanup_cannot_delete_another_durable_owner(regional_store, monkeypatch, legacy):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    selected = orchestrator._legacy if legacy else orchestrator._named(manager.locations[1])
+    seed_vm(manager, selected)
+    ownership_row(regional_store, "current", api.JobStatus.COMPLETING, selected)
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    api._bind_regional_nebius_job(regional_store.get("current"))
+    # A durable owner added after binding must still be protected at cleanup.
+    ownership_row(regional_store, "other", api.JobStatus.PAUSED, None if legacy else selected)
+    asyncio.run(api._delete_recovered_nebius("current"))
+    assert len(manager.cloud) == 1
+    assert not any(event == "delete" for event, _ in manager.events)
+
+
+def test_verified_legacy_recovery_cleans_only_its_vm(regional_store, monkeypatch):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    seed_vm(manager, orchestrator._legacy)
+    other = orchestrator._named(manager.locations[1])
+    seed_vm(manager, other)
+    ownership_row(regional_store, "legacy-running", api.JobStatus.RUNNING)
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    api._bind_regional_nebius_job(regional_store.get("legacy-running"))
+    regional_store.update_status("legacy-running", api.JobStatus.CANCELLING)
+    asyncio.run(api._delete_recovered_nebius("legacy-running"))
+    assert (other["project_id"], other["instance_name"]) in manager.cloud
+    assert ("primary", "queue-0") not in manager.cloud
+    assert ("delete", "secondary") not in manager.events
+
+
+def test_verified_legacy_recovery_does_not_delete_another_legacy_owner(regional_store, monkeypatch):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    seed_vm(manager, orchestrator._legacy)
+    ownership_row(regional_store, "legacy-terminal", api.JobStatus.FAILING)
+    ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED)
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    asyncio.run(api._delete_recovered_nebius("legacy-terminal"))
+    assert ("primary", "queue-0") in manager.cloud
+    assert not any(event == "delete" for event, _ in manager.events)
+
+
+def test_startup_sweep_is_explicit_and_checks_durable_owners(regional_store, monkeypatch):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    seed_vm(manager, orchestrator._legacy)
+    for item in manager.locations:
+        seed_vm(manager, orchestrator._named(item))
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    asyncio.run(api._delete_recovered_nebius("startup"))
+    assert not manager.cloud
+
+    seed_vm(manager, orchestrator._legacy)
+    ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED)
+    manager.events.clear()
+    asyncio.run(api._delete_recovered_nebius("startup"))
+    assert ("primary", "queue-0") in manager.cloud
+    assert manager.events == []
+
+
+def test_startup_sweep_rechecks_claims_that_appear_during_discovery(regional_store, monkeypatch):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    selected = orchestrator._named(manager.locations[1])
+    seed_vm(manager, selected)
+    original = manager.discover_locations
+
+    async def discovery(*args):
+        ownership_row(regional_store, "new-paused-owner", api.JobStatus.PAUSED, selected)
+        return await original(*args)
+
+    monkeypatch.setattr(manager, "discover_locations", discovery)
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    asyncio.run(api._delete_recovered_nebius("startup"))
+    assert (selected["project_id"], selected["instance_name"]) in manager.cloud
+    assert ("delete", "secondary") not in manager.events
+
+
+def test_new_allocation_leaves_other_paused_region_untouched(regional_store, monkeypatch):
+    manager = RegionalManager()
+    orchestrator = regional(manager)
+    protected = orchestrator._named(manager.locations[0])
+    seed_vm(manager, protected)
+    ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED, protected)
+    ownership_row(regional_store, "fresh", api.JobStatus.QUEUED)
+    monkeypatch.setattr(api, "_nebius", orchestrator)
+    api._bind_regional_nebius_job(regional_store.get("fresh"))
+    name, _ = asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert ("secondary", name) in manager.cloud
+    assert (protected["project_id"], protected["instance_name"]) in manager.cloud
+    assert ("delete", "primary") not in manager.events
 
 
 def test_all_regions_short_on_capacity_produce_one_durable_retry_round(tmp_path, monkeypatch):

@@ -8,6 +8,9 @@ class FakeJobStore:
     def get(self, _job_id):
         return self.row
 
+    def nebius_guard(self):
+        return None
+
     def update_status(self, _job_id, status, error=None):
         self.row = {"status": status.value, "error": error}
 

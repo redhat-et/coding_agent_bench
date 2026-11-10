@@ -234,12 +234,23 @@ class NebiusInstanceManager:
 
     async def exec(self, args: list[str]) -> str:
         """Execute a nebius CLI command."""
+        offset = 2 if args[:2] == ["compute", "v1"] else 1
+        operation = args[offset + 1] if args[:1] == ["compute"] and args[offset:offset + 1] == ["instance"] and len(args) > offset + 1 else ""
+        mutation = operation in ("create", "start", "stop", "delete")
+        notify = getattr(self, "_mutation_callback", None)
+        if mutation and notify:
+            notify("inflight", operation)
         command = ["nebius"] + args
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception:
+            if mutation and notify:
+                notify("rejected", operation)
+            raise
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 process.communicate(), timeout=NEBIUS_CLI_TIMEOUT_SECONDS,
@@ -263,9 +274,19 @@ class NebiusInstanceManager:
         stderr = stderr_bytes.decode() if stderr_bytes else ""
 
         if process.returncode != 0:
-            error_class = NebiusCapacityError if _is_capacity_error(args, stdout + "\n" + stderr) else NebiusCommandError
+            text = (stdout + "\n" + stderr).lower()
+            capacity = _is_capacity_error(args, text)
+            if mutation and not capacity and any(marker in text for marker in (
+                "deadlineexceeded", "deadline exceeded", "context deadline", "unavailable",
+                "connection reset", "transport is closing", "timed out", "unexpected eof",
+            )):
+                raise NebiusCommandTimeout("Nebius mutating request returned a transport/deadline error; remote outcome needs reconciliation")
+            if mutation and notify:
+                notify("rejected", operation)
+            error_class = NebiusCapacityError if capacity else NebiusCommandError
             raise error_class(args, process.returncode, stdout, stderr)
-
+        if mutation and notify:
+            notify("settled", operation)
         return stdout
 
     def for_project(self, project_id: str):
@@ -744,14 +765,24 @@ class RegionalNebiusOrchestrator:
         self._locations = {}
         self._bound = None
         self._save = None
+        self._job_id = None
+        self._legacy_recovery = False
+        self._can_use = None
+        self._mutation_callback = None
+        self._guard_active = None
+        self._pool_location = None
         self._lock = asyncio.Lock()
         self._legacy = {"project_id": manager._parent_id, "subnet_id": subnet_id,
                         "project_name": "", "region": "", "gpu_config": "",
                         "instance_name": f"{instance_name_prefix}-0"}
         self._child(self._legacy)
 
-    def bind_job(self, location, save):
+    def bind_job(self, location, save, *, job_id=None, legacy_recovery=False, can_use=None):
         """Restore the current job's placement without consulting mutable discovery."""
+        same_job = job_id is not None and job_id == self._job_id
+        self._legacy_recovery = legacy_recovery or (same_job and self._legacy_recovery)
+        self._job_id = job_id
+        self._can_use = can_use
         self._save = save
         self._bound = dict(location) if location else None
         if self._bound:
@@ -774,18 +805,46 @@ class RegionalNebiusOrchestrator:
             if not location["instance_name"].endswith("-0"):
                 raise ValueError("Invalid persisted Nebius instance name")
             manager = self._manager.for_project(location["project_id"])
+            manager._mutation_callback = self._mutation_callback
             self._children[key] = self._factory(
                 manager, location["subnet_id"], location["instance_name"][:-2], self._idle_timeout,
             )
             self._locations[key] = dict(location)
+            self._children[key]._pool_guard_active = self._guard_active
         return self._children[key]
 
+    def set_provisioning_guard(self, callback, active=None):
+        """Attach durable mutation notifications to every project-scoped client."""
+        self._mutation_callback = callback
+        self._guard_active = active
+        self._manager._mutation_callback = callback
+        for child in self._children.values():
+            child._manager._mutation_callback = callback
+            child._pool_guard_active = active
+
+    def provisioning_child(self, location):
+        """Route reconciliation directly to the persisted target, without discovery."""
+        return self._child(location)
+
+    def restore_pool_location(self, location):
+        """Remember a settled idle VM without assigning it to a pending job."""
+        self._pool_location = dict(location) if location else None
+        if self._pool_location:
+            self._child(self._pool_location)
+
     def _remember(self, location):
-        self._bound = dict(location)
-        self._locations[self._key(location)] = dict(location)
+        if not self._can_touch(location):
+            raise RuntimeError("Nebius placement is claimed by another recoverable job")
         if self._save:
             if self._save(dict(location)) is False:
                 raise RuntimeError("Job left its recoverable state before regional provisioning")
+        # A failed claim must not leave a cancelled job bound to an unowned VM.
+        self._bound = dict(location)
+        self._locations[self._key(location)] = dict(location)
+
+    def _can_touch(self, location):
+        """Check live ownership before claiming or deleting a shared-pool VM."""
+        return self._can_use is None or self._can_use(location, self._key(location) == self._key(self._legacy))
 
     def _route(self, instance_name):
         matches = [child for key, child in self._children.items() if key[1] == instance_name]
@@ -806,24 +865,41 @@ class RegionalNebiusOrchestrator:
             locations = [self._named(item) for item in await self._manager.discover_locations(
                 gpu_config, self._project_prefix, self._regions,
             )]
+            locations = [item for item in locations if self._can_touch(item)]
             if not locations:
                 raise RuntimeError("No eligible Nebius projects/subnets support the requested GPU and pricing policy; check discovery permissions and region configuration")
 
             # Include the old single-region VM name for rolling upgrades. Never
             # reuse it for a different project than its configured original one.
             primary = next((item for item in locations if item["project_id"] == self._legacy["project_id"]), None)
-            if primary and await self._child(self._legacy)._manager.instance_exists(self._legacy["instance_name"]):
-                locations.insert(0, {**primary, "instance_name": self._legacy["instance_name"]})
+            if primary and self._can_touch(self._legacy) and await self._child(self._legacy)._manager.instance_exists(self._legacy["instance_name"]):
+                locations.insert(0, {**primary, "instance_name": self._legacy["instance_name"],
+                                     "subnet_id": self._legacy["subnet_id"]})
 
             # Look for owned VMs left by earlier runs before creating another.
             existing = []
             for location in locations:
                 if await self._child(location)._manager.instance_exists(location["instance_name"]):
                     existing.append(location)
+            # A previous job may have used a region that does not support this
+            # job's different hardware. Reconcile its idle VM before allocating
+            # elsewhere, including after a queue restart.
+            known = [self._pool_location] if self._pool_location else []
+            known += [self._locations[key] for key, child in self._children.items() if child.get_instance_states()]
+            candidate_keys = {self._key(item) for item in locations}
+            existing_keys = {self._key(item) for item in existing}
+            for previous in known:
+                key = self._key(previous)
+                if key not in candidate_keys and key not in existing_keys and self._can_touch(previous):
+                    if await self._child(previous)._manager.instance_exists(previous["instance_name"]):
+                        existing.append(previous)
+                        existing_keys.add(key)
             bound_key = self._key(self._bound) if self._bound else None
             if bound_key and all(self._key(item) != bound_key for item in locations):
                 # An uncertain outcome in a now-ineligible location must first
                 # be reconciled, not forgotten while allocating somewhere else.
+                if not self._can_touch(self._bound):
+                    raise RuntimeError("Saved Nebius placement is claimed by another recoverable job")
                 child = self._child(self._bound)
                 if await child._manager.instance_exists(self._bound["instance_name"]):
                     await child.delete_recovered_instance()
@@ -842,6 +918,9 @@ class RegionalNebiusOrchestrator:
                         await other_child.delete_recovered_instance()
                         existing.remove(other)
                 self._remember(location)
+                notify = getattr(child._manager, "_mutation_callback", None)
+                if self._key(location) in existing_keys and notify:
+                    notify("settled", "observe")
                 logger.info("Trying Nebius region %s, project %s, resource %s", location["region"], location["project_name"], location["gpu_config"])
                 try:
                     answer = await child.acquire_instance(model_name, location["gpu_config"])
@@ -854,6 +933,8 @@ class RegionalNebiusOrchestrator:
                         raise
                     # Only move to another region after confirming the failed
                     # target has no live VM. Timeouts bubble out for reconciliation.
+                    if not self._can_touch(location):
+                        raise RuntimeError("Nebius placement was claimed during provisioning") from error
                     await child.delete_recovered_instance()
                     existing = [item for item in existing if self._key(item) != self._key(location)]
                     continue
@@ -869,6 +950,8 @@ class RegionalNebiusOrchestrator:
     async def adopt_running_instance(self, model_name, gpu_config):
         location = dict(self._bound or self._legacy)
         location["gpu_config"] = location.get("gpu_config") or gpu_config
+        if not self._can_touch(location):
+            raise RuntimeError("Nebius placement is claimed by another recoverable job")
         child = self._child(location)
         name = await child.adopt_running_instance(model_name, location["gpu_config"])
         self._remember(location)
@@ -878,6 +961,8 @@ class RegionalNebiusOrchestrator:
     async def adopt_paused_instance(self, model_name, gpu_config):
         location = dict(self._bound or self._legacy)
         location["gpu_config"] = location.get("gpu_config") or gpu_config
+        if not self._can_touch(location):
+            raise RuntimeError("Nebius placement is claimed by another recoverable job")
         child = self._child(location)
         name = await child.adopt_paused_instance(model_name, location["gpu_config"])
         self._remember(location)
@@ -885,16 +970,28 @@ class RegionalNebiusOrchestrator:
         return name
 
     async def delete_recovered_instance(self):
+        """Clean only this job's recorded or verified legacy placement, never sweep."""
         async with self._lock:
-            if self._bound:
-                await self._child(self._bound).delete_recovered_instance()
+            location = self._bound or (self._legacy if self._legacy_recovery else None)
+            if location is None:
+                logger.info("Skipping cleanup: this job has not selected or owned a Nebius VM")
                 return
-            # Startup cleanup, only when there are no recoverable jobs. Restrict
-            # deletions to this queue's deterministic names in approved projects.
+            if not self._can_touch(location):
+                logger.info("Skipping cleanup: Nebius VM is claimed by another recoverable job")
+                return
+            await self._child(location).delete_recovered_instance()
+
+    async def cleanup_startup_instances(self, can_use):
+        """Explicit startup-only sweep, independent of mutable per-job binding."""
+        async with self._lock:
+            if self.has_busy_instance():
+                return
             locations = [self._legacy, *(self._named(item) for item in await self._manager.discover_locations(
                 None, self._project_prefix, self._regions,
             ))]
             for location in locations:
+                if not can_use(location, self._key(location) == self._key(self._legacy)):
+                    continue
                 await self._child(location).delete_recovered_instance()
 
     async def mark_job_started(self, instance_name):
