@@ -270,7 +270,7 @@ def test_mutating_cli_transport_error_keeps_request_unsettled(tmp_path, monkeypa
     store = api.JobStore(tmp_path / "request.db")
     store.claim_nebius_guard("A")
     manager = object.__new__(NebiusInstanceManager)
-    manager._mutation_callback = lambda state, operation: store.update_nebius_guard("A", state, operation)
+    manager.set_mutation_observer(lambda state, operation: store.update_nebius_guard("A", state, operation))
     process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(b"", b"rpc error: DeadlineExceeded")))
 
     async def create(*args, **kwargs):
@@ -279,7 +279,7 @@ def test_mutating_cli_transport_error_keeps_request_unsettled(tmp_path, monkeypa
 
     monkeypatch.setattr(nebius_utils.asyncio, "create_subprocess_exec", create)
     with pytest.raises(NebiusCommandTimeout):
-        asyncio.run(manager.exec(["compute", "v1", "instance", "create"]))
+        asyncio.run(manager.mutate_instance("create", ["compute", "v1", "instance", "create"]))
     assert store.nebius_guard()["state"] == "inflight"
     assert store.nebius_guard()["operation"] == "create"
 

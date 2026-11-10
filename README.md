@@ -455,6 +455,10 @@ types or pricing policy; cross-region search requires explicit opt-in below.
 - `NEBIUS_CLI_TIMEOUT_SECONDS` bounds each Nebius CLI call (default **300
   seconds**, must be positive). Timed-out CLI subprocesses are killed/drained;
   an uncertain provisioning outcome is reconciled before another attempt.
+- `NEBIUS_MODEL_START_TIMEOUT_SECONDS` bounds stopping the old model and waiting
+  for the new model server's readiness output, including SSH retries (default
+  **1800 seconds / 30 minutes**, must be positive). Expiry fails preparation and
+  cleans up the known VM; it is not classified as a GPU capacity shortage.
 - Quota, authentication, invalid configuration, and unrecognized CLI failures
   are not classified as capacity shortages; they still fail the job. A bare
   `RESOURCE_EXHAUSTED` response without capacity details is not sufficient to
@@ -502,6 +506,63 @@ not support the next job's different hardware can be cleaned up before a new
 allocation. Pending jobs do not each get their own VM. Changing single-region
 project/name settings while an outcome is unknown fails closed: restore the
 saved configuration or reconcile the recorded VM manually.
+
+Before starting another managed allocation, CAB also checks the VMs claimed by
+other recoverable jobs. A paused job may retain a confirmed stopped VM/cache;
+`RUNNING`, transitioning, or unreadable owner state defers the new managed job
+without attempting allocation or increasing its attempt count.
+
+#### Inspecting a blocked pool
+
+These endpoints require the queue's normal `X-API-Key` authentication:
+
+```sh
+curl -H "X-API-Key: $API_KEY" "$QUEUE_URL/nebius/pool"
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "$QUEUE_URL/nebius/pool/reconcile/<owner-job-id>"
+```
+
+The read-only response contains the owner job ID, pool phase, last operation,
+recorded location, next retry time, and status message. It contains no cloud
+credentials or SSH command. The POST wakes the **same owner through the serial
+worker**; it does not make a parallel cloud call or clear the guard. It rejects
+a stale owner ID or an active worker and does not enqueue duplicate attempts.
+
+For an unresolved request:
+
+1. Inspect `/nebius/pool` and the owning job's error. Use the recorded project
+   and VM name, rather than the CLI's default project, when inspecting Nebius:
+   `nebius compute instance get-by-name --parent-id <project-id> --name <vm-name> --format json`.
+2. Restore credentials/connectivity if queries are failing. Use the POST above
+   to retry immediately rather than waiting for the persisted deadline.
+3. To abandon the run, use the existing `DELETE /jobs/<owner-job-id>`. The owner
+   remains `cancelling` until its VM cleanup is confirmed. Retry reconciliation
+   after fixing any cleanup error.
+4. A `NotFound` after a lost create/start response is still inconclusive. If no
+   VM ever becomes visible, contact Nebius with the request/trace information
+   from the CLI logs to establish the provider outcome. Do not delete the SQLite
+   guard or assume elapsed time proves the request failed.
+
+Nebius offers `--async` and `compute instance operation get --id <operation-id>`.
+This implementation retains the existing synchronous CLI protocol; it does not
+yet persist provider operation IDs or supply provider idempotency keys. Thus a
+lost initial response with no visible VM may still need operator/provider
+investigation. The inspect/retry endpoints deliberately provide no blind
+force-unlock. No live allocation/failover test was performed for this change.
+
+#### Lifecycle code organization
+
+- `ProvisioningRecord` / `PoolPhase` in `nebius_utils.py` define guard transition
+  rules. The existing SQLite schema remains readable; `mutation_seen` is the
+  persisted legacy name for whether a VM is known to require possible cleanup.
+- Create/start/stop/delete explicitly call `mutate_instance`; the generic CLI
+  runner only executes requests and bounds subprocess lifetime. It does not
+  infer which job-state transition to perform by parsing command tokens.
+- `reconcile_placement` uses public project-scoped inspect/delete methods.
+  API code owns persistence and dispatch, not the orchestrator's private clients.
+- `_next_dispatch` is the queue policy: guard owner first, otherwise the next
+  due job, otherwise wait for a deadline or enqueue/cancel event. In-memory
+  routing/model caches do not authorize releasing a durable guard.
 
 #### Automatic regional discovery (optional)
 
