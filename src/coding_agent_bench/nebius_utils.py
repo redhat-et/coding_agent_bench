@@ -1,6 +1,8 @@
 from abc import ABC
+from copy import copy
 from pathlib import Path
 import asyncio
+import hashlib
 import logging
 import json
 import os
@@ -26,6 +28,50 @@ from coding_agent_bench.models import (
 
 
 logger = logging.getLogger(__name__)
+NEBIUS_CLI_TIMEOUT_SECONDS = float(os.environ.get("NEBIUS_CLI_TIMEOUT_SECONDS", "300"))
+if not 0 < NEBIUS_CLI_TIMEOUT_SECONDS < float("inf"):
+    raise ValueError("NEBIUS_CLI_TIMEOUT_SECONDS must be positive")
+
+
+class NebiusCommandError(RuntimeError):
+    """Nebius rejected a CLI operation; retain output without logging command secrets."""
+
+    def __init__(self, args: list[str], returncode: int, stdout: str, stderr: str):
+        self.args_list = args
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(f"Nebius CLI failed ({returncode}): {stderr or stdout or 'no error details'}")
+
+
+class NebiusCapacityError(NebiusCommandError):
+    """A create/start request failed because physical capacity is unavailable."""
+
+
+class NebiusCommandTimeout(TimeoutError):
+    """The bounded CLI attempt expired; its remote outcome may be unknown."""
+
+
+def _is_capacity_error(args: list[str], output: str) -> bool:
+    """Retry explicit allocation shortages, not generic quota/auth/config errors.
+
+    Nebius documents 'Not enough resources' for VM creation/restart shortages.
+    RESOURCE_EXHAUSTED alone is not sufficient evidence: it also covers quotas.
+    """
+    offset = 2 if args[:2] == ["compute", "v1"] else 1
+    if not args or args[0] != "compute" or args[offset:offset + 2] not in (["instance", "create"], ["instance", "start"]):
+        return False
+    text = re.sub(r"[_-]+", " ", output.lower())
+    if any(marker in text for marker in (
+        "quota", "permission denied", "permissiondenied", "unauthenticated", "invalid argument", "invalidargument",
+        "unauthorized", "not authorized", "billing", "balance",
+        "limit exceeded", "limits exceeded",
+    )):
+        return False
+    return any(marker in text for marker in (
+        "not enough resources", "not enough capacity", "insufficient capacity",
+        "insufficient resources", "no available capacity",
+    ))
 
 # Note: Resources with the '-a' subscript are specific to the me-west1 region.
 
@@ -195,19 +241,102 @@ class NebiusInstanceManager:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout_bytes, stderr_bytes = await process.communicate()
-        except asyncio.CancelledError:
-            process.kill()
-            await process.wait()
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=NEBIUS_CLI_TIMEOUT_SECONDS,
+            )
+        except (asyncio.CancelledError, asyncio.TimeoutError) as error:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out draining terminated Nebius CLI subprocess")
+            if isinstance(error, asyncio.TimeoutError):
+                raise NebiusCommandTimeout(
+                    f"Nebius CLI timed out after {NEBIUS_CLI_TIMEOUT_SECONDS:g}s; remote outcome needs reconciliation"
+                ) from error
             raise
         stdout = stdout_bytes.decode() if stdout_bytes else ""
         stderr = stderr_bytes.decode() if stderr_bytes else ""
 
         if process.returncode != 0:
-            logger.info(f"Command failed: {command}\nstdout: {stdout}\nstderr: {stderr}")
-            raise Exception(f"Failed to execute command: {command}\nstdout: {stdout}\nstderr: {stderr}")
+            error_class = NebiusCapacityError if _is_capacity_error(args, stdout + "\n" + stderr) else NebiusCommandError
+            raise error_class(args, process.returncode, stdout, stderr)
 
         return stdout
+
+    def for_project(self, project_id: str):
+        """Share credentials/SSH settings without changing the active CLI profile."""
+        manager = copy(self)
+        manager._parent_id = project_id
+        return manager
+
+    async def list_resources(self, command: list[str]) -> list[dict]:
+        """Read all CLI pages; do not silently truncate discovery to its first page."""
+        items = []
+        token = ""
+        seen = set()
+        while True:
+            args = [*command, "--format", "json"]
+            if token:
+                args += ["--page-token", token]
+            document = json.loads(await self.exec(args))
+            page = document.get("items", [])
+            if not isinstance(page, list):
+                raise ValueError("Nebius list response has no usable items list")
+            items.extend(page)
+            token = document.get("next_page_token") or document.get("nextPageToken") or ""
+            if not token:
+                return items
+            if token in seen:
+                raise ValueError("Nebius returned a repeated pagination token")
+            seen.add(token)
+
+    async def discover_locations(self, gpu_config: str | None, project_prefix: str, regions: set[str]) -> list[dict]:
+        """Find approved projects/subnets supporting the requested GPU and pricing.
+
+        Quota and live capacity are checked authoritatively by allocation, not
+        inferred from absent quota counters or platform-list availability.
+        """
+        requested = RESOURCE_CONFIG_REGISTRY[gpu_config] if gpu_config else None
+        equivalents = [requested, *(resource for resource in RESOURCE_CONFIGS if requested and resource is not requested
+                        and resource.platform.removesuffix("-a") == requested.platform.removesuffix("-a")
+                        and resource.preset == requested.preset
+                        and resource.tensor_parallel_size == requested.tensor_parallel_size
+                        and resource.is_preemptible == requested.is_preemptible)]
+        projects = await self.list_resources(["iam", "v2", "project", "list", "--parent-id", self._tenant_id])
+        locations = []
+        for project in projects:
+            metadata = project.get("metadata", {})
+            region = (project.get("spec") or {}).get("region") or (project.get("status") or {}).get("region")
+            if not metadata.get("name", "").startswith(project_prefix) or not region or (regions and region not in regions):
+                continue
+            project_id = metadata["id"]
+            try:
+                platforms = await self.list_resources(["compute", "platform", "list", "--parent-id", project_id]) if requested else []
+                effective = next((resource for resource in equivalents if resource for platform in platforms
+                                  if platform.get("metadata", {}).get("name") == resource.platform
+                                  and any(preset.get("name") == resource.preset
+                                          for preset in platform.get("spec", {}).get("presets", []))
+                                  and (not resource.is_preemptible or platform.get("status", {}).get("allowed_for_preemptibles") is True)), None)
+                if requested and effective is None:
+                    continue
+                subnets = await self.list_resources(["vpc", "subnet", "list", "--parent-id", project_id])
+                defaults = [subnet for subnet in subnets if subnet.get("metadata", {}).get("name", "").startswith("default-")]
+                if len(defaults) != 1:
+                    logger.warning("Skipping project %s: expected one default subnet, found %s", metadata["name"], len(defaults))
+                    continue
+                locations.append({"project_id": project_id, "project_name": metadata["name"],
+                                  "region": region, "subnet_id": defaults[0]["metadata"]["id"],
+                                  "gpu_config": effective.name if effective else ""})
+            except NebiusCommandError as error:
+                # Project-specific permissions do not make another project
+                # unusable, but none of these failures count as capacity waits.
+                logger.warning("Skipping regional discovery for %s: %s", metadata["name"], error)
+        return sorted(locations, key=lambda item: (item["project_id"] != self._parent_id, item["region"], item["project_name"]))
 
     async def create_profile(self, name: str, credentials_path: Path):
         """Create a profile or refresh credentials for an existing one."""
@@ -593,3 +722,209 @@ class NebiusInstanceManager:
         """Stop a running vLLM server on the given instance."""
         await self.instance_exec(instance_name, ["sudo", "docker", "stop", "vllm"])
         await self.instance_exec(instance_name, ["sudo", "docker", "rm", "vllm"])
+
+
+class RegionalNebiusOrchestrator:
+    """Discover allocation targets while keeping all lifecycle calls project-scoped.
+
+    The queue worker binds one durable placement callback at a time. Placement
+    is recorded *before* provisioning, so a lost CLI response or queue restart
+    cannot cause the next attempt to forget where it may already own a VM.
+    """
+
+    def __init__(self, manager, subnet_id, instance_name_prefix, idle_timeout,
+                 orchestrator_factory, project_prefix="default-", regions=None):
+        self._manager = manager
+        self._prefix = instance_name_prefix
+        self._idle_timeout = idle_timeout
+        self._factory = orchestrator_factory
+        self._project_prefix = project_prefix
+        self._regions = set(regions or [])
+        self._children = {}
+        self._locations = {}
+        self._bound = None
+        self._save = None
+        self._lock = asyncio.Lock()
+        self._legacy = {"project_id": manager._parent_id, "subnet_id": subnet_id,
+                        "project_name": "", "region": "", "gpu_config": "",
+                        "instance_name": f"{instance_name_prefix}-0"}
+        self._child(self._legacy)
+
+    def bind_job(self, location, save):
+        """Restore the current job's placement without consulting mutable discovery."""
+        self._save = save
+        self._bound = dict(location) if location else None
+        if self._bound:
+            self._child(self._bound)
+
+    def _key(self, location):
+        return location["project_id"], location["instance_name"]
+
+    def _named(self, location):
+        location = dict(location)
+        project_hash = hashlib.sha256(location["project_id"].encode()).hexdigest()[:8]
+        location["instance_name"] = f"{self._prefix[:30]}-{location['region']}-{project_hash}-0"
+        return location
+
+    def _child(self, location):
+        key = self._key(location)
+        if key in self._locations and self._locations[key]["subnet_id"] != location["subnet_id"]:
+            raise ValueError("Saved Nebius placement conflicts with discovered subnet")
+        if key not in self._children:
+            if not location["instance_name"].endswith("-0"):
+                raise ValueError("Invalid persisted Nebius instance name")
+            manager = self._manager.for_project(location["project_id"])
+            self._children[key] = self._factory(
+                manager, location["subnet_id"], location["instance_name"][:-2], self._idle_timeout,
+            )
+            self._locations[key] = dict(location)
+        return self._children[key]
+
+    def _remember(self, location):
+        self._bound = dict(location)
+        self._locations[self._key(location)] = dict(location)
+        if self._save:
+            if self._save(dict(location)) is False:
+                raise RuntimeError("Job left its recoverable state before regional provisioning")
+
+    def _route(self, instance_name):
+        matches = [child for key, child in self._children.items() if key[1] == instance_name]
+        if len(matches) != 1:
+            raise ValueError(f"No unambiguous saved region for Nebius instance {instance_name}")
+        return matches[0]
+
+    def _annotate(self, child, location):
+        for state in child.get_instance_states():
+            state.region = location["region"]
+            state.project_id = location["project_id"]
+
+    async def acquire_instance(self, model_name, gpu_config):
+        """Try each eligible region once; only all-capacity failures defer the job."""
+        async with self._lock:
+            if self.has_busy_instance():
+                raise RuntimeError("Another job still owns a regional Nebius instance")
+            locations = [self._named(item) for item in await self._manager.discover_locations(
+                gpu_config, self._project_prefix, self._regions,
+            )]
+            if not locations:
+                raise RuntimeError("No eligible Nebius projects/subnets support the requested GPU and pricing policy; check discovery permissions and region configuration")
+
+            # Include the old single-region VM name for rolling upgrades. Never
+            # reuse it for a different project than its configured original one.
+            primary = next((item for item in locations if item["project_id"] == self._legacy["project_id"]), None)
+            if primary and await self._child(self._legacy)._manager.instance_exists(self._legacy["instance_name"]):
+                locations.insert(0, {**primary, "instance_name": self._legacy["instance_name"]})
+
+            # Look for owned VMs left by earlier runs before creating another.
+            existing = []
+            for location in locations:
+                if await self._child(location)._manager.instance_exists(location["instance_name"]):
+                    existing.append(location)
+            bound_key = self._key(self._bound) if self._bound else None
+            if bound_key and all(self._key(item) != bound_key for item in locations):
+                # An uncertain outcome in a now-ineligible location must first
+                # be reconciled, not forgotten while allocating somewhere else.
+                child = self._child(self._bound)
+                if await child._manager.instance_exists(self._bound["instance_name"]):
+                    await child.delete_recovered_instance()
+            existing_keys = {self._key(item) for item in existing}
+            locations.sort(key=lambda item: (self._key(item) != bound_key, self._key(item) not in existing_keys))
+            capacity_regions = []
+            quota_regions = []
+            for location in locations:
+                child = self._child(location)
+                for other in list(existing):
+                    if self._key(other) != self._key(location):
+                        other_child = self._child(other)
+                        if other_child.has_busy_instance():
+                            raise RuntimeError("Another job still owns a regional Nebius instance")
+                        self._remember(other)
+                        await other_child.delete_recovered_instance()
+                        existing.remove(other)
+                self._remember(location)
+                logger.info("Trying Nebius region %s, project %s, resource %s", location["region"], location["project_name"], location["gpu_config"])
+                try:
+                    answer = await child.acquire_instance(model_name, location["gpu_config"])
+                except NebiusCommandError as error:
+                    if isinstance(error, NebiusCapacityError):
+                        capacity_regions.append(location["region"])
+                    elif "quota" in (error.stderr + error.stdout).lower():
+                        quota_regions.append(location["region"])
+                    else:
+                        raise
+                    # Only move to another region after confirming the failed
+                    # target has no live VM. Timeouts bubble out for reconciliation.
+                    await child.delete_recovered_instance()
+                    existing = [item for item in existing if self._key(item) != self._key(location)]
+                    continue
+                self._annotate(child, location)
+                return answer
+            if capacity_regions:
+                error = NebiusCapacityError(["compute", "instance", "create"], 1, "",
+                                             "Not enough resources in regions: " + ", ".join(capacity_regions))
+                error.regions = capacity_regions
+                raise error
+            raise RuntimeError("No regional allocation available: quota exceeded in " + ", ".join(quota_regions))
+
+    async def adopt_running_instance(self, model_name, gpu_config):
+        location = dict(self._bound or self._legacy)
+        location["gpu_config"] = location.get("gpu_config") or gpu_config
+        child = self._child(location)
+        name = await child.adopt_running_instance(model_name, location["gpu_config"])
+        self._remember(location)
+        self._annotate(child, location)
+        return name
+
+    async def adopt_paused_instance(self, model_name, gpu_config):
+        location = dict(self._bound or self._legacy)
+        location["gpu_config"] = location.get("gpu_config") or gpu_config
+        child = self._child(location)
+        name = await child.adopt_paused_instance(model_name, location["gpu_config"])
+        self._remember(location)
+        self._annotate(child, location)
+        return name
+
+    async def delete_recovered_instance(self):
+        async with self._lock:
+            if self._bound:
+                await self._child(self._bound).delete_recovered_instance()
+                return
+            # Startup cleanup, only when there are no recoverable jobs. Restrict
+            # deletions to this queue's deterministic names in approved projects.
+            locations = [self._legacy, *(self._named(item) for item in await self._manager.discover_locations(
+                None, self._project_prefix, self._regions,
+            ))]
+            for location in locations:
+                await self._child(location).delete_recovered_instance()
+
+    async def mark_job_started(self, instance_name):
+        await self._route(instance_name).mark_job_started(instance_name)
+
+    async def mark_job_completed(self, instance_name):
+        await self._route(instance_name).mark_job_completed(instance_name)
+
+    async def mark_job_paused(self, instance_name):
+        await self._route(instance_name).mark_job_paused(instance_name)
+
+    async def recover_stopped_instance(self, instance_name):
+        child = self._route(instance_name)
+        async with child._lock:
+            await child.recover_stopped_instance(instance_name)
+
+    async def get_instance_state(self, instance_name):
+        return await self._route(instance_name).get_instance_state(instance_name)
+
+    def has_busy_instance(self):
+        return any(child.has_busy_instance() for child in self._children.values())
+
+    def get_instance_states(self):
+        return [state for child in self._children.values() for state in child.get_instance_states()]
+
+    async def idle_cleanup_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            for child in list(self._children.values()):
+                try:
+                    await child.cleanup_idle_instances()
+                except Exception:
+                    logger.exception("Regional Nebius idle cleanup failed")

@@ -439,6 +439,82 @@ stringData:
 
 When creating a job, set `server_url` to `nebius-<resource>` to use a managed Nebius instance with the specified GPU resource (e.g. `nebius-h200`, `nebius-b200`). Available resources are defined in `RESOURCE_CONFIG_REGISTRY`.
 
+#### Waiting for Nebius capacity
+
+If a new job cannot allocate or start its VM because Nebius explicitly reports
+a physical capacity shortage (such as `Not enough resources`), it stays
+`queued` with **Waiting for Nebius capacity** in its status details. It retries
+until capacity becomes available or the job is cancelled; there is no overall
+capacity-wait deadline and these attempts do not consume preemption auto-resumes.
+Between attempts, other eligible jobs can use the serial worker. By default
+retries target the configured project only. CAB does not silently switch GPU
+types or pricing policy; cross-region search requires explicit opt-in below.
+
+- `NEBIUS_CAPACITY_RETRY_SECONDS` controls the delay after a failed attempt
+  (default **60 seconds**, must be positive).
+- `NEBIUS_CLI_TIMEOUT_SECONDS` bounds each Nebius CLI call (default **300
+  seconds**, must be positive). Timed-out CLI subprocesses are killed/drained;
+  an uncertain provisioning outcome is reconciled before another attempt.
+- Quota, authentication, invalid configuration, and unrecognized CLI failures
+  are not classified as capacity shortages; they still fail the job. A bare
+  `RESOURCE_EXHAUSTED` response without capacity details is not sufficient to
+  enable endless retries.
+- Retry timestamps and attempt counts are persisted in SQLite and exposed as
+  `nebius_retry_at` (Unix epoch seconds) and `nebius_retry_attempts` in job API
+  responses. Waiting survives queue-service restarts. Matching partially
+  created VMs are adopted rather than blindly deleted/recreated.
+- GitHub tokens stay only in memory during a capacity wait. If the queue
+  service restarts before a credential-requiring job starts, that job fails
+  with instructions to resubmit with a fresh token; credentials are never
+  written to SQLite.
+
+The existing paused/preempted-job recovery remains separate from this
+initial-provisioning retry path.
+
+#### Automatic regional discovery (optional)
+
+Set `NEBIUS_DISCOVER_REGIONS=1` to let CAB discover regional projects and default
+subnets through the Nebius CLI using **the queue's service account**, not an
+operator's local login. No projects, subnets, IAM grants, or alternate GPU types
+are created automatically. The service account needs tenant-level project
+listing, project/subnet/platform read access, compute lifecycle permissions,
+and permission to use networking/attach the configured service account in the
+target projects. Local CLI access does not imply the queue has these grants.
+
+- `NEBIUS_PROJECT_NAME_PREFIX` defaults to `default-`. Only matching project
+  names are considered. Use `stage-` for stage-only discovery, or a distinct
+  approved prefix to avoid crossing environments. Empty prefixes are rejected.
+- `NEBIUS_REGIONS` is an optional comma-separated region allowlist, such as
+  `us-central1,eu-west1,me-west1`. Omit it to search all matching regional
+  projects accessible to the service account. CLI pagination is followed.
+- A project is eligible only when its advertised platform/preset supports the
+  requested GPU family and GPU count and it has one unambiguous `default-`
+  subnet. The known `-a` platform variants are supported without changing the
+  GPU family, count, or requested preemptible policy.
+- Each round refreshes discovery and tries eligible locations sequentially,
+  preferring an existing owned VM or a persisted pending placement. Allocation
+  is the authoritative quota/capacity check, not a prediction from platform
+  listings. Regional quota failures may be skipped in favor of another region;
+  quota-only rounds fail rather than retry forever. Authentication/configuration
+  failures are not treated as capacity shortages.
+- If all usable targets lack capacity, the job remains queued and is eligible
+  for another round after `NEBIUS_CAPACITY_RETRY_SECONDS`. The attempt counter
+  increments **once per unsuccessful round**, not once per region. Other jobs
+  can run between rounds, and cancellation remains available.
+- An uncertain create/start timeout stops the round. CAB first reconciles that
+  placement on the next attempt rather than risking a second allocation.
+  Failed target VMs are cleaned up before advancing to another region.
+- `nebius_location` in SQLite/job API responses records region, project, subnet,
+  effective resource config, and the deterministic VM name **before** allocation.
+  Monitoring, pause/resume, cancellation, and cleanup use that saved location
+  even after a queue restart. Preempted VM stabilization stays in its saved
+  region; a missing VM can be recreated via the regional search path.
+
+Use a unique `NEBIUS_INSTANCE_NAME_PREFIX` for each queue deployment. Regional
+VM names include region and a project hash; cleanup only targets these owned
+names (plus the legacy single-region VM name for upgrades). Discovery alone
+does **not** mean a GPU is free, and enabling it does not reserve capacity.
+
 ### (Optional) Set Up the Intake Poller
 
 The intake poller is an optional CronJob to pull requests from a Google Sheet and submit them to the job queue.
