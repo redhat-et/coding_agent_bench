@@ -1,0 +1,34 @@
+# Never ship repository metadata or credentials into the image.
+# A CI-authenticated .git/config baked into /app/.git once shipped a stale
+# GitHub token that made git ls-remote 401 on public repos in job pods.
+.git
+.gitignore
+.github
+
+# Local runtime state and secrets (mirrors .gitignore)
+jobs
+models.json
+config.toml
+data
+jobs.db
+deploy/storage/base/secret.yaml
+deploy/job-queue/base/secret.yaml
+deploy/job-queue/base/nebius-secret.yaml
+deploy/intake-poller/base/secret.yaml
+
+# Python and tool caches
+__pycache__/
+*.py[cod]
+.venv
+.ruff_cache
+.mypy_cache
+.pytest_cache
+uv.lock.tmp
+
+# Local-only workspace state
+.claude
+.superpowers
+docs/superpowers
+.gitleaks.toml
+.pre-commit-config.yaml
+datasets/
