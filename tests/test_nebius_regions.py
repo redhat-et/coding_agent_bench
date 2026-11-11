@@ -322,9 +322,11 @@ def test_all_regions_short_on_capacity_produce_one_durable_retry_round(tmp_path,
     assert row["nebius_retry_attempts"] == 1
     assert row["nebius_retry_at"] > 0
     assert "us-central1" in row["error"] and "eu-west1" in row["error"]
-    saved = json.loads(row["nebius_location"])
+    # Confirmed capacity failure leaves an audit target in the pool record,
+    # but the queued job no longer claims ownership of that vacant target.
+    saved = store.last_nebius_location()
     assert saved["project_id"] == "secondary"
-    assert api.JobResponse(**row).nebius_location == saved
+    assert api.JobResponse(**row).nebius_location is None
     assert manager.cloud == {}
     api._run_job.assert_not_awaited()
 

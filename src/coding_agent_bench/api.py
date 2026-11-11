@@ -877,9 +877,19 @@ class JobStore:
                 )
         conn.close()
 
-    def release_nebius_guard(self, job_id: str) -> None:
-        """Release only after a known allocation outcome or confirmed cleanup."""
+    def release_nebius_guard(self, job_id: str, *, release_vacant_claim: bool = False) -> None:
+        """Release a settled guard and optionally its confirmed-vacant job claim.
+
+        A capacity rejection with no known VM is an attempted location, not
+        ownership. Clear that job's claim atomically with the guard release.
+        A rejected start on a known VM retains its recovery placement.
+        """
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if release_vacant_claim:
+                guard = conn.execute("SELECT * FROM nebius_pool_guard WHERE job_id = ?", (job_id,)).fetchone()
+                if guard and not ProvisioningRecord.from_row(guard).needs_cleanup:
+                    conn.execute("UPDATE jobs SET nebius_location = NULL WHERE job_id = ?", (job_id,))
             conn.execute("UPDATE nebius_pool_guard SET job_id = '', state = 'released', operation = '', mutation_seen = 0 WHERE job_id = ?", (job_id,))
         conn.close()
 
@@ -2167,7 +2177,7 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                     nebius_instance_name, real_url = await _nebius.acquire_instance(model_name, gpu_config=nebius_gpu_config)
                 except (NebiusCapacityError, NebiusCommandTimeout) as error:
                     if isinstance(error, NebiusCapacityError):
-                        job_store.release_nebius_guard(job_id)
+                        job_store.release_nebius_guard(job_id, release_vacant_claim=True)
                         _set_nebius_guard_hook(None)
                     else:
                         guard = job_store.nebius_guard()

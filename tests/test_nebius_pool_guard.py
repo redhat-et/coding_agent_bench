@@ -12,6 +12,7 @@ import pytest
 from coding_agent_bench import api, nebius_utils
 from coding_agent_bench.nebius_utils import NebiusCommandTimeout, NebiusInstanceManager
 from tests.test_nebius_regions import RegionalManager, regional, seed_vm
+from tests.test_nebius_regions import capacity
 
 
 class LostStartReply(RegionalManager):
@@ -385,3 +386,73 @@ def test_single_region_config_change_does_not_probe_the_wrong_project(guarded, m
     assert manager.events == before
     assert store.nebius_guard()["job_id"] == "A"
     assert "single-region configuration" in store.get("A")["error"]
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_confirmed_capacity_waiter_does_not_claim_another_jobs_region(guarded, monkeypatch, restart, lost_reply):
+    store, manager, pool, ran = guarded
+    manager.locations = manager.locations[:1]  # Only one eligible region.
+    manager.failures["primary"].append(capacity())
+    manager.lost["start"] = lost_reply
+    first = enqueue(store, "A", "nebius-h200")
+    second = enqueue(store, "B", "nebius-h200")
+    asyncio.run(api._process_queued_job(first))
+
+    row = store.get("A")
+    assert row["status"] == "queued"
+    assert row["nebius_location"] is None
+    assert row["nebius_retry_attempts"] == 1
+    assert store.nebius_guard() is None
+    assert manager.cloud == {}
+    attempted = store.last_nebius_location()
+    assert attempted["project_id"] == "primary"
+
+    if restart:
+        store = api.JobStore(store._db_path)
+        monkeypatch.setattr(api, "job_store", store)
+        pool = regional(manager)
+        monkeypatch.setattr(api, "_nebius", pool)
+        asyncio.run(api._restore_jobs())
+        second = next(item for item in api._job_queue if item.job_id == "B")
+
+    assert not api._nebius_placement_claimed_elsewhere("B", attempted, False)
+    asyncio.run(api._process_queued_job(second))
+    assert len(manager.cloud) == 1
+    if lost_reply:
+        # A's empty capacity claim must not block B's guarded cancellation.
+        assert store.nebius_guard()["job_id"] == "B"
+        assert store.get("B")["nebius_location"] is not None
+        asyncio.run(api.delete_job("B"))
+        asyncio.run(api._process_queued_job(second))
+        assert store.get("B")["status"] == "cancelled"
+        assert store.nebius_guard() is None
+        assert manager.cloud == {}
+    else:
+        assert ran == ["B"]
+        assert store.get("B")["status"] == "completed"
+    assert store.get("A")["status"] == "queued"
+    assert store.get("A")["nebius_retry_attempts"] == 1
+
+
+def test_capacity_rejected_start_retains_known_stopped_vm_claim(guarded, monkeypatch):
+    store, manager, _, ran = guarded
+    pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+    monkeypatch.setattr(api, "_nebius", pool)
+    selected = pool.configured_location("h200")
+    seed_vm(manager, selected)
+
+    async def rejected_start(self, name):
+        self._mutation_callback("inflight", "start")
+        self._mutation_callback("rejected", "start")
+        raise capacity()
+
+    monkeypatch.setattr(type(manager), "start_instance", rejected_start)
+    first = enqueue(store, "A", "nebius-h200")
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == "queued"
+    assert json.loads(store.get("A")["nebius_location"]) == selected
+    assert store.nebius_guard() is None  # Rejection is certain, but the VM exists.
+    assert api._nebius_placement_claimed_elsewhere("B", selected, True)
+    assert manager.cloud["primary", "queue-0"]["status"]["state"] == "STOPPED"
+    assert not ran

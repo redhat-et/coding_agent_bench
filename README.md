@@ -486,6 +486,11 @@ gets dispatch priority so a VM cannot finish allocating and then sit idle behind
 an unrelated external benchmark. Blocked jobs do not increment allocation-attempt counters.
 An explicit capacity rejection releases the guard, allowing a different queued
 hardware request to try its own allocation or an external-endpoint job to run.
+If no VM is known to remain, that release also clears the waiter's job-level
+placement claim atomically. The last attempted target stays in the pool record
+for diagnostics, but does not reserve that region against other queued jobs.
+Uncertain requests and rejected starts on existing VMs retain their placement
+claims for recovery and cleanup.
 
 The owner is reconciled on the usual retry interval. A visible, stable VM is
 reused to finish preparing that job rather than creating another VM. A single
