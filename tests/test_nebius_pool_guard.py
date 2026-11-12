@@ -210,7 +210,7 @@ def test_idle_and_startup_cleanup_do_not_retire_unknown_request(guarded):
     child._instances[selected["instance_name"]].last_job_completed_at = time.time() - 9999
     before = list(manager.events)
     asyncio.run(child.cleanup_idle_instances())
-    asyncio.run(api._delete_recovered_nebius("startup"))
+    asyncio.run(api._nebius_pool().cleanup("startup"))
     assert manager.events == before
     assert store.nebius_guard() is not None
 
@@ -416,7 +416,7 @@ def test_confirmed_capacity_waiter_does_not_claim_another_jobs_region(guarded, m
         asyncio.run(api._restore_jobs())
         second = next(item for item in api._job_queue if item.job_id == "B")
 
-    assert not api._nebius_placement_claimed_elsewhere("B", attempted, False)
+    assert not api._nebius_pool().claimed_elsewhere("B", attempted, False)
     asyncio.run(api._process_queued_job(second))
     assert len(manager.cloud) == 1
     if lost_reply:
@@ -454,7 +454,7 @@ def test_capacity_rejected_start_retains_known_stopped_vm_claim(guarded, monkeyp
     assert json.loads(store.get("A")["nebius_location"]) == selected
     assert not store.get("A")["nebius_vacant"]
     assert store.nebius_guard() is None  # Rejection is certain, but the VM exists.
-    assert api._nebius_placement_claimed_elsewhere("B", selected, True)
+    assert api._nebius_pool().claimed_elsewhere("B", selected, True)
     assert manager.cloud["primary", "queue-0"]["status"]["state"] == "STOPPED"
     assert not ran
 
@@ -475,7 +475,7 @@ def test_resumed_capacity_waiter_allows_legacy_vm_cleanup(guarded, monkeypatch, 
             conn.execute("UPDATE jobs SET pause_checkpointed = 1 WHERE job_id = 'A'")
     legacy = pool.configured_location("h200")
     # Without evidence of vacancy, the old recovery fallback must still protect A.
-    assert api._nebius_placement_claimed_elsewhere("B", legacy, True)
+    assert api._nebius_pool().claimed_elsewhere("B", legacy, True)
     manager.failures["primary"].append(capacity())
     asyncio.run(api._process_queued_job(first))
     assert store.get("A")["nebius_location"] is None
@@ -509,7 +509,7 @@ def test_resumed_capacity_waiter_allows_legacy_vm_cleanup(guarded, monkeypatch, 
     selected = json.loads(store.get("A")["nebius_location"])
     assert store.nebius_guard()["job_id"] == "A"
     assert not store.get("A")["nebius_vacant"]
-    assert api._nebius_placement_claimed_elsewhere("B", selected, False)
+    assert api._nebius_pool().claimed_elsewhere("B", selected, False)
 
 
 @pytest.mark.parametrize("mode", ["regional", "single"])
@@ -546,4 +546,4 @@ def test_vacancy_migration_preserves_legacy_recovery_claim(guarded, monkeypatch)
     reopened = api.JobStore(store._db_path)
     monkeypatch.setattr(api, "job_store", reopened)
     assert not reopened.get("A")["nebius_vacant"]
-    assert api._nebius_placement_claimed_elsewhere("B", pool._legacy, True)
+    assert api._nebius_pool().claimed_elsewhere("B", pool._legacy, True)

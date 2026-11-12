@@ -20,9 +20,12 @@ from coding_agent_bench.nebius_utils import (
     NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY, get_model_max_concurrency,
     NebiusCapacityError, NebiusCommandTimeout,
     RegionalNebiusOrchestrator,
-    ProvisioningRecord, PoolPhase, ReconcileOutcome, reconcile_placement,
-    NEBIUS_MODEL_START_TIMEOUT_SECONDS, NebiusModelStartTimeout,
-    NebiusPoolBusy, ensure_other_vms_stopped,
+    ProvisioningRecord, PoolPhase, NebiusPoolBusy,
+)
+from coding_agent_bench.nebius_pool import (
+    NebiusOrchestrator, NebiusPool,
+    NebiusInstanceState as NebiusInstanceState,
+    parse_nebius_url as _parse_nebius_url,
 )
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import (
@@ -70,14 +73,14 @@ _active_job: tuple[str, asyncio.Task] | None = None
 _shutting_down = False
 _nebius: "NebiusOrchestrator | RegionalNebiusOrchestrator | None" = None
 
-NEBIUS_PREFIX = "nebius-"
-
-
-def _parse_nebius_url(server_url: str) -> str | None:
-    """Return the resource config name if server_url is a nebius placeholder, else None."""
-    if server_url.lower().startswith(NEBIUS_PREFIX):
-        return server_url[len(NEBIUS_PREFIX):].lower()
-    return None
+def _nebius_pool() -> NebiusPool:
+    """Supply the existing queue dependencies to the Nebius coordinator."""
+    return NebiusPool(
+        job_store, _nebius,
+        cleanup_attempts=CLEANUP_MAX_ATTEMPTS,
+        cleanup_retry_seconds=CLEANUP_RETRY_INTERVAL_SECONDS,
+        worker_active=lambda: _active_job is not None,
+    )
 
 
 def _worker_server_url_errors(
@@ -129,9 +132,6 @@ NEBIUS_IDLE_TIMEOUT = int(os.environ.get("NEBIUS_IDLE_TIMEOUT_SECONDS", "600"))
 CLEANUP_MAX_ATTEMPTS = int(os.environ.get("CLEANUP_MAX_ATTEMPTS", "120"))
 CLEANUP_RETRY_INTERVAL_SECONDS = float(os.environ.get("CLEANUP_RETRY_INTERVAL_SECONDS", "5"))
 MAX_PREEMPT_RESUMES = int(os.environ.get("MAX_PREEMPT_RESUMES", "3"))
-PREEMPT_STABLE_SECONDS = int(os.environ.get("PREEMPT_STABLE_SECONDS", "90"))
-PREEMPT_RESTART_ATTEMPTS = int(os.environ.get("PREEMPT_RESTART_ATTEMPTS", "10"))
-PREEMPT_STABILIZE_ERROR_SECONDS = int(os.environ.get("PREEMPT_STABILIZE_ERROR_SECONDS", "120"))
 PAUSED_POLL_INTERVAL_SECONDS = int(os.environ.get("PAUSED_POLL_INTERVAL_SECONDS", "60"))
 PAUSE_UPLOAD_TIMEOUT_SECONDS = int(os.environ.get("PAUSE_UPLOAD_TIMEOUT_SECONDS", "600"))
 NEBIUS_UNREACHABLE_TRIGGER_SECONDS = int(os.environ.get("NEBIUS_UNREACHABLE_TRIGGER_SECONDS", "300"))
@@ -139,9 +139,6 @@ NEBIUS_STOPPED_TRIGGER_SECONDS = int(os.environ.get("NEBIUS_STOPPED_TRIGGER_SECO
 NEBIUS_CAPACITY_RETRY_SECONDS = float(os.environ.get("NEBIUS_CAPACITY_RETRY_SECONDS", "60"))
 if not 0 < NEBIUS_CAPACITY_RETRY_SECONDS < float("inf"):
     raise ValueError("NEBIUS_CAPACITY_RETRY_SECONDS must be positive")
-# States no start call can bring back (idle cleanup deletes preempted VMs
-# after NEBIUS_IDLE_TIMEOUT_SECONDS, leaving such records behind):
-NEBIUS_UNRECOVERABLE_STATES = {"DELETED", "ERROR", "CRASHED"}
 
 
 def _monotonic() -> float:
@@ -151,397 +148,6 @@ def _monotonic() -> float:
 
 # Monitor iterations run every 5s; probe Nebius state every Nth iteration.
 DETECT_EVERY_N_POLLS = 3
-
-
-@dataclass
-class NebiusInstanceState:
-    instance_name: str
-    gpu_config: str
-    current_model: str | None = None
-    provisioning_model: str | None = None  # set while a model is being started/swapped
-    job_running: bool = False
-    last_job_completed_at: float | None = None
-    region: str = ""
-    project_id: str = ""
-
-
-class NebiusOrchestrator:
-    """Async wrapper around NebiusInstanceManager that tracks instance lifecycle.
-
-    Manages a pool of Nebius GPU instances (currently one, designed for easy
-    extension to multiple). Handles instance creation, model swapping, idle
-    cleanup, and exposes state for the UI without making CLI calls.
-    """
-
-    def __init__(self, manager: NebiusInstanceManager, subnet_id: str,
-                 instance_name_prefix: str, idle_timeout: int):
-        """Initialize the in-memory Nebius instance lifecycle tracker."""
-        self._manager = manager
-        self._subnet_id = subnet_id
-        self._prefix = instance_name_prefix
-        self._idle_timeout = idle_timeout
-        self._instances: dict[str, NebiusInstanceState] = {}
-        self._lock = asyncio.Lock()
-        self._pool_guard_active = None
-
-    def _pick_instance_name(self) -> str:
-        """Return the name for the next instance. Currently single-instance."""
-        return f"{self._prefix}-0"
-
-    def configured_location(self, gpu_config):
-        """Expose the single-region placement to the persistence boundary."""
-        return {"project_id": self._manager.project_id, "subnet_id": self._subnet_id,
-                "instance_name": self._pick_instance_name(), "region": "", "project_name": "",
-                "gpu_config": gpu_config}
-
-    def configure_provisioning(self, observer, active, previous_location=None):
-        """Configure explicit provider journaling and idle-cleanup exclusion."""
-        self._manager.set_mutation_observer(observer)
-        self._pool_guard_active = active
-
-    def is_legacy_placement(self, location):
-        """The original single-project pool has one deterministic legacy name."""
-        return True
-
-    async def check_other_placements(self, placements):
-        await ensure_other_vms_stopped(self._manager, placements, self.configured_location(""))
-
-    def _validate_placement(self, location):
-        if (self._manager.project_id, self._pick_instance_name()) != (location["project_id"], location["instance_name"]):
-            raise ValueError("saved placement differs from current single-region configuration; restore it or reconcile the saved VM manually")
-
-    async def inspect_placement(self, location):
-        """Read only the recorded target; never silently redirect to a new project."""
-        self._validate_placement(location)
-        return await self._manager.get_instance(location["instance_name"])
-
-    async def delete_placement(self, location):
-        """Delete the recorded target under the normal lifecycle lock."""
-        self._validate_placement(location)
-        await self.delete_recovered_instance()
-
-    def _observe_vm(self):
-        observer = getattr(self._manager, "observe_vm", None)
-        if observer:
-            observer()
-
-    async def acquire_instance(self, model_name: str, gpu_config: str) -> tuple[str, str]:
-        """
-        Provision an instance with the requested model and return (instance_name, server_url).
-
-        Creates the VM if it doesn't exist, starts it if stopped, and swaps
-        the model if a different one is loaded. Skips steps that are already
-        satisfied to minimize latency.
-        """
-        async with self._lock:
-            # Reuse an existing instance with matching gpu_config, or create a new one.
-            # Delete idle instances with the wrong gpu_config to free the slot.
-            instance_name = None
-            to_delete: list[str] = []
-            for name, state in self._instances.items():
-                if state.job_running:
-                    continue
-                if state.gpu_config == gpu_config:
-                    instance_name = name
-                    break
-                else:
-                    to_delete.append(name)
-
-            for name in to_delete:
-                logger.info(f"Deleting nebius instance {name} (gpu_config mismatch, had {self._instances[name].gpu_config}, need {gpu_config})")
-                # An earlier delete may have completed despite a CLI timeout.
-                if await self._manager.instance_exists(name):
-                    await self._manager.delete_instance(name)
-                del self._instances[name]
-
-            if instance_name is None:
-                instance_name = self._pick_instance_name()
-
-            # Create the instance if we haven't tracked it yet
-            if instance_name not in self._instances:
-                if await self._manager.instance_exists(instance_name):
-                    self._observe_vm()
-                    # A timed-out create may have succeeded remotely. Reconcile
-                    # the deterministic VM before issuing another create/delete.
-                    details = await self._manager.get_instance(instance_name)
-                    resources = details.get("spec", {}).get("resources", {})
-                    requested = RESOURCE_CONFIG_REGISTRY[gpu_config]
-                    matching = (resources.get("platform"), resources.get("preset")) == (requested.platform, requested.preset)
-                    usable = details.get("status", {}).get("state") not in NEBIUS_UNRECOVERABLE_STATES
-                    if not matching or not usable:
-                        logger.info(f"Replacing incompatible nebius instance {instance_name}")
-                        await self._manager.delete_instance(instance_name)
-                        await self._manager.create_instance(instance_name, self._subnet_id, gpu_config)
-                else:
-                    logger.info(f"Creating nebius instance {instance_name} with {gpu_config}")
-                    await self._manager.create_instance(instance_name, self._subnet_id, gpu_config)
-                self._instances[instance_name] = NebiusInstanceState(instance_name=instance_name, gpu_config=gpu_config, last_job_completed_at=time.time())
-
-            # Start the instance (noop if already running)
-            self._observe_vm()
-            logger.info(f"Ensuring nebius instance {instance_name} is running")
-            try:
-                await self._manager.start_instance(instance_name)
-            except Exception as e:
-                if "not found" in str(e).lower() or "NotFound" in str(e):
-                    logger.warning(f"Instance {instance_name} no longer exists, recreating")
-                    del self._instances[instance_name]
-                    await self._manager.create_instance(instance_name, self._subnet_id, gpu_config)
-                    self._instances[instance_name] = NebiusInstanceState(instance_name=instance_name, gpu_config=gpu_config, last_job_completed_at=time.time())
-                    await self._manager.start_instance(instance_name)
-                else:
-                    raise
-
-            state = self._instances[instance_name]
-
-            # Swap model if needed
-            if state.current_model != model_name:
-                state.provisioning_model = model_name
-                try:
-                    async with asyncio.timeout(NEBIUS_MODEL_START_TIMEOUT_SECONDS):
-                        try:
-                            logger.info(f"Stopping any running model on {instance_name}")
-                            await self._manager.stop_model(instance_name)
-                        except Exception:
-                            logger.debug(f"stop_model failed on {instance_name} (may be expected)", exc_info=True)
-                        logger.info(f"Starting model {model_name} on {instance_name}")
-                        await self._manager.start_model(instance_name, model_name)
-                    state.current_model = model_name
-                except TimeoutError as error:
-                    state.current_model = None
-                    raise NebiusModelStartTimeout(
-                        f"Model startup/readiness exceeded {NEBIUS_MODEL_START_TIMEOUT_SECONDS:g}s on {instance_name}"
-                    ) from error
-                except Exception:
-                    state.current_model = None
-                    raise
-                finally:
-                    state.provisioning_model = None
-
-            # Fetch the public IP and build the server URL
-            ip = await self._manager.get_instance_ip_address(instance_name)
-            if ip and "/" in ip:
-                ip = ip.split("/")[0]
-            if not ip:
-                raise RuntimeError(f"Instance {instance_name} has no public IP address")
-            server_url = f"http://{ip}:8000"
-            return instance_name, server_url
-
-    async def mark_job_started(self, instance_name: str):
-        """Mark a tracked Nebius instance as busy."""
-        if instance_name not in self._instances:
-            logger.warning(f"mark_job_started: instance {instance_name} already evicted")
-            return
-        self._instances[instance_name].job_running = True
-
-    async def mark_job_completed(self, instance_name: str):
-        """Mark a tracked Nebius instance idle after a job completes."""
-        state = self._instances.get(instance_name)
-        if state is None:
-            logger.warning(f"mark_job_completed: instance {instance_name} already evicted")
-            return
-        state.job_running = False
-        state.last_job_completed_at = time.time()
-
-    async def adopt_running_instance(self, model_name: str, gpu_config: str) -> str:
-        """Restore tracking for the deterministic instance used by a running job."""
-        async with self._lock:
-            instance_name = self._pick_instance_name()
-            if not await self._manager.instance_exists(instance_name):
-                raise RuntimeError(f"Nebius instance {instance_name} is missing for recovered job")
-            self._observe_vm()
-            self._instances[instance_name] = NebiusInstanceState(
-                instance_name=instance_name,
-                gpu_config=gpu_config,
-                current_model=model_name,
-                job_running=True,
-            )
-            return instance_name
-
-    async def delete_recovered_instance(self) -> None:
-        """Delete the deterministic VM left behind by an interrupted terminal transition."""
-        async with self._lock:
-            instance_name = self._pick_instance_name()
-            if await self._manager.instance_exists(instance_name):
-                logger.info(f"Deleting recovered nebius instance {instance_name}")
-                await self._manager.delete_instance(instance_name)
-            self._instances.pop(instance_name, None)
-
-    async def mark_job_paused(self, instance_name: str):
-        """Release a preempted instance: it is free again and its model died with it."""
-        state = self._instances.get(instance_name)
-        if state is None:
-            return
-        state.job_running = False
-        state.current_model = None
-        state.provisioning_model = None
-        state.last_job_completed_at = time.time()
-
-    async def adopt_paused_instance(self, model_name: str, gpu_config: str) -> str | None:
-        """Track the deterministic instance left by a paused job.
-
-        Returns the instance name when it exists in a startable state and
-        belongs to the paused job's gpu_config without another job on it.
-        Returns None when the instance is gone or sits in an unrecoverable
-        state (e.g. DELETED after idle cleanup deleted the preempted VM):
-        the caller then re-queues and the worker's acquire path deletes and
-        recreates it. Raises when the Nebius API is unreachable so the
-        caller keeps the job paused and retries on a later pass.
-        """
-        async with self._lock:
-            instance_name = self._pick_instance_name()
-            state = self._instances.get(instance_name)
-            if state is not None and (state.job_running or state.gpu_config != gpu_config):
-                return None
-            try:
-                remote = await self.get_instance_state(instance_name)
-            except Exception as e:
-                if "NotFound" in str(e):
-                    logger.info(
-                        f"Paused job's instance {instance_name} no longer exists; "
-                        "worker will recreate it"
-                    )
-                    self._instances.pop(instance_name, None)
-                    return None
-                raise
-            if remote in NEBIUS_UNRECOVERABLE_STATES:
-                logger.warning(
-                    f"Not adopting {instance_name} for paused recovery: state {remote} "
-                    "cannot be started; worker will delete and recreate it"
-                )
-                self._instances.pop(instance_name, None)
-                return None
-            self._observe_vm()
-            if state is None:
-                self._instances[instance_name] = NebiusInstanceState(
-                    instance_name=instance_name,
-                    gpu_config=gpu_config,
-                    current_model=None,
-                    job_running=False,
-                    last_job_completed_at=time.time(),
-                )
-            return instance_name
-
-    async def recover_stopped_instance(self, instance_name: str) -> None:
-        """Start a preempted instance and prove it survives the stabilization window.
-
-        Raises RuntimeError after PREEMPT_RESTART_ATTEMPTS failed restarts so
-        the caller keeps the job paused and retries on a later pass.
-        """
-        for attempt in range(1, PREEMPT_RESTART_ATTEMPTS + 1):
-            try:
-                await self._manager.start_instance(instance_name)
-            except asyncio.CancelledError:
-                raise
-            except NebiusCommandTimeout:
-                # Do not issue another start while its previous outcome is
-                # unknown. The durable pool owner will reconcile this target.
-                raise
-            except Exception as e:
-                logger.warning(
-                    f"Preemption recovery: start of {instance_name} attempt "
-                    f"{attempt}/{PREEMPT_RESTART_ATTEMPTS} failed: {e}"
-                )
-                await asyncio.sleep(30)
-                continue
-            # start_instance just ensures RUNNING (it may have issued the
-            # start, found it already RUNNING, or waited out STARTING/
-            # CREATING). Which of those happened is not the point: only the
-            # stabilization window proves a preemptible machine will stay up,
-            # so always run it.
-            stable_since: float | None = None
-            error_since: float | None = None
-            while True:
-                await asyncio.sleep(10)
-                try:
-                    details = await self._manager.get_instance(instance_name)
-                    state = details.get("status", {}).get("state")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.exception(f"Preemption recovery: state check failed for {instance_name}")
-                    if "NotFound" in str(e):
-                        raise RuntimeError(
-                            f"Instance {instance_name} disappeared while stabilizing"
-                        ) from e
-                    if error_since is None:
-                        error_since = _monotonic()
-                    if _monotonic() - error_since >= PREEMPT_STABILIZE_ERROR_SECONDS:
-                        raise RuntimeError(
-                            f"Instance {instance_name} state checks failed for "
-                            f"{PREEMPT_STABILIZE_ERROR_SECONDS}s while stabilizing"
-                        ) from e
-                    stable_since = None
-                    continue
-                error_since = None
-                if state == "RUNNING":
-                    if stable_since is None:
-                        stable_since = _monotonic()
-                    if _monotonic() - stable_since >= PREEMPT_STABLE_SECONDS:
-                        logger.info(f"Preemption recovery: {instance_name} stable RUNNING for {PREEMPT_STABLE_SECONDS}s")
-                        return
-                elif state in ("STOPPED", "STOPPING"):
-                    logger.warning(
-                        f"Preemption recovery: {instance_name} preempted again while stabilizing "
-                        f"(attempt {attempt}/{PREEMPT_RESTART_ATTEMPTS})"
-                    )
-                    break
-                else:
-                    raise RuntimeError(f"Instance {instance_name} entered {state} while stabilizing")
-            await asyncio.sleep(30)
-        raise RuntimeError(
-            f"Instance {instance_name} was preempted {PREEMPT_RESTART_ATTEMPTS} times during recovery"
-        )
-
-    def has_busy_instance(self) -> bool:
-        """True when any tracked Nebius instance currently hosts a job."""
-        return any(state.job_running for state in self._instances.values())
-
-    async def get_instance_state(self, instance_name: str) -> str | None:
-        """Return the lifecycle state (RUNNING/STOPPED/...) of an instance.
-
-        Raises when the Nebius API call fails (an outage signal); returns
-        None when the payload lacks a usable state (a shape anomaly, which
-        is neither evidence of preemption nor of an outage).
-        """
-        details = await self._manager.get_instance(instance_name)
-        return details.get("status", {}).get("state")
-
-    async def idle_cleanup_loop(self):
-        """Periodically delete idle instances and evict stale entries."""
-        while True:
-            await asyncio.sleep(60)
-            try:
-                await self.cleanup_idle_instances()
-            except Exception:
-                logger.exception("Nebius idle cleanup failed")
-
-    async def cleanup_idle_instances(self):
-        """Perform one project-scoped cleanup pass, also usable by regional routing."""
-        async with self._lock:
-            if self._pool_guard_active and self._pool_guard_active():
-                return
-            now = time.time()
-            to_delete = [
-                name for name, state in self._instances.items()
-                if not state.job_running and state.last_job_completed_at is not None
-                and now - state.last_job_completed_at > self._idle_timeout
-            ]
-            for name in to_delete:
-                logger.info(f"Deleting idle nebius instance {name}")
-                await self._manager.delete_instance(name)
-                del self._instances[name]
-            to_evict = []
-            for name, state in self._instances.items():
-                if not state.job_running and not await self._manager.instance_exists(name):
-                    to_evict.append(name)
-            for name in to_evict:
-                logger.warning(f"Evicting stale nebius instance {name} (no longer exists)")
-                del self._instances[name]
-
-    def get_instance_states(self) -> list[NebiusInstanceState]:
-        """Return current state of all managed instances (in-memory, no CLI calls)."""
-        return list(self._instances.values())
 
 
 class CreateJobRequest(BaseModel):
@@ -881,6 +487,22 @@ class JobStore:
                 )
         conn.close()
 
+    def record_nebius_idle_cleanup(self, job_id: str, location: dict) -> bool:
+        """Journal retirement of a known idle VM without replacing recovery placement.
+
+        The caller already owns the pool. Never overwrite an unresolved mutation;
+        only an untouched claim or a reconciled observation can begin cleanup.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE nebius_pool_guard SET location = ?, state = 'settled', "
+                "operation = 'observe', mutation_seen = 1 WHERE job_id = ? "
+                "AND state IN ('preparing', 'settled') AND operation IN ('', 'observe')",
+                (json.dumps(location), job_id),
+            )
+        conn.close()
+        return cur.rowcount > 0
+
     def release_nebius_guard(self, job_id: str, *, release_vacant_claim: bool = False) -> None:
         """Release a settled guard and optionally its confirmed-vacant job claim.
 
@@ -1156,7 +778,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     has_recoverable_nebius = await _restore_jobs()
     if _nebius is not None and not has_recoverable_nebius:
-        background_tasks.append(asyncio.create_task(_delete_recovered_nebius("startup")))
+        background_tasks.append(asyncio.create_task(_nebius_pool().cleanup("startup")))
     if _nebius is not None:
         background_tasks.append(asyncio.create_task(_resume_paused_jobs_loop()))
     worker_task = asyncio.create_task(_worker())
@@ -1288,15 +910,17 @@ async def _recover_paused_job(row: dict) -> bool:
         return False
     guarded = isinstance(_nebius, (NebiusOrchestrator, RegionalNebiusOrchestrator))
     try:
-        await _check_nebius_pool_owners(row["job_id"])
-        if guarded and not _begin_nebius_provisioning(row["job_id"], gpu):
+        await _nebius_pool().check_owners(row["job_id"])
+        if guarded and not await _nebius_pool().retire_idle_for_recovery(row):
+            return False
+        if guarded and not _nebius_pool().begin(row["job_id"], gpu):
             return False
         instance_name = await _nebius.adopt_paused_instance(row["model_name"], gpu)
         if instance_name is not None:
             await _nebius.recover_stopped_instance(instance_name)
         if guarded:
             job_store.release_nebius_guard(row["job_id"])
-            _set_nebius_guard_hook(None)
+            _nebius_pool().configure(None)
         attempt_note = f" (attempt {int(row.get('preempt_attempts') or 0)}/{MAX_PREEMPT_RESUMES})" if MAX_PREEMPT_RESUMES else ""
         outcome_note = (
             "VM recovered — resuming"
@@ -1324,7 +948,7 @@ async def _recover_paused_job(row: dict) -> bool:
                     job_store.wait_nebius_guard(row["job_id"], "Nebius recovery reconciliation pending; other managed allocations are blocked")
                 else:
                     job_store.release_nebius_guard(row["job_id"])
-                    _set_nebius_guard_hook(None)
+                    _nebius_pool().configure(None)
         return False
 
 
@@ -1422,175 +1046,6 @@ async def _retry_terminal_job(
     row = job_store.get(job_id)
     logger.error(f"Terminal cleanup exhausted for {job_id}; advancing the queue")
     job_store.update_status(job_id, final_status, error=row["error"])
-
-
-def _nebius_placement_claimed_elsewhere(job_id: str | None, location: dict, legacy: bool) -> bool:
-    """Protect durable owners, including paused jobs and pre-location legacy rows."""
-    key = location["project_id"], location["instance_name"]
-    for owner in [*job_store.list_recoverable(), *job_store.list_paused()]:
-        if owner["job_id"] == job_id or _parse_nebius_url(owner["server_url"]) is None:
-            continue
-        saved = owner.get("nebius_location")
-        if saved:
-            saved = json.loads(saved) if isinstance(saved, str) else saved
-            if (saved["project_id"], saved["instance_name"]) == key:
-                return True
-        elif legacy and not owner.get("nebius_vacant") and (
-            owner["status"] != JobStatus.QUEUED.value or owner.get("pause_checkpointed")
-            or is_resume_command(json.loads(owner["command"]))
-        ):
-            return True
-    return False
-
-
-def _set_nebius_guard_hook(job_id: str | None) -> None:
-    """Keep provider mutation tracking and idle cleanup tied to the durable pool."""
-    callback = (lambda state, operation: job_store.update_nebius_guard(job_id, state, operation)) if job_id else None
-    def active():
-        return job_store.nebius_guard() is not None
-    if isinstance(_nebius, (NebiusOrchestrator, RegionalNebiusOrchestrator)):
-        _nebius.configure_provisioning(callback, active, job_store.last_nebius_location())
-
-
-def _begin_nebius_provisioning(job_id: str, gpu_config: str) -> bool:
-    """Own the pool before any initial allocation or preemption-recovery start."""
-    if not job_store.claim_nebius_guard(job_id):
-        return False
-    _set_nebius_guard_hook(job_id)
-    if isinstance(_nebius, (NebiusOrchestrator, RegionalNebiusOrchestrator)):
-        location = _nebius.configured_location(gpu_config)
-        if location:
-            job_store.record_nebius_location(job_id, location)
-    return True
-
-
-async def _check_nebius_pool_owners(job_id: str) -> None:
-    """A paused owner may retain a stopped cache, never an additional running VM."""
-    if not isinstance(_nebius, (NebiusOrchestrator, RegionalNebiusOrchestrator)):
-        return
-    placements = []
-    for owner in [*job_store.list_recoverable(), *job_store.list_paused()]:
-        if owner["job_id"] == job_id or _parse_nebius_url(owner["server_url"]) is None:
-            continue
-        saved = owner.get("nebius_location")
-        if saved:
-            placements.append(json.loads(saved) if isinstance(saved, str) else saved)
-        elif not owner.get("nebius_vacant") and (
-            owner["status"] != JobStatus.QUEUED.value or owner.get("pause_checkpointed")
-        ):
-            placements.append(None)  # legacy recovery with no persisted location
-    await _nebius.check_other_placements(placements)
-
-
-async def _reconcile_nebius_guard(row: dict, *, cleanup: bool = False) -> bool:
-    """Resolve the recorded target without interpreting a lost create as absent."""
-    guard = job_store.nebius_guard()
-    if not guard or guard["job_id"] != row["job_id"]:
-        return guard is None
-    record = ProvisioningRecord.from_row(guard)
-    if record.untouched:
-        # The durable pre-request hook was never reached (e.g. cancelled during
-        # discovery). No mutating provider request can be outstanding.
-        job_store.release_nebius_guard(row["job_id"])
-        _set_nebius_guard_hook(None)
-        return True
-    _set_nebius_guard_hook(row["job_id"])
-    saved = guard.get("location") or row.get("nebius_location")
-    reason = "provider outcome is still unknown"
-    try:
-        if not saved:
-            raise RuntimeError("no recorded placement; operator reconciliation is required")
-        location = json.loads(saved) if isinstance(saved, str) else saved
-        outcome = await reconcile_placement(
-            _nebius, location, record, cleanup=cleanup,
-            can_cleanup=lambda selected, legacy: not _nebius_placement_claimed_elsewhere(row["job_id"], selected, legacy),
-            record_event=lambda phase, operation: job_store.update_nebius_guard(row["job_id"], phase, operation),
-        )
-        if outcome == ReconcileOutcome.ABSENT:
-            job_store.release_nebius_guard(row["job_id"])
-            _set_nebius_guard_hook(None)
-        return True
-    except Exception as error:
-        reason = str(error)
-        logger.warning("Nebius provisioning reconciliation pending for %s: %s", row["job_id"], reason)
-    previous = (row.get("error") or "").split(" | Nebius reconciliation pending:")[0]
-    message = f"Nebius reconciliation pending: {reason}"
-    if cleanup and previous:
-        message = previous + " | " + message
-    job_store.wait_nebius_guard(row["job_id"], message)
-    return False
-
-
-def _bind_regional_nebius_job(row: dict) -> None:
-    """Restore ownership context; a fresh queued intake does not own the legacy VM."""
-    if not isinstance(_nebius, RegionalNebiusOrchestrator):
-        return
-    job_id = row["job_id"]
-    saved = row.get("nebius_location")
-    legacy_recovery = not row.get("nebius_vacant") and _parse_nebius_url(row["server_url"]) is not None and (
-        row["status"] in (JobStatus.RUNNING.value, JobStatus.COMPLETING.value,
-                          JobStatus.FAILING.value, JobStatus.PAUSING.value, JobStatus.PAUSED.value)
-        or row.get("pause_checkpointed") or is_resume_command(json.loads(row["command"]))
-    )
-    _nebius.bind_job(
-        json.loads(saved) if isinstance(saved, str) else saved,
-        lambda selected: job_store.record_nebius_location(job_id, selected),
-        job_id=job_id, legacy_recovery=legacy_recovery,
-        can_use=lambda selected, legacy: not _nebius_placement_claimed_elsewhere(job_id, selected, legacy),
-    )
-
-
-async def _delete_recovered_nebius(job_id: str) -> None:
-    """Retry deletion without blocking recovery forever."""
-    assert _nebius is not None
-    for attempt in range(1, CLEANUP_MAX_ATTEMPTS + 1):
-        guard = job_store.nebius_guard()
-        if guard:
-            # An unconfirmed provider request is never retired by a blind
-            # name-based sweep, even if its job was cancelled meanwhile.
-            if job_id == guard["job_id"]:
-                row = job_store.get(job_id)
-                if row:
-                    await _reconcile_nebius_guard(row, cleanup=True)
-            return
-        if job_id == "startup" and _active_job is not None:
-            # A new job now owns the pool. A delayed startup-cleanup retry
-            # must not follow its newly bound region and delete its VM.
-            return
-        row = job_store.get(job_id)
-        if row and row.get("nebius_vacant") and not row.get("nebius_location"):
-            # A cancelled capacity waiter owns nothing, even if its previous
-            # in-memory binding or resume command still refers to the legacy VM.
-            return
-        try:
-            if isinstance(_nebius, RegionalNebiusOrchestrator):
-                if job_id == "startup":
-                    # Re-check durable jobs on every retry. Startup cleanup may
-                    # have slept while a paused/queued owner appeared.
-                    if any(_parse_nebius_url(row["server_url"]) is not None
-                           for row in [*job_store.list_recoverable(), *job_store.list_paused()]):
-                        return
-                    await _nebius.cleanup_startup_instances(
-                        can_use=lambda selected, legacy: not _nebius_placement_claimed_elsewhere(None, selected, legacy),
-                    )
-                else:
-                    row = job_store.get(job_id)
-                    if not row or _parse_nebius_url(row["server_url"]) is None:
-                        return
-                    _bind_regional_nebius_job(row)
-                    await _nebius.delete_recovered_instance()
-            else:
-                await _nebius.delete_recovered_instance()
-            return
-        except Exception:
-            logger.exception(
-                f"Unable to delete recovered Nebius instance for {job_id} "
-                f"(attempt {attempt}/{CLEANUP_MAX_ATTEMPTS})"
-            )
-            if attempt < CLEANUP_MAX_ATTEMPTS:
-                await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
-
-    logger.error(f"Nebius cleanup exhausted for {job_id}; advancing recovery")
 
 
 def _build_pause_resume_command(row: dict) -> list[str]:
@@ -2054,7 +1509,7 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         if guard and guard["job_id"] != job_id:
             job_store.wait_nebius_guard(job_id, f"Waiting for confirmed Nebius provisioning outcome before starting another job (job {guard['job_id']})", delay=False)
             return
-        _bind_regional_nebius_job(row)
+        _nebius_pool().bind(row)
         if row.get("nebius_retry_at", 0) > time.time() and (
             row["status"] == JobStatus.QUEUED.value or (guard and guard["job_id"] == job_id)
         ):
@@ -2072,10 +1527,10 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             )
             if guard and guard["job_id"] == job_id:
                 row = job_store.get(job_id)
-                if await _reconcile_nebius_guard(row, cleanup=True):
+                if await _nebius_pool().reconcile(row, cleanup=True):
                     await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=row["error"])
             return
-        if guard and guard["job_id"] == job_id and not await _reconcile_nebius_guard(
+        if guard and guard["job_id"] == job_id and not await _nebius_pool().reconcile(
             row, cleanup=row["status"] in (JobStatus.CANCELLING.value, JobStatus.FAILING.value, JobStatus.COMPLETING.value),
         ):
             return
@@ -2095,13 +1550,13 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         if row["status"] in (JobStatus.COMPLETING.value, JobStatus.FAILING.value):
             final_status = JobStatus.COMPLETED if row["status"] == JobStatus.COMPLETING.value else JobStatus.FAILED
             if nebius_gpu_config is not None and _nebius:
-                await _delete_recovered_nebius(job_id)
+                await _nebius_pool().cleanup(job_id)
             await _retry_terminal_job(job_id, oj, final_status, error=row["error"])
             return
 
         if row["status"] == JobStatus.CANCELLING.value:
             if nebius_gpu_config is not None and _nebius:
-                await _delete_recovered_nebius(job_id)
+                await _nebius_pool().cleanup(job_id)
             await _retry_cancellation(job_id, oj)
             return
 
@@ -2148,13 +1603,13 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                         await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
                         continue
                     if nebius_gpu_config is not None and _nebius:
-                        await _delete_recovered_nebius(job_id)
+                        await _nebius_pool().cleanup(job_id)
                     await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=str(e))
                     return
             if existing is None:
                 if row["status"] == JobStatus.RUNNING.value:
                     if nebius_gpu_config is not None and _nebius:
-                        await _delete_recovered_nebius(job_id)
+                        await _nebius_pool().cleanup(job_id)
                     await _retry_terminal_job(
                         job_id,
                         oj,
@@ -2179,25 +1634,25 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         elif nebius_gpu_config is not None and _nebius:
             try:
                 try:
-                    await _check_nebius_pool_owners(job_id)
+                    await _nebius_pool().check_owners(job_id)
                 except NebiusPoolBusy as error:
                     job_store.wait_nebius_guard(job_id, str(error))
                     return
-                if not _begin_nebius_provisioning(job_id, nebius_gpu_config):
+                if not _nebius_pool().begin(job_id, nebius_gpu_config):
                     return
                 try:
                     nebius_instance_name, real_url = await _nebius.acquire_instance(model_name, gpu_config=nebius_gpu_config)
                 except (NebiusCapacityError, NebiusCommandTimeout) as error:
                     if isinstance(error, NebiusCapacityError):
                         job_store.release_nebius_guard(job_id, release_vacant_claim=True)
-                        _set_nebius_guard_hook(None)
+                        _nebius_pool().configure(None)
                     else:
                         guard = job_store.nebius_guard()
                         if guard and ProvisioningRecord.from_row(guard).untouched:
                             # Read-only preparation failed before a mutation or
                             # an existing VM was observed for this attempt.
                             job_store.release_nebius_guard(job_id)
-                            _set_nebius_guard_hook(None)
+                            _nebius_pool().configure(None)
                         else:
                             job_store.update_nebius_guard(job_id, PoolPhase.UNKNOWN)
                     reason = ("Waiting for Nebius capacity" if isinstance(error, NebiusCapacityError)
@@ -2241,14 +1696,14 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 model_config = MODEL_REGISTRY.get(model_name)
                 await _nebius.mark_job_started(nebius_instance_name)
                 job_store.release_nebius_guard(job_id)
-                _set_nebius_guard_hook(None)
+                _nebius_pool().configure(None)
             except Exception as e:
                 logger.exception(f"Nebius provisioning failed for job {job_id}")
                 guard = job_store.nebius_guard()
                 uncertain = guard and guard["job_id"] == job_id and ProvisioningRecord.from_row(guard).needs_cleanup
                 if not uncertain:
                     job_store.release_nebius_guard(job_id)
-                    _set_nebius_guard_hook(None)
+                    _nebius_pool().configure(None)
                 job_store.update_status_if(job_id, JobStatus(row["status"]), JobStatus.FAILING if uncertain else JobStatus.FAILED, error=f"Nebius provisioning failed: {e}")
                 if uncertain:
                     job_store.wait_nebius_guard(job_id, f"Nebius provisioning failed: {e} | Nebius reconciliation pending: cleanup required")
@@ -2291,9 +1746,9 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             guard = job_store.nebius_guard()
             if guard and guard["job_id"] == job_id:
                 job_store.update_status_if(job_id, JobStatus.QUEUED, JobStatus.CANCELLING)
-                if not await _reconcile_nebius_guard(job_store.get(job_id), cleanup=True):
+                if not await _nebius_pool().reconcile(job_store.get(job_id), cleanup=True):
                     return
-            await _delete_recovered_nebius(job_id)
+            await _nebius_pool().cleanup(job_id)
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
 

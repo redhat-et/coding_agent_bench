@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from coding_agent_bench import api, nebius_utils
+from coding_agent_bench import api, nebius_pool, nebius_utils
 from coding_agent_bench.nebius_utils import NebiusCommandError, NebiusInstanceManager, PoolPhase, ProvisioningRecord
 from tests.test_nebius_pool_guard import enqueue, due
 from tests.test_nebius_pool_guard import guarded as guarded
@@ -72,7 +72,7 @@ def test_model_readiness_timeout_cancels_task_then_cleans_owned_vm(guarded, monk
 
     # Clients are shallow project-scoped copies, so patch their class methods.
     monkeypatch.setattr(type(manager), "stop_model" if phase == "stop_old_model" else "start_model", hang)
-    monkeypatch.setattr(api, "NEBIUS_MODEL_START_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(nebius_pool, "NEBIUS_MODEL_START_TIMEOUT_SECONDS", 0.01)
     first = enqueue(store, "A", "nebius-h200")
     asyncio.run(api._process_queued_job(first))
     assert cancelled == [phase]

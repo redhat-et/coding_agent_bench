@@ -513,13 +513,31 @@ can finish normally because no provider mutation was sent.
 The settled pool placement is also retained so an idle VM in a region that does
 not support the next job's different hardware can be cleaned up before a new
 allocation. Pending jobs do not each get their own VM. Changing single-region
-project/name settings while an outcome is unknown fails closed: restore the
+project/name settings while a job retains a saved VM fails closed: restore the
 saved configuration or reconcile the recorded VM manually.
 
 Before starting another managed allocation, CAB also checks the VMs claimed by
 other recoverable jobs. A paused job may retain a confirmed stopped VM/cache;
 `RUNNING`, transitioning, or unreadable owner state defers the new managed job
 without attempting allocation or increasing its attempt count.
+Allocation, preemption recovery, placement exclusion, and cleanup use the same
+`NebiusJobOwnership` interpretation of each durable job:
+
+| Job record | Ownership interpretation |
+| --- | --- |
+| Saved placement | Claim that exact project/name |
+| Confirmed vacant, no saved placement | No VM claim, even with a resume command/checkpoint |
+| Resume command, checkpoint, or active recovery state without placement | Protect the legacy VM and inspect its state before another allocation/restart |
+| Fresh queued intake without placement | No VM claim |
+| Cancelling legacy row without recovery evidence | Protect the possible legacy owner; cancellation alone does not authorize deletion |
+
+In regional mode a stopped owner's VM can be retained while a different target
+is used. In single-region mode the fixed target stays reserved until its owner
+releases it, even when stopped; another job cannot replace that owner's cache.
+Before restarting a retained VM, recovery also retires a different completed
+job's idle VM. The cleanup target is journaled in the pool guard separately from
+the recovering job's placement. A lost delete response blocks dispatch until
+reconciled, including after restart, rather than starting two VMs concurrently.
 
 #### Inspecting a blocked pool
 
@@ -561,6 +579,16 @@ force-unlock. No live allocation/failover test was performed for this change.
 
 #### Lifecycle code organization
 
+- `api.py` retains HTTP endpoints, `JobStore` and its migrations, serial-worker
+  scheduling, and benchmark execution/checkpoint workflows.
+- `nebius_pool.py` contains the single-project `NebiusOrchestrator` and the
+  queue-facing `NebiusPool` coordinator: shared ownership interpretation,
+  provisioning guard binding, reconciliation, and scoped cleanup. The queue
+  supplies its existing store, backend and cleanup settings explicitly; the
+  coordinator neither imports `api.py` nor owns a separate queue/state store.
+- `nebius_utils.py` retains CLI/SSH operations and regional discovery/routing.
+  Regional routing composes the single-project orchestrator through its existing
+  factory argument, avoiding a circular dependency.
 - `ProvisioningRecord` / `PoolPhase` in `nebius_utils.py` define guard transition
   rules. The existing SQLite schema remains readable; `mutation_seen` is the
   persisted legacy name for whether a VM is known to require possible cleanup.
@@ -568,6 +596,7 @@ force-unlock. No live allocation/failover test was performed for this change.
   runner only executes requests and bounds subprocess lifetime. It does not
   infer which job-state transition to perform by parsing command tokens.
 - `reconcile_placement` uses public project-scoped inspect/delete methods.
+  `NebiusPool` coordinates these operations through the store's public methods;
   API code owns persistence and dispatch, not the orchestrator's private clients.
 - `_next_dispatch` is the queue policy: guard owner first, otherwise the next
   due job, otherwise wait for a deadline or enqueue/cancel event. In-memory

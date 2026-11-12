@@ -217,10 +217,10 @@ def test_per_job_cleanup_cannot_delete_another_durable_owner(regional_store, mon
     seed_vm(manager, selected)
     ownership_row(regional_store, "current", api.JobStatus.COMPLETING, selected)
     monkeypatch.setattr(api, "_nebius", orchestrator)
-    api._bind_regional_nebius_job(regional_store.get("current"))
+    api._nebius_pool().bind(regional_store.get("current"))
     # A durable owner added after binding must still be protected at cleanup.
     ownership_row(regional_store, "other", api.JobStatus.PAUSED, None if legacy else selected)
-    asyncio.run(api._delete_recovered_nebius("current"))
+    asyncio.run(api._nebius_pool().cleanup("current"))
     assert len(manager.cloud) == 1
     assert not any(event == "delete" for event, _ in manager.events)
 
@@ -233,9 +233,9 @@ def test_verified_legacy_recovery_cleans_only_its_vm(regional_store, monkeypatch
     seed_vm(manager, other)
     ownership_row(regional_store, "legacy-running", api.JobStatus.RUNNING)
     monkeypatch.setattr(api, "_nebius", orchestrator)
-    api._bind_regional_nebius_job(regional_store.get("legacy-running"))
+    api._nebius_pool().bind(regional_store.get("legacy-running"))
     regional_store.update_status("legacy-running", api.JobStatus.CANCELLING)
-    asyncio.run(api._delete_recovered_nebius("legacy-running"))
+    asyncio.run(api._nebius_pool().cleanup("legacy-running"))
     assert (other["project_id"], other["instance_name"]) in manager.cloud
     assert ("primary", "queue-0") not in manager.cloud
     assert ("delete", "secondary") not in manager.events
@@ -248,7 +248,7 @@ def test_verified_legacy_recovery_does_not_delete_another_legacy_owner(regional_
     ownership_row(regional_store, "legacy-terminal", api.JobStatus.FAILING)
     ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED)
     monkeypatch.setattr(api, "_nebius", orchestrator)
-    asyncio.run(api._delete_recovered_nebius("legacy-terminal"))
+    asyncio.run(api._nebius_pool().cleanup("legacy-terminal"))
     assert ("primary", "queue-0") in manager.cloud
     assert not any(event == "delete" for event, _ in manager.events)
 
@@ -260,13 +260,13 @@ def test_startup_sweep_is_explicit_and_checks_durable_owners(regional_store, mon
     for item in manager.locations:
         seed_vm(manager, orchestrator._named(item))
     monkeypatch.setattr(api, "_nebius", orchestrator)
-    asyncio.run(api._delete_recovered_nebius("startup"))
+    asyncio.run(api._nebius_pool().cleanup("startup"))
     assert not manager.cloud
 
     seed_vm(manager, orchestrator._legacy)
     ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED)
     manager.events.clear()
-    asyncio.run(api._delete_recovered_nebius("startup"))
+    asyncio.run(api._nebius_pool().cleanup("startup"))
     assert ("primary", "queue-0") in manager.cloud
     assert manager.events == []
 
@@ -284,7 +284,7 @@ def test_startup_sweep_rechecks_claims_that_appear_during_discovery(regional_sto
 
     monkeypatch.setattr(manager, "discover_locations", discovery)
     monkeypatch.setattr(api, "_nebius", orchestrator)
-    asyncio.run(api._delete_recovered_nebius("startup"))
+    asyncio.run(api._nebius_pool().cleanup("startup"))
     assert (selected["project_id"], selected["instance_name"]) in manager.cloud
     assert ("delete", "secondary") not in manager.events
 
@@ -297,7 +297,7 @@ def test_new_allocation_leaves_other_paused_region_untouched(regional_store, mon
     ownership_row(regional_store, "paused-owner", api.JobStatus.PAUSED, protected)
     ownership_row(regional_store, "fresh", api.JobStatus.QUEUED)
     monkeypatch.setattr(api, "_nebius", orchestrator)
-    api._bind_regional_nebius_job(regional_store.get("fresh"))
+    api._nebius_pool().bind(regional_store.get("fresh"))
     name, _ = asyncio.run(orchestrator.acquire_instance("model", "h200"))
     assert ("secondary", name) in manager.cloud
     assert (protected["project_id"], protected["instance_name"]) in manager.cloud
@@ -435,7 +435,7 @@ def test_delayed_startup_cleanup_cannot_delete_new_job_region(monkeypatch):
     cleanup = AsyncMock()
     monkeypatch.setattr(api, "_nebius", type("Pool", (), {"delete_recovered_instance": cleanup})())
     monkeypatch.setattr(api, "_active_job", ("new-job", None))
-    asyncio.run(api._delete_recovered_nebius("startup"))
+    asyncio.run(api._nebius_pool().cleanup("startup"))
     cleanup.assert_not_awaited()
 
 

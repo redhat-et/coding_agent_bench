@@ -274,7 +274,7 @@ def test_active_provisioning_can_be_cancelled_without_scheduling_retry(store, mo
         monkeypatch.setattr(api, "_nebius", SimpleNamespace(
             get_instance_states=lambda: [], acquire_instance=acquire,
         ))
-        monkeypatch.setattr(api, "_delete_recovered_nebius", AsyncMock())
+        monkeypatch.setattr(api.NebiusPool, "cleanup", AsyncMock())
         monkeypatch.setattr(api, "_finish_cancellation", finish)
         api._job_event.set()
         worker = asyncio.create_task(api._worker())

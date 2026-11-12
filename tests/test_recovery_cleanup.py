@@ -74,10 +74,15 @@ def test_cancellation_advances_queue_after_retry_limit(monkeypatch):
     }
 
 
-def test_nebius_cleanup_stops_after_retry_limit(monkeypatch):
+def test_nebius_cleanup_stops_after_retry_limit(monkeypatch, tmp_path):
     from coding_agent_bench import api
 
     disable_retry_delays(monkeypatch, api)
+
+    store = api.JobStore(tmp_path / "jobs.db")
+    store.insert("job-1", "job-1", "opencode", "org/bench", "model", "nebius-h200", [])
+    store.update_status("job-1", api.JobStatus.FAILING)
+    monkeypatch.setattr(api, "job_store", store)
 
     class Nebius:
         attempts = 0
@@ -89,7 +94,7 @@ def test_nebius_cleanup_stops_after_retry_limit(monkeypatch):
     nebius = Nebius()
     monkeypatch.setattr(api, "_nebius", nebius)
 
-    asyncio.run(api._delete_recovered_nebius("job-1"))
+    asyncio.run(api._nebius_pool().cleanup("job-1"))
 
     assert nebius.attempts == 2
 
@@ -157,10 +162,13 @@ def test_process_queued_job_stops_recovery_probe_after_retry_limit(monkeypatch):
     assert terminal_errors == ["unavailable"]
 
 
-def test_cancelled_nebius_job_deletes_instance_instead_of_marking_idle(monkeypatch):
+def test_cancelled_nebius_job_deletes_instance_instead_of_marking_idle(monkeypatch, tmp_path):
     from coding_agent_bench import api
 
-    store = FakeJobStore(api.JobStatus.RUNNING)
+    store = api.JobStore(tmp_path / "jobs.db")
+    store.insert("job-1", "job-1", "opencode", "org/bench", "model", "nebius-h200", [])
+    store.record_nebius_location("job-1", {"project_id": "primary", "instance_name": "instance-1"})
+    store.update_status("job-1", api.JobStatus.RUNNING)
     monkeypatch.setattr(api, "job_store", store)
     monkeypatch.setattr(api, "_shutting_down", False)
 
@@ -212,4 +220,4 @@ def test_cancelled_nebius_job_deletes_instance_instead_of_marking_idle(monkeypat
 
     assert nebius.deleted == 1
     assert nebius.completed == 0
-    assert store.row["status"] == api.JobStatus.CANCELLED.value
+    assert store.get("job-1")["status"] == api.JobStatus.CANCELLED.value
