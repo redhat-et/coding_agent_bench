@@ -921,6 +921,18 @@ class RegionalNebiusOrchestrator:
     cannot cause the next attempt to forget where it may already own a VM.
     """
 
+    def forget_placement(self, location: dict) -> None:
+        """Forget only the resolved target; no provider calls are made."""
+        key = self._key(location)
+        child = self._children.pop(key, None)
+        self._locations.pop(key, None)
+        if child:
+            child.forget_placement(location)
+        if self._bound and self._key(self._bound) == key:
+            self._bound = None
+        if self._pool_location and self._key(self._pool_location) == key:
+            self._pool_location = None
+
     def __init__(self, manager, subnet_id, instance_name_prefix, idle_timeout,
                  orchestrator_factory, project_prefix="default-", regions=None):
         self._manager = manager

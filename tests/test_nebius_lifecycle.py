@@ -240,6 +240,107 @@ def test_operator_reconciliation_recovers_cancelled_owner_through_worker(guarded
     assert asyncio.run(api.get_nebius_pool())["blocked"] is False
 
 
+@pytest.mark.parametrize("status", ["queued", "paused", "cancelling"])
+@pytest.mark.parametrize("mode", ["single", "regional"])
+def test_operator_absence_releases_pool_durably_and_next_job_runs(guarded, monkeypatch, status, mode):
+    store, manager, pool, ran = guarded
+    if mode == "single":
+        pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+        monkeypatch.setattr(api, "_nebius", pool)
+    first = enqueue(store, "A", "nebius-h200")
+    second = enqueue(store, "B", "https://external.example")
+    asyncio.run(api._process_queued_job(first))
+    guard = store.nebius_guard()
+    manager.cloud.clear()  # Operator has confirmed the VM and pending operation absent.
+    store.update_status("A", api.JobStatus(status))
+    monkeypatch.setenv("API_KEY", "test-secret")
+    client = TestClient(api.app)
+    payload = {"operator": "alice", "reason": "Provider confirmed operation finished without a VM", "confirmed_absent": True}
+    before = list(manager.events)
+    response = client.post("/nebius/pool/resolve-absent/A", headers={"X-API-Key": "test-secret"}, json=payload)
+    assert response.status_code == 200, response.text
+    assert manager.events == before  # No provider mutations in the endpoint.
+    assert not pool.get_instance_states()
+    if mode == "regional":
+        assert pool._pool_location is None
+        assert (guard["location"] and json.loads(guard["location"])["project_id"],
+                json.loads(guard["location"])["instance_name"]) not in pool._locations
+    reopened = api.JobStore(store._db_path)
+    assert reopened.nebius_guard() is None
+    assert reopened.last_nebius_location() is None
+    row = reopened.get("A")
+    assert row["nebius_location"] is None
+    assert row["nebius_vacant"] == 1
+    assert not api.NebiusJobOwnership.from_job(row).claimed
+    assert api._job_event.is_set()
+    with reopened._connect() as conn:
+        audit = dict(conn.execute("SELECT * FROM nebius_pool_resolutions").fetchone())
+    assert audit["operator"] == "alice"
+    assert audit["reason"] == payload["reason"]
+    assert json.loads(audit["guard"]) == guard
+    if status == "cancelling":
+        asyncio.run(api._process_queued_job(first))
+        assert store.get("A")["status"] == "cancelled"
+        api.OpenshiftJob._delete_job.assert_awaited()
+    else:
+        assert row["status"] == "queued"
+        assert row["nebius_retry_at"] > time.time()
+        assert api._next_dispatch([row, store.get("B")], None, time.time())[0] == 1
+    asyncio.run(api._process_queued_job(second))
+    assert ran == ["B"]
+    if status != "cancelling":
+        due(store, "A")
+        asyncio.run(api._process_queued_job(first))
+        assert ran == ["B", "A"]
+
+
+def test_operator_absence_requires_auth_confirmation_expected_owner_and_idle_worker(guarded, monkeypatch):
+    store, _, _, _ = guarded
+    first = enqueue(store, "A", "nebius-h200")
+    asyncio.run(api._process_queued_job(first))
+    before = store.nebius_guard()
+    monkeypatch.setenv("API_KEY", "test-secret")
+    client = TestClient(api.app)
+    headers = {"X-API-Key": "test-secret"}
+    payload = {"operator": "alice", "reason": "Confirmed absent", "confirmed_absent": True}
+    path = "/nebius/pool/resolve-absent/A"
+    assert client.post(path, json=payload).status_code in (401, 403)
+    for field, value in [("operator", " "), ("reason", " "), ("confirmed_absent", False)]:
+        assert client.post(path, headers=headers, json={**payload, field: value}).status_code == 422
+    assert client.post("/nebius/pool/resolve-absent/B", headers=headers, json=payload).status_code == 409
+    monkeypatch.setattr(api, "_active_job", ("A", None))
+    assert client.post(path, headers=headers, json=payload).status_code == 409
+    assert store.nebius_guard() == before
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM nebius_pool_resolutions").fetchone()[0] == 0
+    monkeypatch.setattr(api, "_active_job", None)
+    assert client.post(path, headers=headers, json=payload).status_code == 200
+    assert client.post(path, headers=headers, json=payload).status_code == 409
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_resolving_idle_cleanup_preserves_paused_owners_different_vm(guarded, legacy):
+    store, _, pool, _ = guarded
+    enqueue(store, "A", "nebius-h200")
+    own = {**pool._legacy, "instance_name": "retained"} if not legacy else None
+    if own:
+        store.record_nebius_location("A", own)
+    store.update_status("A", api.JobStatus.PAUSED)
+    assert store.claim_nebius_guard("A")
+    idle = {**pool._legacy, "instance_name": "other-idle-vm"}
+    assert store.record_nebius_idle_cleanup("A", idle)
+    store.update_nebius_guard("A", "uncertain", "delete")
+    request = api.ResolveNebiusAbsentRequest(operator="alice", reason="Idle VM deletion confirmed", confirmed_absent=True)
+    asyncio.run(api.resolve_nebius_absent("A", request))
+    row = store.get("A")
+    assert row["status"] == "paused"
+    assert row["nebius_vacant"] == 0
+    assert (json.loads(row["nebius_location"]) if row["nebius_location"] else None) == own
+    assert api.NebiusJobOwnership.from_job(row).claimed
+    assert store.nebius_guard() is None
+    assert api._next_dispatch([row], None, time.time())[0] is None
+
+
 @pytest.mark.parametrize("state,allowed", [("RUNNING", False), ("STARTING", False), ("STOPPED", True)])
 def test_another_paused_vm_must_be_stopped_before_allocation(guarded, state, allowed):
     from tests.test_nebius_regions import seed_vm

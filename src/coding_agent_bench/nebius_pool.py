@@ -113,6 +113,11 @@ class NebiusOrchestrator:
         self._validate_placement(location)
         await self.delete_recovered_instance()
 
+    def forget_placement(self, location: dict) -> None:
+        """Discard a manually confirmed absent VM from the local cache."""
+        if location.get("project_id") == self._manager.project_id:
+            self._instances.pop(location["instance_name"], None)
+
     def _observe_vm(self):
         """Notify the durable guard when a VM is known to exist."""
         observer = getattr(self._manager, "observe_vm", None)

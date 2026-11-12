@@ -570,12 +570,32 @@ For an unresolved request:
    from the CLI logs to establish the provider outcome. Do not delete the SQLite
    guard or assume elapsed time proves the request failed.
 
+After manual/provider verification that **the recorded VM is absent and no
+create/start operation remains pending**, an authenticated operator can resolve
+that target explicitly:
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
+  "$QUEUE_URL/nebius/pool/resolve-absent/<owner-job-id>" \
+  -d '{"operator":"your-name","reason":"Provider confirmed request finished without a VM; ticket/reference", "confirmed_absent":true}'
+```
+
+This requires the expected current owner and an idle worker. In one SQLite
+transaction it saves the self-reported operator, reason, timestamp and original
+guard in `nebius_pool_resolutions`, clears the absent target's ownership, and
+releases the guard. Queued jobs retry after `NEBIUS_CAPACITY_RETRY_SECONDS`, so
+other eligible jobs can proceed. Cancellation still finishes through the worker
+to clean up any remaining benchmark workloads. If the guard targeted a different
+idle VM during paused recovery, the paused job's own VM claim is preserved.
+No provider calls are made by this endpoint. Automatic reconciliation never
+unlocks merely because time passed or repeated lookups returned `NotFound`.
+
 Nebius offers `--async` and `compute instance operation get --id <operation-id>`.
 This implementation retains the existing synchronous CLI protocol; it does not
 yet persist provider operation IDs or supply provider idempotency keys. Thus a
 lost initial response with no visible VM may still need operator/provider
-investigation. The inspect/retry endpoints deliberately provide no blind
-force-unlock. No live allocation/failover test was performed for this change.
+investigation before using the explicit absence-resolution endpoint.
+No live allocation/failover test was performed for this change.
 
 #### Lifecycle code organization
 
