@@ -544,16 +544,21 @@ reconciled, including after restart, rather than starting two VMs concurrently.
 These endpoints require the queue's normal `X-API-Key` authentication:
 
 ```sh
-curl -H "X-API-Key: $API_KEY" "$QUEUE_URL/nebius/pool"
+curl -H "X-API-Key: $API_KEY" "$JOB_QUEUE_URL/nebius/pool"
 curl -X POST -H "X-API-Key: $API_KEY" \
-  "$QUEUE_URL/nebius/pool/reconcile/<owner-job-id>"
+  "$JOB_QUEUE_URL/nebius/pool/reconcile/<owner-job-id>"
 ```
 
-The read-only response contains the owner job ID, pool phase, last operation,
-recorded location, next retry time, and status message. It contains no cloud
+The read-only response contains the owner ID, owner kind (`job` or `cleanup`),
+guard revision, pool phase, last operation, recorded location, next retry time,
+and status message. It contains no cloud
 credentials or SSH command. The POST wakes the **same owner through the serial
 worker**; it does not make a parallel cloud call or clear the guard. It rejects
 a stale owner ID or an active worker and does not enqueue duplicate attempts.
+For a cleanup owner it wakes guarded pool maintenance instead. Idle/startup
+deletion claims the same durable slot before deleting each target; timeouts and
+cancellation retain it for automatic reconciliation, including after restart.
+Dispatch remains blocked while that cleanup guard is held.
 
 For an unresolved request:
 
@@ -572,21 +577,28 @@ For an unresolved request:
 
 After manual/provider verification that **the recorded VM is absent and no
 create/start operation remains pending**, an authenticated operator can resolve
-that target explicitly:
+that target explicitly. Use the `revision` from the GET response whose target
+you inspected; replace `123` below with that value. Do not fetch a newer revision
+and submit it without verifying its target/operation again.
 
 ```sh
 curl -X POST -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
-  "$QUEUE_URL/nebius/pool/resolve-absent/<owner-job-id>" \
-  -d '{"operator":"your-name","reason":"Provider confirmed request finished without a VM; ticket/reference", "confirmed_absent":true}'
+  "$JOB_QUEUE_URL/nebius/pool/resolve-absent/<owner-job-id>" \
+  -d '{"expected_revision":123,"operator":"your-name","reason":"Provider confirmed request finished without a VM; ticket/reference","confirmed_absent":true}'
 ```
 
-This requires the expected current owner and an idle worker. In one SQLite
+This requires the expected current owner/revision and no active worker or pool
+maintenance. Every guard ownership, target or operation write advances the
+revision, including a new attempt at the same target. A stale confirmation gets
+HTTP 409 before any audit insert or release. In one SQLite
 transaction it saves the self-reported operator, reason, timestamp and original
 guard in `nebius_pool_resolutions`, clears the absent target's ownership, and
 releases the guard. Queued jobs retry after `NEBIUS_CAPACITY_RETRY_SECONDS`, so
 other eligible jobs can proceed. Cancellation still finishes through the worker
 to clean up any remaining benchmark workloads. If the guard targeted a different
 idle VM during paused recovery, the paused job's own VM claim is preserved.
+Credential-required paused jobs stay paused and are removed from automatic
+dispatch; use the normal resume endpoint with a fresh GitHub token.
 No provider calls are made by this endpoint. Automatic reconciliation never
 unlocks merely because time passed or repeated lookups returned `NotFound`.
 

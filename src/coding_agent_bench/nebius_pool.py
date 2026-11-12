@@ -30,6 +30,8 @@ PREEMPT_RESTART_ATTEMPTS = int(os.environ.get("PREEMPT_RESTART_ATTEMPTS", "10"))
 PREEMPT_STABILIZE_ERROR_SECONDS = int(os.environ.get("PREEMPT_STABILIZE_ERROR_SECONDS", "120"))
 # States no start call can bring back (including records left by idle deletion).
 NEBIUS_UNRECOVERABLE_STATES = {"DELETED", "ERROR", "CRASHED"}
+# Reserved maintenance owner; never a benchmark job or a legacy VM claim.
+NEBIUS_CLEANUP_OWNER = "__nebius_pool_cleanup__"
 
 
 def parse_nebius_url(server_url: str) -> str | None:
@@ -74,6 +76,7 @@ class NebiusOrchestrator:
         self._instances: dict[str, NebiusInstanceState] = {}
         self._lock = asyncio.Lock()
         self._pool_guard_active = None
+        self.cleanup_active = False
 
     def _pick_instance_name(self) -> str:
         """Return the name for the next instance. Currently single-instance."""
@@ -406,37 +409,16 @@ class NebiusOrchestrator:
         details = await self._manager.get_instance(instance_name)
         return details.get("status", {}).get("state")
 
-    async def idle_cleanup_loop(self):
-        """Periodically delete idle instances and evict stale entries."""
-        while True:
-            await asyncio.sleep(60)
-            try:
-                await self.cleanup_idle_instances()
-            except Exception:
-                logger.exception("Nebius idle cleanup failed")
-
-    async def cleanup_idle_instances(self):
-        """Perform one project-scoped cleanup pass, also usable by regional routing."""
-        async with self._lock:
-            if self._pool_guard_active and self._pool_guard_active():
-                return
-            now = time.time()
-            to_delete = [
-                name for name, state in self._instances.items()
+    def idle_cleanup_locations(self):
+        """List expired caches; only the pool coordinator may authorize deletion."""
+        now = time.time()
+        return [self.configured_location(state.gpu_config) for state in self._instances.values()
                 if not state.job_running and state.last_job_completed_at is not None
-                and now - state.last_job_completed_at > self._idle_timeout
-            ]
-            for name in to_delete:
-                logger.info(f"Deleting idle nebius instance {name}")
-                await self._manager.delete_instance(name)
-                del self._instances[name]
-            to_evict = []
-            for name, state in self._instances.items():
-                if not state.job_running and not await self._manager.instance_exists(name):
-                    to_evict.append(name)
-            for name in to_evict:
-                logger.warning(f"Evicting stale nebius instance {name} (no longer exists)")
-                del self._instances[name]
+                and now - state.last_job_completed_at > self._idle_timeout]
+
+    async def startup_cleanup_locations(self):
+        """List the configured legacy target without mutating provider state."""
+        return [self.configured_location("")]
 
     def get_instance_states(self) -> list[NebiusInstanceState]:
         """Return current state of all managed instances (in-memory, no CLI calls)."""
@@ -527,6 +509,45 @@ class NebiusPool:
             if location:
                 self.store.record_nebius_location(job_id, location)
         return True
+
+    async def cleanup_background(self, *, startup: bool = False) -> bool:
+        """Own a durable maintenance guard before inspecting/deleting each target.
+
+        Discovery is read-only. Re-check dispatch and durable ownership after
+        discovery and before every target. A failed/cancelled deletion keeps its
+        guard for the next maintenance pass, including after a process restart.
+        """
+        if self.worker_active() or self.backend.cleanup_active:
+            return False
+        self.backend.cleanup_active = True
+        try:
+            guard = self.store.nebius_guard()
+            if guard:
+                if guard["job_id"] != NEBIUS_CLEANUP_OWNER:
+                    return False
+                if not await self.reconcile({"job_id": NEBIUS_CLEANUP_OWNER}, cleanup=True):
+                    return False
+                if guard.get("location"):
+                    self.backend.forget_placement(json.loads(guard["location"]))
+            if startup and any(self._other_owners(None)):
+                return True  # Recoverable owners supersede an old startup sweep.
+            locations = (await self.backend.startup_cleanup_locations() if startup
+                         else self.backend.idle_cleanup_locations())
+            for location in locations:
+                if self.worker_active() or self.store.nebius_guard():
+                    return False
+                if self.claimed_elsewhere(None, location, self.backend.is_legacy_placement(location)):
+                    continue
+                if not self.store.claim_nebius_guard(NEBIUS_CLEANUP_OWNER):
+                    return False
+                if not self.store.record_nebius_idle_cleanup(NEBIUS_CLEANUP_OWNER, location):
+                    return False
+                if not await self.reconcile({"job_id": NEBIUS_CLEANUP_OWNER}, cleanup=True):
+                    return False
+                self.backend.forget_placement(location)
+            return True
+        finally:
+            self.backend.cleanup_active = False
 
     async def check_owners(self, job_id: str) -> None:
         """Allow another owner's stopped cache, never an additional running VM."""
@@ -627,6 +648,9 @@ class NebiusPool:
     async def cleanup(self, job_id: str) -> None:
         """Retry scoped deletion, preserving unresolved guards and other owners."""
         assert self.backend is not None
+        if job_id == "startup":
+            await self.cleanup_background(startup=True)
+            return
         for attempt in range(1, self.cleanup_attempts + 1):
             guard = self.store.nebius_guard()
             if guard:
@@ -637,30 +661,16 @@ class NebiusPool:
                     if row:
                         await self.reconcile(row, cleanup=True)
                 return
-            if job_id == "startup" and self.worker_active():
-                # A delayed startup retry must not follow a newly bound region.
-                return
             row = self.store.get(job_id)
             ownership = NebiusJobOwnership.from_job(row) if row else NebiusJobOwnership()
-            if job_id != "startup" and not ownership.claimed:
+            if not ownership.claimed:
                 return
             try:
-                if job_id == "startup" and any(self._other_owners(None)):
-                    return
                 if isinstance(self.backend, RegionalNebiusOrchestrator):
-                    if job_id == "startup":
-                        # Re-check durable jobs during discovery and on every retry.
-                        await self.backend.cleanup_startup_instances(
-                            can_use=lambda selected, legacy: not self.claimed_elsewhere(None, selected, legacy),
-                        )
-                    else:
-                        row = self.store.get(job_id)
-                        if not row or parse_nebius_url(row["server_url"]) is None:
-                            return
-                        self.bind(row)
-                        await self.backend.delete_recovered_instance()
+                    self.bind(row)
+                    await self.backend.delete_recovered_instance()
                 elif isinstance(self.backend, NebiusOrchestrator):
-                    if job_id != "startup" and ownership.location is None and not ownership.cleanup_legacy:
+                    if ownership.location is None and not ownership.cleanup_legacy:
                         return
                     location = ownership.location or self.backend.configured_location("")
                     if self.claimed_elsewhere(job_id, location, True):

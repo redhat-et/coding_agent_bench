@@ -952,6 +952,7 @@ class RegionalNebiusOrchestrator:
         self._guard_active = None
         self._pool_location = None
         self._lock = asyncio.Lock()
+        self.cleanup_active = False
         self._legacy = {"project_id": manager._parent_id, "subnet_id": subnet_id,
                         "project_name": "", "region": "", "gpu_config": "",
                         "instance_name": f"{instance_name_prefix}-0"}
@@ -1179,18 +1180,15 @@ class RegionalNebiusOrchestrator:
                 return
             await self._child(location).delete_recovered_instance()
 
-    async def cleanup_startup_instances(self, can_use):
-        """Explicit startup-only sweep, independent of mutable per-job binding."""
-        async with self._lock:
-            if self.has_busy_instance():
-                return
-            locations = [self._legacy, *(self._named(item) for item in await self._manager.discover_locations(
-                None, self._project_prefix, self._regions,
-            ))]
-            for location in locations:
-                if not can_use(location, self._key(location) == self._key(self._legacy)):
-                    continue
-                await self._child(location).delete_recovered_instance()
+    async def startup_cleanup_locations(self):
+        """Discover approved targets without deletion or mutable job binding."""
+        return [self._legacy, *(self._named(item) for item in await self._manager.discover_locations(
+            None, self._project_prefix, self._regions,
+        ))]
+
+    def idle_cleanup_locations(self):
+        """Return expired project-scoped caches for guarded pool maintenance."""
+        return [self._locations[key] for key, child in self._children.items() if child.idle_cleanup_locations()]
 
     async def mark_job_started(self, instance_name):
         await self._route(instance_name).mark_job_started(instance_name)
@@ -1214,12 +1212,3 @@ class RegionalNebiusOrchestrator:
 
     def get_instance_states(self):
         return [state for child in self._children.values() for state in child.get_instance_states()]
-
-    async def idle_cleanup_loop(self):
-        while True:
-            await asyncio.sleep(60)
-            for child in list(self._children.values()):
-                try:
-                    await child.cleanup_idle_instances()
-                except Exception:
-                    logger.exception("Regional Nebius idle cleanup failed")

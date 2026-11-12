@@ -209,7 +209,7 @@ def test_idle_and_startup_cleanup_do_not_retire_unknown_request(guarded):
     child = pool.provisioning_child(selected)
     child._instances[selected["instance_name"]].last_job_completed_at = time.time() - 9999
     before = list(manager.events)
-    asyncio.run(child.cleanup_idle_instances())
+    asyncio.run(api._nebius_pool().cleanup_background())
     asyncio.run(api._nebius_pool().cleanup("startup"))
     assert manager.events == before
     assert store.nebius_guard() is not None

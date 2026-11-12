@@ -256,6 +256,7 @@ def test_operator_absence_releases_pool_durably_and_next_job_runs(guarded, monke
     monkeypatch.setenv("API_KEY", "test-secret")
     client = TestClient(api.app)
     payload = {"operator": "alice", "reason": "Provider confirmed operation finished without a VM", "confirmed_absent": True}
+    payload["expected_revision"] = guard["revision"]
     before = list(manager.events)
     response = client.post("/nebius/pool/resolve-absent/A", headers={"X-API-Key": "test-secret"}, json=payload)
     assert response.status_code == 200, response.text
@@ -303,6 +304,7 @@ def test_operator_absence_requires_auth_confirmation_expected_owner_and_idle_wor
     client = TestClient(api.app)
     headers = {"X-API-Key": "test-secret"}
     payload = {"operator": "alice", "reason": "Confirmed absent", "confirmed_absent": True}
+    payload["expected_revision"] = before["revision"]
     path = "/nebius/pool/resolve-absent/A"
     assert client.post(path, json=payload).status_code in (401, 403)
     for field, value in [("operator", " "), ("reason", " "), ("confirmed_absent", False)]:
@@ -330,7 +332,8 @@ def test_resolving_idle_cleanup_preserves_paused_owners_different_vm(guarded, le
     idle = {**pool._legacy, "instance_name": "other-idle-vm"}
     assert store.record_nebius_idle_cleanup("A", idle)
     store.update_nebius_guard("A", "uncertain", "delete")
-    request = api.ResolveNebiusAbsentRequest(operator="alice", reason="Idle VM deletion confirmed", confirmed_absent=True)
+    request = api.ResolveNebiusAbsentRequest(operator="alice", reason="Idle VM deletion confirmed", confirmed_absent=True,
+                                           expected_revision=store.nebius_guard()["revision"])
     asyncio.run(api.resolve_nebius_absent("A", request))
     row = store.get("A")
     assert row["status"] == "paused"
@@ -339,6 +342,76 @@ def test_resolving_idle_cleanup_preserves_paused_owners_different_vm(guarded, le
     assert api.NebiusJobOwnership.from_job(row).claimed
     assert store.nebius_guard() is None
     assert api._next_dispatch([row], None, time.time())[0] is None
+
+
+@pytest.mark.parametrize("change", ["target", "operation", "same_target_new_attempt"])
+def test_absence_confirmation_rejects_changed_guard_even_for_same_owner(guarded, monkeypatch, change):
+    store, _, _, _ = guarded
+    asyncio.run(api._process_queued_job(enqueue(store, "A", "nebius-h200")))
+    inspected = asyncio.run(api.get_nebius_pool())
+    request = api.ResolveNebiusAbsentRequest(
+        operator="alice", reason="Checked original target", confirmed_absent=True,
+        expected_revision=inspected["revision"],
+    )
+    if change == "target":
+        store.record_nebius_location("A", {**inspected["location"], "instance_name": "other-0"})
+    elif change == "operation":
+        store.update_nebius_guard("A", "inflight", "delete")
+    else:
+        before = store.nebius_guard()
+        store.release_nebius_guard("A")
+        store.claim_nebius_guard("A")
+        store.record_nebius_location("A", inspected["location"])
+        store.update_nebius_guard("A", "settled", "observe")
+        store.update_nebius_guard("A", before["state"], before["operation"])
+    guard = store.nebius_guard()
+    row = store.get("A")
+    assert guard["revision"] > inspected["revision"]
+    monkeypatch.setattr(api, "job_store", api.JobStore(store._db_path))
+    with pytest.raises(api.HTTPException) as error:
+        asyncio.run(api.resolve_nebius_absent("A", request))
+    assert error.value.status_code == 409
+    assert store.nebius_guard() == guard
+    assert store.get("A") == row
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM nebius_pool_resolutions").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("different_target", [False, True])
+def test_resolved_private_paused_owner_waits_for_manual_resume_with_token(guarded, monkeypatch, different_target):
+    from tests.test_github_datasets import source, COMMIT
+
+    store, manager, pool, ran = guarded
+    queued = enqueue(store, "A", "nebius-h200")
+    asyncio.run(api._process_queued_job(queued))
+    store.pin_github_dataset("A", source(commit=COMMIT))
+    store.update_status("A", api.JobStatus.PAUSED)
+    with store._connect() as conn:
+        conn.execute("UPDATE jobs SET github_token_required = 1 WHERE job_id = 'A'")
+    if different_target:
+        # A retained VM is distinct from the guard's idle cleanup target.
+        with store._connect() as conn:
+            conn.execute("UPDATE jobs SET nebius_location = ? WHERE job_id = 'A'", (json.dumps(pool._legacy),))
+    monkeypatch.setenv("API_KEY", "test-secret")
+    client = TestClient(api.app)
+    headers = {"X-API-Key": "test-secret"}
+    before = list(manager.events)
+    response = client.post("/nebius/pool/resolve-absent/A", headers=headers, json={
+        "operator": "alice", "reason": "Provider confirmed absence", "confirmed_absent": True,
+        "expected_revision": store.nebius_guard()["revision"],
+    })
+    assert response.status_code == 200, response.text
+    assert store.get("A")["status"] == "paused"
+    assert store.nebius_guard() is None
+    assert not any(item.job_id == "A" for item in api._job_queue)
+    asyncio.run(api._restore_jobs())
+    assert not any(item.job_id == "A" for item in api._job_queue)
+    assert manager.events == before and not ran
+    assert client.post("/jobs/A/resume", headers=headers, json={}).status_code == 400
+    resumed = client.post("/jobs/A/resume", headers={**headers, "X-GitHub-Token": "fresh-token"}, json={})
+    assert resumed.status_code == 200, resumed.text
+    assert store.get("A")["status"] == "queued"
+    assert api._job_queue[0].github_token.get_secret_value() == "fresh-token"
 
 
 @pytest.mark.parametrize("state,allowed", [("RUNNING", False), ("STARTING", False), ("STOPPED", True)])

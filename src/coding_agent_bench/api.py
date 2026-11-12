@@ -23,7 +23,7 @@ from coding_agent_bench.nebius_utils import (
     ProvisioningRecord, PoolPhase, NebiusPoolBusy,
 )
 from coding_agent_bench.nebius_pool import (
-    NebiusOrchestrator, NebiusPool, NebiusJobOwnership,
+    NebiusOrchestrator, NebiusPool, NebiusJobOwnership, NEBIUS_CLEANUP_OWNER,
     NebiusInstanceState as NebiusInstanceState,
     parse_nebius_url as _parse_nebius_url,
 )
@@ -69,6 +69,7 @@ class QueuedJob:
 
 _job_queue: list[QueuedJob] = []
 _job_event = asyncio.Event()
+_nebius_cleanup_event = asyncio.Event()
 _active_job: tuple[str, asyncio.Task] | None = None
 _shutting_down = False
 _nebius: "NebiusOrchestrator | RegionalNebiusOrchestrator | None" = None
@@ -217,6 +218,7 @@ class CreateJobResponse(BaseModel):
 
 
 class ResolveNebiusAbsentRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
     operator: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=2000)
     confirmed_absent: Literal[True]
@@ -359,6 +361,16 @@ class JobStore:
             "slot INTEGER PRIMARY KEY CHECK(slot = 1), job_id TEXT NOT NULL, "
             "state TEXT NOT NULL DEFAULT 'preparing', operation TEXT NOT NULL DEFAULT '', "
             "location TEXT, mutation_seen INTEGER NOT NULL DEFAULT 0)"
+        )
+        guard_columns = {row[1] for row in conn.execute("PRAGMA table_info(nebius_pool_guard)")}
+        if "revision" not in guard_columns:
+            conn.execute("ALTER TABLE nebius_pool_guard ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+        # Every owner, target or operation write invalidates an older operator
+        # confirmation, including a new attempt at the same target (ABA).
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS nebius_guard_revision "
+            "AFTER UPDATE OF job_id, state, operation, location, mutation_seen ON nebius_pool_guard "
+            "BEGIN UPDATE nebius_pool_guard SET revision = OLD.revision + 1 WHERE slot = NEW.slot; END"
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS nebius_pool_resolutions ("
@@ -535,7 +547,11 @@ class JobStore:
                 guard = conn.execute("SELECT * FROM nebius_pool_guard WHERE job_id = ?", (job_id,)).fetchone()
                 if guard and not ProvisioningRecord.from_row(guard).needs_cleanup:
                     conn.execute("UPDATE jobs SET nebius_location = NULL, nebius_vacant = 1 WHERE job_id = ?", (job_id,))
-            conn.execute("UPDATE nebius_pool_guard SET job_id = '', state = 'released', operation = '', mutation_seen = 0 WHERE job_id = ?", (job_id,))
+            conn.execute(
+                "UPDATE nebius_pool_guard SET job_id = '', state = 'released', operation = '', mutation_seen = 0, "
+                "location = CASE WHEN job_id = ? THEN NULL ELSE location END WHERE job_id = ?",
+                (NEBIUS_CLEANUP_OWNER, job_id),
+            )
         conn.close()
 
     def resolve_nebius_absent(self, job_id: str, request: ResolveNebiusAbsentRequest, *, is_legacy_placement) -> dict:
@@ -551,14 +567,16 @@ class JobStore:
                 conn.execute("BEGIN IMMEDIATE")
                 guard = conn.execute("SELECT * FROM nebius_pool_guard WHERE slot = 1 AND job_id = ?", (job_id,)).fetchone()
                 row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-                if not guard or not row:
+                if not guard or (not row and job_id != NEBIUS_CLEANUP_OWNER):
                     raise ValueError("Pool owner changed or missing; inspect the pool again")
-                if row["status"] in (JobStatus.RUNNING.value, JobStatus.PAUSING.value):
+                if guard["revision"] != request.expected_revision:
+                    raise ValueError("Pool guard changed; inspect and verify the current target again")
+                if row and row["status"] in (JobStatus.RUNNING.value, JobStatus.PAUSING.value):
                     raise ValueError("Running or pausing jobs must finish their workload transition first")
                 location = json.loads(guard["location"]) if guard["location"] else None
                 if not location:
                     raise ValueError("No recorded target to resolve; operator investigation required")
-                ownership = NebiusJobOwnership.from_job(dict(row))
+                ownership = NebiusJobOwnership.from_job(dict(row)) if row else NebiusJobOwnership()
                 same_target = not ownership.claimed or ownership.matches(location, is_legacy_placement(location))
                 now = time.time()
                 conn.execute(
@@ -569,8 +587,10 @@ class JobStore:
                     conn.execute("UPDATE jobs SET nebius_location = NULL, nebius_vacant = 1 WHERE job_id = ?", (job_id,))
                 conn.execute(
                     "UPDATE jobs SET nebius_retry_at = ?, status = CASE "
-                    "WHEN status = 'paused' AND ? THEN 'queued' ELSE status END, "
-                    "error = CASE WHEN status IN ('queued', 'paused') THEN "
+                    "WHEN status = 'paused' AND ? AND github_token_required = 0 THEN 'queued' ELSE status END, "
+                    "error = CASE WHEN status = 'paused' AND github_token_required = 1 THEN "
+                    "'Pool target resolved; resume manually with a fresh GitHub token' "
+                    "WHEN status IN ('queued', 'paused') THEN "
                     "'Operator confirmed guard target absent; retry scheduled' ELSE error END WHERE job_id = ?",
                     (now + NEBIUS_CAPACITY_RETRY_SECONDS, same_target, job_id),
                 )
@@ -835,13 +855,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 NEBIUS_IDLE_TIMEOUT, NebiusOrchestrator, project_prefix,
                 {region.strip() for region in os.environ.get("NEBIUS_REGIONS", "").split(",") if region.strip()},
             )
-        background_tasks.append(asyncio.create_task(_nebius.idle_cleanup_loop()))
         logger.info("Nebius orchestrator initialized")
 
     has_recoverable_nebius = await _restore_jobs()
-    if _nebius is not None and not has_recoverable_nebius:
-        background_tasks.append(asyncio.create_task(_nebius_pool().cleanup("startup")))
     if _nebius is not None:
+        _nebius_cleanup_event.clear()
+        background_tasks.append(asyncio.create_task(_nebius_cleanup_loop(startup=not has_recoverable_nebius)))
         background_tasks.append(asyncio.create_task(_resume_paused_jobs_loop()))
     worker_task = asyncio.create_task(_worker())
     cleanup_task = asyncio.create_task(_build_pod_cleanup_loop())
@@ -891,6 +910,26 @@ async def _run_oc(command: list[str], timeout_sec: int = 30) -> str:
             await process.communicate()
         raise
     return stdout_bytes.decode() if stdout_bytes else ""
+
+
+async def _nebius_cleanup_loop(*, startup: bool):
+    """Retry guarded pool maintenance independently of job rows, including on restart."""
+    while True:
+        _nebius_cleanup_event.clear()
+        try:
+            completed = await _nebius_pool().cleanup_background(startup=startup)
+            if completed:
+                startup = False
+        except Exception:
+            logger.exception("Nebius pool maintenance failed")
+        finally:
+            _job_event.set()
+        try:
+            guard = job_store.nebius_guard()
+            delay = NEBIUS_CAPACITY_RETRY_SECONDS if guard and guard["job_id"] == NEBIUS_CLEANUP_OWNER else 60
+            await asyncio.wait_for(_nebius_cleanup_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _build_pod_cleanup_loop():
@@ -1946,11 +1985,16 @@ async def get_nebius_pool():
     record = ProvisioningRecord.from_row(guard)
     return {
         "blocked": True, "owner_job_id": guard["job_id"], "phase": record.phase.value,
+        "revision": guard["revision"],
+        "owner_kind": "cleanup" if guard["job_id"] == NEBIUS_CLEANUP_OWNER else "job",
         "operation": record.operation, "vm_known": record.vm_known,
         "location": json.loads(guard["location"]) if guard.get("location") else None,
         "job_status": owner["status"] if owner else None,
         "next_retry_at": owner.get("nebius_retry_at", 0) if owner else None,
-        "message": owner.get("error") if owner else "Pool owner row is missing; operator investigation required",
+        "message": owner.get("error") if owner else (
+            "Background cleanup pending; automatically retried by pool maintenance"
+            if guard["job_id"] == NEBIUS_CLEANUP_OWNER else "Pool owner row is missing; operator investigation required"
+        ),
     }
 
 
@@ -1962,8 +2006,11 @@ async def request_nebius_reconciliation(job_id: str):
     guard = job_store.nebius_guard()
     if guard is None or guard["job_id"] != job_id:
         raise HTTPException(status_code=409, detail="Pool owner changed; inspect the pool again")
-    if _active_job is not None:
+    if _active_job is not None or _nebius.cleanup_active:
         raise HTTPException(status_code=409, detail="Worker is already active; reconciliation must not race it")
+    if job_id == NEBIUS_CLEANUP_OWNER:
+        _nebius_cleanup_event.set()
+        return {"message": "Background cleanup reconciliation scheduled", "job_id": job_id}
     row = job_store.get(job_id)
     if not row:
         raise HTTPException(status_code=409, detail="Pool owner row is missing; operator investigation required")
@@ -1983,7 +2030,7 @@ async def resolve_nebius_absent(job_id: str, request: ResolveNebiusAbsentRequest
     """Accept operator confirmation that the target and pending operations are absent."""
     if _nebius is None:
         raise HTTPException(status_code=409, detail="Nebius is not enabled")
-    if _active_job is not None:
+    if _active_job is not None or _nebius.cleanup_active:
         raise HTTPException(status_code=409, detail="Worker is already active; resolution must not race it")
     # No await between checking the worker and committing/enqueueing the resolution.
     try:
@@ -1993,7 +2040,12 @@ async def resolve_nebius_absent(job_id: str, request: ResolveNebiusAbsentRequest
     _nebius.forget_placement(location)
     _nebius_pool().configure(None)
     row = job_store.get(job_id)
-    if row["status"] in ("queued", "paused", "cancelling", "failing", "completing"):
+    if row and row["status"] == "paused" and row.get("github_token_required"):
+        for item in _job_queue:
+            if item.job_id == job_id:
+                item.github_token = None
+        _job_queue[:] = [item for item in _job_queue if item.job_id != job_id]
+    elif row and row["status"] in ("queued", "paused", "cancelling", "failing", "completing"):
         if not any(item.job_id == job_id for item in _job_queue):
             _job_queue.append(QueuedJob(job_id, json.loads(row["command"]), row["server_url"], row["model_name"], True))
     _job_event.set()

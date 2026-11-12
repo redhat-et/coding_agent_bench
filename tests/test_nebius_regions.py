@@ -45,7 +45,10 @@ class RegionalManager(NebiusInstanceManager):
 
     async def get_instance(self, name):
         self.events.append(("get", self._parent_id))
-        return self.cloud[self._parent_id, name]
+        try:
+            return self.cloud[self._parent_id, name]
+        except KeyError as error:
+            raise RuntimeError("NotFound") from error
 
     async def create_instance(self, name, subnet, gpu_config):
         self.events.append(("create", self._parent_id))
