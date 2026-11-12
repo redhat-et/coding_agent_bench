@@ -675,7 +675,8 @@ class JobStore:
                 github_token_required INTEGER NOT NULL DEFAULT 0,
                 nebius_retry_at REAL NOT NULL DEFAULT 0,
                 nebius_retry_attempts INTEGER NOT NULL DEFAULT 0,
-                nebius_location TEXT
+                nebius_location TEXT,
+                nebius_vacant INTEGER NOT NULL DEFAULT 0
             )"""
         )
         # Migrate columns when upgrading from an older schema.
@@ -686,6 +687,9 @@ class JobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN nebius_retry_attempts INTEGER NOT NULL DEFAULT 0")
         if "nebius_location" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN nebius_location TEXT")
+        if "nebius_vacant" not in columns:
+            # Missing placement in an old recovery row is not proof of vacancy.
+            conn.execute("ALTER TABLE jobs ADD COLUMN nebius_vacant INTEGER NOT NULL DEFAULT 0")
         if "server_url" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN server_url TEXT NOT NULL DEFAULT ''")
         if "idempotency_key" not in columns:
@@ -839,7 +843,7 @@ class JobStore:
         """Remember a project/subnet before allocation without reviving terminal jobs."""
         with self._connect() as conn:
             cur = conn.execute(
-                "UPDATE jobs SET nebius_location = ? WHERE job_id = ? AND status IN (?, ?, ?, ?)",
+                "UPDATE jobs SET nebius_location = ?, nebius_vacant = 0 WHERE job_id = ? AND status IN (?, ?, ?, ?)",
                 (json.dumps(location), job_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value,
                  JobStatus.PAUSING.value, JobStatus.PAUSED.value),
             )
@@ -882,6 +886,7 @@ class JobStore:
 
         A capacity rejection with no known VM is an attempted location, not
         ownership. Clear that job's claim atomically with the guard release.
+        Persist vacancy so resume/checkpoint metadata cannot recreate a legacy claim.
         A rejected start on a known VM retains its recovery placement.
         """
         with self._connect() as conn:
@@ -889,7 +894,7 @@ class JobStore:
             if release_vacant_claim:
                 guard = conn.execute("SELECT * FROM nebius_pool_guard WHERE job_id = ?", (job_id,)).fetchone()
                 if guard and not ProvisioningRecord.from_row(guard).needs_cleanup:
-                    conn.execute("UPDATE jobs SET nebius_location = NULL WHERE job_id = ?", (job_id,))
+                    conn.execute("UPDATE jobs SET nebius_location = NULL, nebius_vacant = 1 WHERE job_id = ?", (job_id,))
             conn.execute("UPDATE nebius_pool_guard SET job_id = '', state = 'released', operation = '', mutation_seen = 0 WHERE job_id = ?", (job_id,))
         conn.close()
 
@@ -1430,7 +1435,7 @@ def _nebius_placement_claimed_elsewhere(job_id: str | None, location: dict, lega
             saved = json.loads(saved) if isinstance(saved, str) else saved
             if (saved["project_id"], saved["instance_name"]) == key:
                 return True
-        elif legacy and (
+        elif legacy and not owner.get("nebius_vacant") and (
             owner["status"] != JobStatus.QUEUED.value or owner.get("pause_checkpointed")
             or is_resume_command(json.loads(owner["command"]))
         ):
@@ -1470,7 +1475,9 @@ async def _check_nebius_pool_owners(job_id: str) -> None:
         saved = owner.get("nebius_location")
         if saved:
             placements.append(json.loads(saved) if isinstance(saved, str) else saved)
-        elif owner["status"] != JobStatus.QUEUED.value or owner.get("pause_checkpointed"):
+        elif not owner.get("nebius_vacant") and (
+            owner["status"] != JobStatus.QUEUED.value or owner.get("pause_checkpointed")
+        ):
             placements.append(None)  # legacy recovery with no persisted location
     await _nebius.check_other_placements(placements)
 
@@ -1520,7 +1527,7 @@ def _bind_regional_nebius_job(row: dict) -> None:
         return
     job_id = row["job_id"]
     saved = row.get("nebius_location")
-    legacy_recovery = _parse_nebius_url(row["server_url"]) is not None and (
+    legacy_recovery = not row.get("nebius_vacant") and _parse_nebius_url(row["server_url"]) is not None and (
         row["status"] in (JobStatus.RUNNING.value, JobStatus.COMPLETING.value,
                           JobStatus.FAILING.value, JobStatus.PAUSING.value, JobStatus.PAUSED.value)
         or row.get("pause_checkpointed") or is_resume_command(json.loads(row["command"]))
@@ -1549,6 +1556,11 @@ async def _delete_recovered_nebius(job_id: str) -> None:
         if job_id == "startup" and _active_job is not None:
             # A new job now owns the pool. A delayed startup-cleanup retry
             # must not follow its newly bound region and delete its VM.
+            return
+        row = job_store.get(job_id)
+        if row and row.get("nebius_vacant") and not row.get("nebius_location"):
+            # A cancelled capacity waiter owns nothing, even if its previous
+            # in-memory binding or resume command still refers to the legacy VM.
             return
         try:
             if isinstance(_nebius, RegionalNebiusOrchestrator):

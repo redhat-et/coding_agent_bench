@@ -491,6 +491,10 @@ placement claim atomically. The last attempted target stays in the pool record
 for diagnostics, but does not reserve that region against other queued jobs.
 Uncertain requests and rejected starts on existing VMs retain their placement
 claims for recovery and cleanup.
+SQLite also records confirmed vacancy separately from a missing legacy location,
+so resume commands/checkpoints cannot recreate a released claim after restart.
+Selecting a new placement clears that vacancy marker before provisioning. Older
+rows default to unknown ownership rather than being assumed vacant.
 
 The owner is reconciled on the usual retry interval. A visible, stable VM is
 reused to finish preparing that job rather than creating another VM. A single

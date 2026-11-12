@@ -452,7 +452,98 @@ def test_capacity_rejected_start_retains_known_stopped_vm_claim(guarded, monkeyp
     asyncio.run(api._process_queued_job(first))
     assert store.get("A")["status"] == "queued"
     assert json.loads(store.get("A")["nebius_location"]) == selected
+    assert not store.get("A")["nebius_vacant"]
     assert store.nebius_guard() is None  # Rejection is certain, but the VM exists.
     assert api._nebius_placement_claimed_elsewhere("B", selected, True)
     assert manager.cloud["primary", "queue-0"]["status"]["state"] == "STOPPED"
     assert not ran
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("resume_signal", ["command", "checkpoint"])
+def test_resumed_capacity_waiter_allows_legacy_vm_cleanup(guarded, monkeypatch, restart, resume_signal):
+    store, manager, _, ran = guarded
+    pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+    monkeypatch.setattr(api, "_nebius", pool)
+    first = enqueue(store, "A", "nebius-h200")
+    if resume_signal == "command":
+        first.command = ["bash", "-c", "harbor jobs resume --path /app/jobs/A"]
+        with store._connect() as conn:
+            conn.execute("UPDATE jobs SET command = ? WHERE job_id = 'A'", (json.dumps(first.command),))
+    else:
+        with store._connect() as conn:
+            conn.execute("UPDATE jobs SET pause_checkpointed = 1 WHERE job_id = 'A'")
+    legacy = pool.configured_location("h200")
+    # Without evidence of vacancy, the old recovery fallback must still protect A.
+    assert api._nebius_placement_claimed_elsewhere("B", legacy, True)
+    manager.failures["primary"].append(capacity())
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["nebius_location"] is None
+    assert store.nebius_guard() is None
+    assert not manager.cloud
+
+    # B allocates the legacy VM, but loses the start response and needs guarded cleanup.
+    second = enqueue(store, "B", "nebius-h200")
+    asyncio.run(api._process_queued_job(second))
+    assert store.nebius_guard()["job_id"] == "B"
+    assert json.loads(store.get("B")["nebius_location"])["instance_name"] == "queue-0"
+    assert len(manager.cloud) == 1
+    if restart:
+        store = api.JobStore(store._db_path)
+        monkeypatch.setattr(api, "job_store", store)
+        monkeypatch.setattr(api, "_nebius", api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600))
+        asyncio.run(api._restore_jobs())
+        second = next(item for item in api._job_queue if item.job_id == "B")
+    asyncio.run(api.delete_job("B"))
+    asyncio.run(api._process_queued_job(second))
+    assert store.get("B")["status"] == "cancelled"
+    assert store.nebius_guard() is None
+    assert not manager.cloud
+    assert store.get("A")["status"] == "queued"
+    assert not ran
+
+    # A's next attempt must reclaim ownership before any uncertain mutation.
+    manager.lost["start"] = True
+    due(store, "A")
+    asyncio.run(api._process_queued_job(first))
+    selected = json.loads(store.get("A")["nebius_location"])
+    assert store.nebius_guard()["job_id"] == "A"
+    assert not store.get("A")["nebius_vacant"]
+    assert api._nebius_placement_claimed_elsewhere("B", selected, False)
+
+
+@pytest.mark.parametrize("mode", ["regional", "single"])
+def test_vacant_resume_cleanup_does_not_delete_legacy_pool_vm(guarded, monkeypatch, mode):
+    store, manager, pool, _ = guarded
+    if mode == "single":
+        pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+        monkeypatch.setattr(api, "_nebius", pool)
+    manager.locations = manager.locations[:1]
+    first = enqueue(store, "A", "nebius-h200")
+    first.command = ["bash", "-c", "harbor jobs resume --path /app/jobs/A"]
+    with store._connect() as conn:
+        conn.execute("UPDATE jobs SET command = ? WHERE job_id = 'A'", (json.dumps(first.command),))
+    manager.failures["primary"].append(capacity())
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["nebius_vacant"]
+    legacy = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600).configured_location("h200")
+    seed_vm(manager, legacy)
+    store.update_status("A", api.JobStatus.CANCELLING)
+    before = list(manager.events)
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == "cancelled"
+    assert manager.events == before
+    assert ("primary", "queue-0") in manager.cloud
+
+
+def test_vacancy_migration_preserves_legacy_recovery_claim(guarded, monkeypatch):
+    store, _, pool, _ = guarded
+    enqueue(store, "A", "nebius-h200")
+    with store._connect() as conn:
+        conn.execute("UPDATE jobs SET pause_checkpointed = 1 WHERE job_id = 'A'")
+        # Simulate the schema deployed before the explicit vacancy marker.
+        conn.execute("ALTER TABLE jobs DROP COLUMN nebius_vacant")
+    reopened = api.JobStore(store._db_path)
+    monkeypatch.setattr(api, "job_store", reopened)
+    assert not reopened.get("A")["nebius_vacant"]
+    assert api._nebius_placement_claimed_elsewhere("B", pool._legacy, True)
