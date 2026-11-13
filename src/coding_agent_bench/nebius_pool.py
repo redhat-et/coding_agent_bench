@@ -533,6 +533,10 @@ class NebiusPool:
                 return True  # Recoverable owners supersede an old startup sweep.
             locations = (await self.backend.startup_cleanup_locations() if startup
                          else self.backend.idle_cleanup_locations())
+            if startup and self.backend.get_instance_states():
+                # A job can finish during read-only discovery. Its warm VM is
+                # no longer a startup leftover; apply normal idle expiry.
+                locations = self.backend.idle_cleanup_locations()
             for location in locations:
                 if self.worker_active() or self.store.nebius_guard():
                     return False

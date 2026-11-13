@@ -916,6 +916,9 @@ async def _nebius_cleanup_loop(*, startup: bool):
     """Retry guarded pool maintenance independently of job rows, including on restart."""
     while True:
         _nebius_cleanup_event.clear()
+        if startup and _nebius is not None and _nebius.get_instance_states():
+            # Live caches now follow idle expiry, not a deferred startup sweep.
+            startup = False
         try:
             completed = await _nebius_pool().cleanup_background(startup=startup)
             if completed:

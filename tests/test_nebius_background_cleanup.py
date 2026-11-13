@@ -180,3 +180,84 @@ def test_operator_can_inspect_retry_and_resolve_inactive_cleanup_guard(guarded, 
     assert not api._job_queue  # Maintenance is not a fake benchmark job.
     with store._connect() as conn:
         assert conn.execute("SELECT job_id FROM nebius_pool_resolutions").fetchone()[0] == owner
+
+
+@pytest.mark.parametrize("mode", ["single", "regional"])
+def test_deferred_startup_preserves_warm_cache_until_idle_expiry(guarded, monkeypatch, mode):
+    store, manager, pool, _ = guarded
+    if mode == "single":
+        pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+        monkeypatch.setattr(api, "_nebius", pool)
+
+    async def scenario():
+        monkeypatch.setattr(api, "_job_event", asyncio.Event())
+        monkeypatch.setattr(api, "_nebius_cleanup_event", asyncio.Event())
+        monkeypatch.setattr(api, "_active_job", ("external", None))
+        task = asyncio.create_task(api._nebius_cleanup_loop(startup=True))
+        try:
+            await api._job_event.wait()  # Initial startup sweep deferred.
+            monkeypatch.setattr(api, "_active_job", None)
+            manager.lost["start"] = False
+            await api._process_queued_job(enqueue(store, "A", "nebius-h200"))
+            assert store.get("A")["status"] == "completed"
+            assert manager.cloud and pool.get_instance_states()
+            api._job_event.clear()
+            api._nebius_cleanup_event.set()
+            await api._job_event.wait()
+            assert manager.cloud
+            assert not any(event == "delete" for event, _ in manager.events)
+            for state in pool.get_instance_states():
+                state.last_job_completed_at = time.time() - 700
+            api._job_event.clear()
+            api._nebius_cleanup_event.set()
+            await api._job_event.wait()
+            assert not manager.cloud
+            assert store.nebius_guard() is None
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(scenario())
+
+
+def test_job_completing_during_startup_discovery_keeps_warm_cache(guarded, monkeypatch):
+    store, manager, pool, _ = guarded
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = manager.discover_locations
+
+        async def discovery(*args):
+            # Startup uses gpu_config=None; let the job's own discovery proceed.
+            if args[0] is None:
+                entered.set()
+                await release.wait()
+            return await original(*args)
+
+        monkeypatch.setattr(manager, "discover_locations", discovery)
+        task = asyncio.create_task(api._nebius_pool().cleanup_background(startup=True))
+        await entered.wait()
+        manager.lost["start"] = False
+        await api._process_queued_job(enqueue(store, "A", "nebius-h200"))
+        assert store.get("A")["status"] == "completed"
+        release.set()
+        assert await task is True
+        assert manager.cloud
+        assert not any(event == "delete" for event, _ in manager.events)
+        assert store.nebius_guard() is None
+
+    asyncio.run(scenario())
+
+
+def test_live_cache_does_not_skip_pending_cleanup_reconciliation(guarded):
+    store, manager, pool, _ = guarded
+    location = expired_vm(pool, manager, "regional")
+    pool.get_instance_states()[0].last_job_completed_at = time.time()
+    owner = api.NEBIUS_CLEANUP_OWNER
+    store.claim_nebius_guard(owner)
+    store.record_nebius_idle_cleanup(owner, location)
+    store.update_nebius_guard(owner, "inflight", "delete")
+    asyncio.run(api._nebius_pool().cleanup_background(startup=False))
+    assert store.nebius_guard() is None
+    assert not manager.cloud
