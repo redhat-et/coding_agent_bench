@@ -4,6 +4,7 @@ import json
 import pytest
 
 from coding_agent_bench.job import OpenshiftJob
+from coding_agent_bench import nebius_pool
 
 
 class StopLoop(Exception):
@@ -22,6 +23,7 @@ def patch_sleep(monkeypatch):
 
     monkeypatch.setattr(asyncio, "sleep", virtual_sleep)
     monkeypatch.setattr(api, "_monotonic", lambda: clock["t"])
+    monkeypatch.setattr(nebius_pool, "_monotonic", lambda: clock["t"])
 
 
 def patch_loop_passes(monkeypatch, passes):
@@ -45,6 +47,15 @@ class FlowStore:
 
     def get(self, _job_id):
         return dict(self.row)
+
+    def nebius_guard(self):
+        return None
+
+    def claim_nebius_guard(self, _job_id):
+        return True
+
+    def release_nebius_guard(self, _job_id):
+        pass
 
     def update_status(self, _job_id, status, error=None):
         self.status_updates.append((status.value, error))
@@ -971,7 +982,7 @@ def test_stabilization_applies_even_when_start_was_not_issued(monkeypatch):
     from coding_agent_bench import api
 
     patch_sleep(monkeypatch)
-    monkeypatch.setattr(api, "PREEMPT_STABLE_SECONDS", 0)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_STABLE_SECONDS", 0)
     manager = StabilizerManager(start_results=[False], states=["RUNNING"])
     monkeypatch.setattr(api, "_nebius", None)  # keep module globals untouched otherwise
 
@@ -983,10 +994,8 @@ def test_stabilization_applies_even_when_start_was_not_issued(monkeypatch):
 
 
 def test_stabilization_returns_after_window_without_repreemption(monkeypatch):
-    from coding_agent_bench import api
-
     patch_sleep(monkeypatch)
-    monkeypatch.setattr(api, "PREEMPT_STABLE_SECONDS", 0)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_STABLE_SECONDS", 0)
     manager = StabilizerManager(start_results=[True], states=["RUNNING"])
 
     asyncio.run(make_orchestrator(manager).recover_stopped_instance("i"))
@@ -995,10 +1004,8 @@ def test_stabilization_returns_after_window_without_repreemption(monkeypatch):
 
 
 def test_stabilization_gives_up_after_restart_attempts(monkeypatch):
-    from coding_agent_bench import api
-
     patch_sleep(monkeypatch)
-    monkeypatch.setattr(api, "PREEMPT_RESTART_ATTEMPTS", 1)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_RESTART_ATTEMPTS", 1)
     manager = StabilizerManager(start_results=[True], states=["STOPPED"])
 
     with pytest.raises(RuntimeError):
@@ -1009,10 +1016,8 @@ def test_stabilization_gives_up_after_restart_attempts(monkeypatch):
 
 
 def test_stabilization_survives_transient_state_check_errors(monkeypatch):
-    from coding_agent_bench import api
-
     patch_sleep(monkeypatch)
-    monkeypatch.setattr(api, "PREEMPT_STABLE_SECONDS", 0)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_STABLE_SECONDS", 0)
     manager = StabilizerManager(start_results=[True], states=[RuntimeError("api blip"), "RUNNING"])
 
     asyncio.run(make_orchestrator(manager).recover_stopped_instance("i"))
@@ -1021,11 +1026,9 @@ def test_stabilization_survives_transient_state_check_errors(monkeypatch):
 
 
 def test_stabilization_bounds_persistent_state_check_errors(monkeypatch):
-    from coding_agent_bench import api
-
     patch_sleep(monkeypatch)
-    monkeypatch.setattr(api, "PREEMPT_STABLE_SECONDS", 30)
-    monkeypatch.setattr(api, "PREEMPT_STABILIZE_ERROR_SECONDS", 20)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_STABLE_SECONDS", 30)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_STABILIZE_ERROR_SECONDS", 20)
     manager = StabilizerManager(
         start_results=[True],
         states=[RuntimeError("api unavailable")],
@@ -1038,10 +1041,8 @@ def test_stabilization_bounds_persistent_state_check_errors(monkeypatch):
 
 
 def test_stabilization_fails_fast_when_instance_disappears(monkeypatch):
-    from coding_agent_bench import api
-
     patch_sleep(monkeypatch)
-    monkeypatch.setattr(api, "PREEMPT_STABLE_SECONDS", 30)
+    monkeypatch.setattr(nebius_pool, "PREEMPT_STABLE_SECONDS", 30)
     manager = StabilizerManager(
         start_results=[True],
         states=[ValueError("RpcError: NotFound")],
@@ -1111,6 +1112,9 @@ def test_restore_jobs_keeps_vm_for_paused_nebius_job(monkeypatch):
             self.set_calls += 1
 
     class Store:
+        def nebius_guard(self):
+            return None
+
         def list_recoverable(self):
             return []
 

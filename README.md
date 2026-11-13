@@ -439,6 +439,251 @@ stringData:
 
 When creating a job, set `server_url` to `nebius-<resource>` to use a managed Nebius instance with the specified GPU resource (e.g. `nebius-h200`, `nebius-b200`). Available resources are defined in `RESOURCE_CONFIG_REGISTRY`.
 
+#### Waiting for Nebius capacity
+
+If a new job cannot allocate or start its VM because Nebius explicitly reports
+a physical capacity shortage (such as `Not enough resources`), it stays
+`queued` with **Waiting for Nebius capacity** in its status details. It retries
+until capacity becomes available or the job is cancelled; there is no overall
+capacity-wait deadline and these attempts do not consume preemption auto-resumes.
+Between attempts, other eligible jobs can use the serial worker. By default
+retries target the configured project only. CAB does not silently switch GPU
+types or pricing policy; cross-region search requires explicit opt-in below.
+
+- `NEBIUS_CAPACITY_RETRY_SECONDS` controls the delay after a failed attempt
+  (default **60 seconds**, must be positive).
+- `NEBIUS_CLI_TIMEOUT_SECONDS` bounds each Nebius CLI call (default **300
+  seconds**, must be positive). Timed-out CLI subprocesses are killed/drained;
+  an uncertain provisioning outcome is reconciled before another attempt.
+- `NEBIUS_MODEL_START_TIMEOUT_SECONDS` bounds stopping the old model and waiting
+  for the new model server's readiness output, including SSH retries (default
+  **1800 seconds / 30 minutes**, must be positive). Expiry fails preparation and
+  cleans up the known VM; it is not classified as a GPU capacity shortage.
+- Quota, authentication, invalid configuration, and unrecognized CLI failures
+  are not classified as capacity shortages; they still fail the job. A bare
+  `RESOURCE_EXHAUSTED` response without capacity details is not sufficient to
+  enable endless retries.
+- Retry timestamps and attempt counts are persisted in SQLite and exposed as
+  `nebius_retry_at` (Unix epoch seconds) and `nebius_retry_attempts` in job API
+  responses. Waiting survives queue-service restarts. Matching partially
+  created VMs are adopted rather than blindly deleted/recreated.
+- GitHub tokens stay only in memory during a capacity wait. If the queue
+  service restarts before a credential-requiring job starts, that job fails
+  with instructions to resubmit with a fresh token; credentials are never
+  written to SQLite.
+
+The existing paused/preempted-job recovery remains separate from this
+initial-provisioning retry path.
+
+#### Unknown provisioning outcomes and the shared-pool guard
+
+A timed-out create/start request can have succeeded remotely. CAB therefore
+persists a single provisioning owner in SQLite before making provider changes,
+and records mutating CLI requests before sending them. While that owner's
+outcome is unresolved, **all other jobs remain queued**, including external
+endpoints and requests for different hardware or another region. Reconciliation
+gets dispatch priority so a VM cannot finish allocating and then sit idle behind
+an unrelated external benchmark. Blocked jobs do not increment allocation-attempt counters.
+An explicit capacity rejection releases the guard, allowing a different queued
+hardware request to try its own allocation or an external-endpoint job to run.
+If no VM is known to remain, that release also clears the waiter's job-level
+placement claim atomically. The last attempted target stays in the pool record
+for diagnostics, but does not reserve that region against other queued jobs.
+Uncertain requests and rejected starts on existing VMs retain their placement
+claims for recovery and cleanup.
+SQLite also records confirmed vacancy separately from a missing legacy location,
+so resume commands/checkpoints cannot recreate a released claim after restart.
+Selecting a new placement clears that vacancy marker before provisioning. Older
+rows default to unknown ownership rather than being assumed vacant.
+
+The owner is reconciled on the usual retry interval. A visible, stable VM is
+reused to finish preparing that job rather than creating another VM. A single
+`NotFound` after an unconfirmed create/start is not treated as proof that the
+request failed: CAB keeps waiting instead of issuing a duplicate create. There
+is no arbitrary timeout that silently unlocks an uncertain pool; an outcome
+that cannot be established requires operator reconciliation.
+
+Cancellation retains the owner in `cancelling` until its VM is confirmed gone.
+A known deletion can be settled by confirmed absence, including after a lost
+delete response. Startup/idle cleanup do not discard the guard. It survives
+queue-service restarts and also covers uncertain preemption-recovery starts.
+Cancellations during read-only discovery, before any VM request or observation,
+can finish normally because no provider mutation was sent.
+
+The settled pool placement is also retained so an idle VM in a region that does
+not support the next job's different hardware can be cleaned up before a new
+allocation. Pending jobs do not each get their own VM. Changing single-region
+project/name settings while a job retains a saved VM fails closed: restore the
+saved configuration or reconcile the recorded VM manually.
+
+Before starting another managed allocation, CAB also checks the VMs claimed by
+other recoverable jobs. A paused job may retain a confirmed stopped VM/cache;
+`RUNNING`, transitioning, or unreadable owner state defers the new managed job
+without attempting allocation or increasing its attempt count.
+Allocation, preemption recovery, placement exclusion, and cleanup use the same
+`NebiusJobOwnership` interpretation of each durable job:
+
+| Job record | Ownership interpretation |
+| --- | --- |
+| Saved placement | Claim that exact project/name |
+| Confirmed vacant, no saved placement | No VM claim, even with a resume command/checkpoint |
+| Resume command, checkpoint, or active recovery state without placement | Protect the legacy VM and inspect its state before another allocation/restart |
+| Fresh queued intake without placement | No VM claim |
+| Cancelling legacy row without recovery evidence | Protect the possible legacy owner; cancellation alone does not authorize deletion |
+
+In regional mode a stopped owner's VM can be retained while a different target
+is used. In single-region mode the fixed target stays reserved until its owner
+releases it, even when stopped; another job cannot replace that owner's cache.
+Before restarting a retained VM, recovery also retires a different completed
+job's idle VM. The cleanup target is journaled in the pool guard separately from
+the recovering job's placement. A lost delete response blocks dispatch until
+reconciled, including after restart, rather than starting two VMs concurrently.
+
+#### Inspecting a blocked pool
+
+These endpoints require the queue's normal `X-API-Key` authentication:
+
+```sh
+curl -H "X-API-Key: $API_KEY" "$JOB_QUEUE_URL/nebius/pool"
+curl -X POST -H "X-API-Key: $API_KEY" \
+  "$JOB_QUEUE_URL/nebius/pool/reconcile/<owner-job-id>"
+```
+
+The read-only response contains the owner ID, owner kind (`job` or `cleanup`),
+guard revision, pool phase, last operation, recorded location, next retry time,
+and status message. It contains no cloud
+credentials or SSH command. The POST wakes the **same owner through the serial
+worker**; it does not make a parallel cloud call or clear the guard. It rejects
+a stale owner ID or an active worker and does not enqueue duplicate attempts.
+For a cleanup owner it wakes guarded pool maintenance instead. Idle/startup
+deletion claims the same durable slot before deleting each target; timeouts and
+cancellation retain it for automatic reconciliation, including after restart.
+Dispatch remains blocked while that cleanup guard is held.
+
+For an unresolved request:
+
+1. Inspect `/nebius/pool` and the owning job's error. Use the recorded project
+   and VM name, rather than the CLI's default project, when inspecting Nebius:
+   `nebius compute instance get-by-name --parent-id <project-id> --name <vm-name> --format json`.
+2. Restore credentials/connectivity if queries are failing. Use the POST above
+   to retry immediately rather than waiting for the persisted deadline.
+3. To abandon the run, use the existing `DELETE /jobs/<owner-job-id>`. The owner
+   remains `cancelling` until its VM cleanup is confirmed. Retry reconciliation
+   after fixing any cleanup error.
+4. A `NotFound` after a lost create/start response is still inconclusive. If no
+   VM ever becomes visible, contact Nebius with the request/trace information
+   from the CLI logs to establish the provider outcome. Do not delete the SQLite
+   guard or assume elapsed time proves the request failed.
+
+After manual/provider verification that **the recorded VM is absent and no
+create/start operation remains pending**, an authenticated operator can resolve
+that target explicitly. Use the `revision` from the GET response whose target
+you inspected; replace `123` below with that value. Do not fetch a newer revision
+and submit it without verifying its target/operation again.
+
+```sh
+curl -X POST -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
+  "$JOB_QUEUE_URL/nebius/pool/resolve-absent/<owner-job-id>" \
+  -d '{"expected_revision":123,"operator":"your-name","reason":"Provider confirmed request finished without a VM; ticket/reference","confirmed_absent":true}'
+```
+
+This requires the expected current owner/revision and no active worker or pool
+maintenance. Every guard ownership, target or operation write advances the
+revision, including a new attempt at the same target. A stale confirmation gets
+HTTP 409 before any audit insert or release. In one SQLite
+transaction it saves the self-reported operator, reason, timestamp and original
+guard in `nebius_pool_resolutions`, clears the absent target's ownership, and
+releases the guard. Queued jobs retry after `NEBIUS_CAPACITY_RETRY_SECONDS`, so
+other eligible jobs can proceed. Cancellation still finishes through the worker
+to clean up any remaining benchmark workloads. If the guard targeted a different
+idle VM during paused recovery, the paused job's own VM claim is preserved.
+Credential-required paused jobs stay paused and are removed from automatic
+dispatch; use the normal resume endpoint with a fresh GitHub token.
+No provider calls are made by this endpoint. Automatic reconciliation never
+unlocks merely because time passed or repeated lookups returned `NotFound`.
+
+Nebius offers `--async` and `compute instance operation get --id <operation-id>`.
+This implementation retains the existing synchronous CLI protocol; it does not
+yet persist provider operation IDs or supply provider idempotency keys. Thus a
+lost initial response with no visible VM may still need operator/provider
+investigation before using the explicit absence-resolution endpoint.
+No live allocation/failover test was performed for this change.
+
+#### Lifecycle code organization
+
+- `api.py` retains HTTP endpoints, `JobStore` and its migrations, serial-worker
+  scheduling, and benchmark execution/checkpoint workflows.
+- `nebius_pool.py` contains the single-project `NebiusOrchestrator` and the
+  queue-facing `NebiusPool` coordinator: shared ownership interpretation,
+  provisioning guard binding, reconciliation, and scoped cleanup. The queue
+  supplies its existing store, backend and cleanup settings explicitly; the
+  coordinator neither imports `api.py` nor owns a separate queue/state store.
+- `nebius_utils.py` retains CLI/SSH operations and regional discovery/routing.
+  Regional routing composes the single-project orchestrator through its existing
+  factory argument, avoiding a circular dependency.
+- `ProvisioningRecord` / `PoolPhase` in `nebius_utils.py` define guard transition
+  rules. The existing SQLite schema remains readable; `mutation_seen` is the
+  persisted legacy name for whether a VM is known to require possible cleanup.
+- Create/start/stop/delete explicitly call `mutate_instance`; the generic CLI
+  runner only executes requests and bounds subprocess lifetime. It does not
+  infer which job-state transition to perform by parsing command tokens.
+- `reconcile_placement` uses public project-scoped inspect/delete methods.
+  `NebiusPool` coordinates these operations through the store's public methods;
+  API code owns persistence and dispatch, not the orchestrator's private clients.
+- `_next_dispatch` is the queue policy: guard owner first, otherwise the next
+  due job, otherwise wait for a deadline or enqueue/cancel event. In-memory
+  routing/model caches do not authorize releasing a durable guard.
+
+#### Automatic regional discovery (optional)
+
+Set `NEBIUS_DISCOVER_REGIONS=1` to let CAB discover regional projects and default
+subnets through the Nebius CLI using **the queue's service account**, not an
+operator's local login. No projects, subnets, IAM grants, or alternate GPU types
+are created automatically. The service account needs tenant-level project
+listing, project/subnet/platform read access, compute lifecycle permissions,
+and permission to use networking/attach the configured service account in the
+target projects. Local CLI access does not imply the queue has these grants.
+
+- `NEBIUS_PROJECT_NAME_PREFIX` defaults to `default-`. Only matching project
+  names are considered. Use `stage-` for stage-only discovery, or a distinct
+  approved prefix to avoid crossing environments. Empty prefixes are rejected.
+- `NEBIUS_REGIONS` is an optional comma-separated region allowlist, such as
+  `us-central1,eu-west1,me-west1`. Omit it to search all matching regional
+  projects accessible to the service account. CLI pagination is followed.
+- A project is eligible only when its advertised platform/preset supports the
+  requested GPU family and GPU count and it has one unambiguous `default-`
+  subnet. The known `-a` platform variants are supported without changing the
+  GPU family, count, or requested preemptible policy.
+- Each round refreshes discovery and tries eligible locations sequentially,
+  preferring an existing owned VM or a persisted pending placement. Allocation
+  is the authoritative quota/capacity check, not a prediction from platform
+  listings. Regional quota failures may be skipped in favor of another region;
+  quota-only rounds fail rather than retry forever. Authentication/configuration
+  failures are not treated as capacity shortages.
+- If all usable targets lack capacity, the job remains queued and is eligible
+  for another round after `NEBIUS_CAPACITY_RETRY_SECONDS`. The attempt counter
+  increments **once per unsuccessful round**, not once per region. Other jobs
+  can run between rounds, and cancellation remains available.
+- An uncertain create/start timeout stops the round. CAB first reconciles that
+  placement on the next attempt rather than risking a second allocation.
+  Failed target VMs are cleaned up before advancing to another region.
+- `nebius_location` in SQLite/job API responses records region, project, subnet,
+  effective resource config, and the deterministic VM name **before** allocation.
+  Monitoring, pause/resume, cancellation, and cleanup use that saved location
+  even after a queue restart. Preempted VM stabilization stays in its saved
+  region; a missing VM can be recreated via the regional search path.
+
+Use a unique `NEBIUS_INSTANCE_NAME_PREFIX` for each queue deployment. Regional
+VM names include region and a project hash; cleanup only targets these owned
+names (plus the legacy single-region VM name for upgrades). Discovery alone
+does **not** mean a GPU is free, and enabling it does not reserve capacity.
+Cross-project sweeps run only as explicit startup cleanup when no recoverable
+managed jobs exist. Per-job cleanup is limited to its saved placement, or to
+verified legacy recovery, and re-checks other durable job claims before deleting
+a VM. A new job cancelled before selecting a placement deletes no Nebius VM.
+Legacy VMs retain their configured subnet even when discovery finds a different
+default subnet in the same project.
+
 ### (Optional) Set Up the Intake Poller
 
 The intake poller is an optional CronJob to pull requests from a Google Sheet and submit them to the job queue.
