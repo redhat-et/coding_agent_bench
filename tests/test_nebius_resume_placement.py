@@ -216,3 +216,37 @@ def test_hint_migration_preserves_old_recovery_claims(guarded):
         assert row["nebius_location_hint"] is None
         assert api.NebiusJobOwnership.from_job(row).claimed
     assert reopened.nebius_guard() == before
+
+
+def test_checkpoint_placement_survives_crash_immediately_after_insert(guarded, monkeypatch):
+    store, manager, pool, ran = guarded
+    manager.lost["start"] = False
+    enqueue(store, "original", "nebius-h200")
+    location = pool._named(manager.locations[1])
+    seed_vm(manager, location)
+    store.record_nebius_location("original", location)
+    store.update_status("original", api.JobStatus.FAILED, error="checkpoint saved for manual resume")
+    original_insert = store.insert
+
+    class SimulatedCrash(Exception):
+        pass
+
+    def insert_then_crash(*args, **kwargs):
+        assert original_insert(*args, **kwargs)
+        raise SimulatedCrash("Process stopped after insertion commit")
+
+    monkeypatch.setattr(store, "insert", insert_then_crash)
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(api.resume_job("original"))
+    reopened = api.JobStore(store._db_path)
+    child_id = reopened.get("original")["resumed_by_job_id"]
+    child = reopened.get(child_id)
+    assert json.loads(child["nebius_location"]) == location
+    assert child["nebius_location_hint"] is None
+    monkeypatch.setattr(api, "job_store", reopened)
+    monkeypatch.setattr(api, "_nebius", regional(manager))
+    asyncio.run(api._restore_jobs())
+    asyncio.run(api._process_queued_job(queued(child_id)))
+    assert ran == [child_id]
+    assert not any(event in ("create", "start", "delete", "model") and project == "primary"
+                   for event, project in manager.events)

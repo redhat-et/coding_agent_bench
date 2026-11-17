@@ -209,6 +209,63 @@ def test_explicit_mutation_rejection_settles_without_forgetting_owner(tmp_path, 
     assert store.nebius_guard()["job_id"] == "A"
 
 
+@pytest.mark.parametrize("operation", ["create", "start", "stop", "delete"])
+@pytest.mark.parametrize("returncode,stdout,stderr", [
+    (1, b"", b""), (1, b" \n", b"\t"),
+    (-9, b"", b"Not enough resources"), (-15, b"Request submitted", b""),
+])
+def test_cli_signal_or_empty_failure_retains_pending_mutation(tmp_path, monkeypatch, operation, returncode, stdout, stderr):
+    store = api.JobStore(tmp_path / "state.db")
+    store.claim_nebius_guard("A")
+    manager = object.__new__(NebiusInstanceManager)
+    manager.set_mutation_observer(lambda phase, action: store.update_nebius_guard("A", phase, action))
+    process = SimpleNamespace(returncode=returncode, communicate=AsyncMock(return_value=(stdout, stderr)))
+    monkeypatch.setattr(nebius_utils.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    with pytest.raises(nebius_utils.NebiusCommandTimeout):
+        asyncio.run(manager.mutate_instance(operation, ["compute", "instance", operation]))
+    guard = api.JobStore(store._db_path).nebius_guard()
+    assert guard["state"] == "inflight" and guard["operation"] == operation
+    assert ProvisioningRecord.from_row(guard).needs_cleanup
+
+
+@pytest.mark.parametrize("returncode,output", [(1, ""), (-9, "Request submitted")])
+def test_unknown_cli_create_blocks_dispatch_until_vm_reconciles(guarded, monkeypatch, returncode, output):
+    from tests.test_nebius_regions import regional, seed_vm
+
+    store, manager, pool, ran = guarded
+    manager.lost["start"] = False
+    first = enqueue(store, "A", "nebius-h200")
+    external = enqueue(store, "external", "https://external.example")
+    exec_call = AsyncMock(side_effect=NebiusCommandError([], returncode, output, ""))
+    monkeypatch.setattr(type(manager), "exec", exec_call)
+
+    async def create(self, *args):
+        await self.mutate_instance("create", ["compute", "instance", "create"])
+
+    monkeypatch.setattr(type(manager), "create_instance", create)
+    asyncio.run(api._process_queued_job(first))
+    guard = store.nebius_guard()
+    assert guard["job_id"] == "A" and guard["state"] == "uncertain"
+    location = json.loads(guard["location"])
+    assert location["project_id"] == "primary"
+    monkeypatch.setattr(api, "job_store", api.JobStore(store._db_path))
+    monkeypatch.setattr(api, "_nebius", regional(manager))
+    asyncio.run(api._restore_jobs())
+    due(store, "A")
+    asyncio.run(api._process_queued_job(first))  # NotFound after uncertain create is inconclusive.
+    asyncio.run(api._process_queued_job(external))
+    assert store.nebius_guard()["job_id"] == "A"
+    assert not ran
+    exec_call.assert_awaited_once()
+    seed_vm(manager, location)  # Original VM eventually becomes visible.
+    due(store, "A")
+    asyncio.run(api._process_queued_job(first))
+    asyncio.run(api._process_queued_job(external))
+    assert ran == ["A", "external"]
+    assert store.nebius_guard() is None
+    exec_call.assert_awaited_once()  # Neither duplicate create nor regional fallback.
+
+
 def test_explicit_mutation_cancellation_keeps_durable_pending_state(tmp_path, monkeypatch):
     store = api.JobStore(tmp_path / "state.db")
     store.claim_nebius_guard("A")

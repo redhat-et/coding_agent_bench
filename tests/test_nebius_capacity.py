@@ -162,6 +162,48 @@ def test_worker_allows_other_jobs_and_keeps_token_until_retry_succeeds(store, mo
     assert b"volatile-token-never-save" not in store._db_path.read_bytes()
 
 
+def test_worker_retains_retry_and_token_when_deadline_expires_during_commit(store, monkeypatch):
+    token = SecretStr("volatile-retry-token")
+    waiting = enqueue(store, token=token)
+    clock = [1000.0]
+    monkeypatch.setattr(api.time, "time", lambda: clock[0])
+    monkeypatch.setattr(api, "NEBIUS_CAPACITY_RETRY_SECONDS", 0.01)
+    original_defer = store.defer_nebius
+
+    def slow_commit(*args, **kwargs):
+        result = original_defer(*args, **kwargs)
+        clock[0] += 1  # Deadline has passed before _reschedule_after_dispatch runs.
+        return result
+
+    monkeypatch.setattr(store, "defer_nebius", slow_commit)
+    manager = FakeNebius([capacity_error(), True])
+    monkeypatch.setattr(api, "_nebius", manager)
+
+    async def scenario():
+        done = asyncio.Event()
+
+        async def run(job_id, *args, **kwargs):
+            assert waiting.github_token is token
+            store.update_status(job_id, api.JobStatus.COMPLETED)
+            done.set()
+
+        monkeypatch.setattr(api, "_run_job", run)
+        api._job_event.set()
+        worker = asyncio.create_task(api._worker())
+        try:
+            await asyncio.wait_for(done.wait(), timeout=2)
+        finally:
+            monkeypatch.setattr(api, "_shutting_down", True)
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+    asyncio.run(scenario())
+    assert len(manager.calls) == 2
+    assert store.get(waiting.job_id)["status"] == "completed"
+    assert not api._job_queue
+
+
 def test_cancel_waiting_job_drops_token_and_prevents_more_allocation(store, monkeypatch):
     queued = enqueue(store, token=SecretStr("private-token"))
     neb = FakeNebius([capacity_error()])

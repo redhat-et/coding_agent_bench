@@ -401,11 +401,13 @@ class JobStore:
         github_dataset: GitHubDataset | None = None,
         github_token_required: bool = False,
         nebius_location_hint: dict | None = None,
+        nebius_location: dict | None = None,
     ) -> bool:
         """Insert a job, optionally claiming a failed checkpoint in the same transaction.
 
         Return False when another resume already claimed the parent or its state
-        changed. An insertion failure rolls back the claim with the new row.
+        changed. The child's actual placement and parent claim commit together;
+        an insertion failure rolls both back. Preferences remain separate hints.
         """
         conn = self._connect()
         try:
@@ -419,8 +421,8 @@ class JobStore:
                     return False
             conn.execute(
                 "INSERT INTO jobs "
-                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required, nebius_location_hint) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required, nebius_location_hint, nebius_location) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     job_name,
@@ -435,6 +437,7 @@ class JobStore:
                     github_dataset.model_dump_json() if github_dataset else None,
                     int(github_token_required),
                     json.dumps(nebius_location_hint) if nebius_location_hint is not None else None,
+                    json.dumps(nebius_location) if nebius_location is not None else None,
                 ),
             )
             conn.commit()
@@ -1916,7 +1919,7 @@ def _reschedule_after_dispatch(queued: QueuedJob) -> None:
             job_store.wait_nebius_guard(job_id, (current.get("error") or "") + " | Nebius reconciliation pending: dispatch retry")
             current = job_store.get(job_id)
     retrying = (owns_guard and current["status"] != JobStatus.RUNNING.value) or (
-        current["status"] == JobStatus.QUEUED.value and current.get("nebius_retry_at", 0) > time.time()
+        current["status"] == JobStatus.QUEUED.value and current.get("nebius_retry_at", 0) > 0
     )
     if not retrying:
         queued.github_token = None
@@ -2806,12 +2809,11 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
         github_dataset=source,
         github_token_required=github_token_required,
         nebius_location_hint=(saved or {}) if prefer_only else None,
+        nebius_location=saved if nebius_gpu_config is not None and not prefer_only else None,
         **({"resume_parent_id": job_id} if claim_checkpoint else {}),
     )
     if claim_checkpoint and not inserted:
         raise HTTPException(status_code=409, detail="Checkpoint was claimed or job state changed; refresh before retrying")
-    if saved and nebius_gpu_config is not None and not prefer_only:
-        job_store.record_nebius_location(resume_job_id, saved)
     _job_queue.append(QueuedJob(resume_job_id, command, effective_server_url, job_row["model_name"],
                                 github_dataset=source, github_token=token))
     _job_event.set()

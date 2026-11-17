@@ -135,7 +135,7 @@ async def reconcile_placement(backend, location, record: ProvisioningRecord, *, 
 
 
 class NebiusCommandError(RuntimeError):
-    """Nebius rejected a CLI operation; retain output without logging command secrets."""
+    """A CLI operation failed; retain output without implying a definitive rejection."""
 
     def __init__(self, args: list[str], returncode: int, stdout: str, stderr: str):
         self.args_list = args
@@ -375,6 +375,12 @@ class NebiusInstanceManager:
             result = await self.exec(args)
         except NebiusCommandError as error:
             text = (error.stdout + "\n" + error.stderr).lower()
+            if error.returncode < 0 or not text.strip():
+                # The process may have sent the request before being killed or
+                # losing its output. Keep REQUEST_PENDING until reconciliation.
+                raise NebiusCommandTimeout(
+                    "Nebius mutating CLI exited without a conclusive provider response; remote outcome needs reconciliation"
+                ) from error
             if not isinstance(error, NebiusCapacityError) and any(marker in text for marker in (
                 "deadlineexceeded", "deadline exceeded", "context deadline", "unavailable",
                 "connection reset", "transport is closing", "timed out", "unexpected eof",
