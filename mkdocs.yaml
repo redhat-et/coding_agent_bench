@@ -43,6 +43,7 @@ nav:
       - Local (Developer): queue-service/local.md
       - Nebius (Optional): queue-service/nebius.md
     - Usage: queue-service/usage.md
+    - Nebius Workflow: queue-service/nebius-workflow.md
     - Intake Poller: queue-service/intake_poller.md
   - Developer:
     - Overview: developer/index.md

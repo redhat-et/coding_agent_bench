@@ -3,6 +3,12 @@
 The queue service supports starting and stopping vLLM server instances automatically using [Nebius](https://nebius.com/).
 When enabled, the queue service will create a Nebius VM, SSH into the instance, start the vLLM server for the next model in the queue, run the benchmark job against that model, swap the running model for the next model in the queue, then spin down the Nebius VM when the queue is empty.
 
+For the capacity/recovery changes in PR #122, see the
+[Nebius workflow guide](nebius-workflow.md): serial dispatch, regional fallback,
+VM ownership, cleanup, operator recovery, and stage rollout requirements.
+Regional fallback requires cross-project service-account grants beyond the
+single-project setup below.
+
 To connect the queue service to Nebius, first [set up an AI Cloud account](https://docs.nebius.com/signup-billing/sign-up).
 
 After setting up the account, [install the CLI](https://docs.nebius.com/cli/install) and [login to your account](https://docs.nebius.com/cli/configure).

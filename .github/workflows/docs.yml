@@ -14,11 +14,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
       - uses: astral-sh/setup-uv@v6
-      - run: PYTHONPATH=src uv run --no-project --with mkdocs --with mkdocs-material --with mkdocstrings-python mkdocs build --strict
+      - run: >-
+          PYTHONPATH=src uv run --no-project
+          --with mkdocs --with mkdocs-material --with mkdocstrings-python
+          --with mkdocs-include-dir-to-nav --with mkdocs-git-revision-date-localized-plugin
+          mkdocs build --strict
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -27,6 +33,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Configure Git Credentials
         run: |
           git config user.name github-actions[bot]
@@ -41,5 +49,5 @@ jobs:
           path: ~/.cache 
           restore-keys: |
             mkdocs-material-
-      - run: pip install mkdocs-material mkdocstrings-python
+      - run: pip install mkdocs-material mkdocstrings-python mkdocs-include-dir-to-nav mkdocs-git-revision-date-localized-plugin
       - run: PYTHONPATH=src mkdocs gh-deploy --force --strict
