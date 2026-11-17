@@ -706,6 +706,48 @@ a VM. A new job cancelled before selecting a placement deletes no Nebius VM.
 Legacy VMs retain their configured subnet even when discovery finds a different
 default subnet in the same project.
 
+#### Stage rollout requirements
+
+The existing region-locked service accounts are sufficient for single-project
+capacity retries with `NEBIUS_DISCOVER_REGIONS=0`. **Regional fallback requires
+a multi-region-capable service account with grants in all approved projects.**
+Create/assign that account before enabling discovery; successful commands under
+an operator's own CLI login do not establish the queue account's permissions.
+
+For the stage operator:
+
+1. Grant the queue account tenant project listing, project/subnet/platform reads,
+   compute lifecycle access, and networking/service-account attachment rights in
+   each approved target project. Verify discovery using that account's credentials.
+2. Update `nebius-secret` with its credentials, account/tenant IDs, configured
+   project/subnet, and the approved project prefix/region allowlist. Keep discovery
+   disabled until grants are ready. Optional retry/CLI/model deadlines and their
+   defaults are shown in `.env.example` and the example Secret.
+3. Set the queue container image and `CODING_AGENT_BENCH_IMAGE` to the tested
+   stage image containing this PR, then restart the queue to reload Secret
+   environment values. Preserve **one replica and the `Recreate` strategy**: the
+   serial dispatcher and in-memory credentials are not a multi-replica service.
+4. Preserve the `job-queue-pvc` mounted at `/app/data`, `JOB_STORE_PATH=/app/data/jobs.db`,
+   and the SSH key files there. The existing SQLite database migrates automatically;
+   do not replace it or its guard/history with an empty database during rollout.
+   Plan restarts around in-memory GitHub credentials; new private-dataset pods
+   require a fresh token after restart.
+
+Keep existing project/subnet, VM-name prefix, SSH username and keys consistent
+while jobs still have recoverable placements; changing them can invalidate
+legacy recovery targets.
+
+The Deployment already reads `nebius-secret` through `envFrom`; this change does
+not require new Kubernetes RBAC, routes, storage classes, or ports. Confirm the
+queue can SSH to candidate VMs and benchmark pods can reach their model endpoint
+on port 8000 in each enabled region.
+
+After permissions and the stage image are ready, perform a controlled one-task
+benchmark with the intended hardware, inspect `/nebius/pool`, and verify placement,
+completion, and cleanup. Validate regional fallback when a real capacity rejection
+is available; read-only discovery alone does not test allocation or failover.
+Live allocation/failover and rollout have not been performed as part of this PR.
+
 ### (Optional) Set Up the Intake Poller
 
 The intake poller is an optional CronJob to pull requests from a Google Sheet and submit them to the job queue.
