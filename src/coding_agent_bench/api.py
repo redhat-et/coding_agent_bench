@@ -244,6 +244,7 @@ class JobResponse(BaseModel):
     nebius_retry_at: float = 0
     nebius_retry_attempts: int = 0
     nebius_location: dict[str, str] | None = None
+    nebius_location_hint: dict[str, str] | None = None
     idempotency_key: str | None = None
     results_job_name: str | None = None
     resumed_by_job_id: str | None = None
@@ -254,7 +255,7 @@ class JobResponse(BaseModel):
     def decode_github_dataset(cls, value):
         return json.loads(value) if isinstance(value, str) else value
 
-    @field_validator("nebius_location", mode="before")
+    @field_validator("nebius_location", "nebius_location_hint", mode="before")
     @classmethod
     def decode_nebius_location(cls, value):
         return json.loads(value) if isinstance(value, str) else value
@@ -297,6 +298,7 @@ class JobStore:
                 nebius_retry_at REAL NOT NULL DEFAULT 0,
                 nebius_retry_attempts INTEGER NOT NULL DEFAULT 0,
                 nebius_location TEXT,
+                nebius_location_hint TEXT,
                 nebius_vacant INTEGER NOT NULL DEFAULT 0
             )"""
         )
@@ -308,6 +310,10 @@ class JobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN nebius_retry_attempts INTEGER NOT NULL DEFAULT 0")
         if "nebius_location" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN nebius_location TEXT")
+        if "nebius_location_hint" not in columns:
+            # NULL preserves conservative ownership for old recovery rows.
+            # {} identifies a new unallocated resume with no preferred region.
+            conn.execute("ALTER TABLE jobs ADD COLUMN nebius_location_hint TEXT")
         if "nebius_vacant" not in columns:
             # Missing placement in an old recovery row is not proof of vacancy.
             conn.execute("ALTER TABLE jobs ADD COLUMN nebius_vacant INTEGER NOT NULL DEFAULT 0")
@@ -394,6 +400,7 @@ class JobStore:
         resume_parent_id: str | None = None,
         github_dataset: GitHubDataset | None = None,
         github_token_required: bool = False,
+        nebius_location_hint: dict | None = None,
     ) -> bool:
         """Insert a job, optionally claiming a failed checkpoint in the same transaction.
 
@@ -412,8 +419,8 @@ class JobStore:
                     return False
             conn.execute(
                 "INSERT INTO jobs "
-                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(job_id, job_name, agent, dataset, model_name, server_url, command, status, idempotency_key, results_job_name, github_dataset, github_token_required, nebius_location_hint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     job_name,
@@ -427,6 +434,7 @@ class JobStore:
                     results_job_name or job_name,
                     github_dataset.model_dump_json() if github_dataset else None,
                     int(github_token_required),
+                    json.dumps(nebius_location_hint) if nebius_location_hint is not None else None,
                 ),
             )
             conn.commit()
@@ -479,7 +487,8 @@ class JobStore:
         """Remember a project/subnet before allocation without reviving terminal jobs."""
         with self._connect() as conn:
             cur = conn.execute(
-                "UPDATE jobs SET nebius_location = ?, nebius_vacant = 0 WHERE job_id = ? AND status IN (?, ?, ?, ?)",
+                "UPDATE jobs SET nebius_location = ?, nebius_vacant = 0, nebius_location_hint = NULL "
+                "WHERE job_id = ? AND status IN (?, ?, ?, ?)",
                 (json.dumps(location), job_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value,
                  JobStatus.PAUSING.value, JobStatus.PAUSED.value),
             )
@@ -2782,19 +2791,27 @@ async def resume_job(job_id: str, req: ResumeJobRequest = ResumeJobRequest(), re
             or job_row.get("pause_checkpointed")
         )
     )
+    # A new resume of terminal work may prefer the old idle VM but must not
+    # reserve it while queued. Real failed-checkpoint ownership is transferred
+    # exclusively; paused owners were handled in-place above.
+    saved = job_row.get("nebius_location")
+    saved = json.loads(saved) if isinstance(saved, str) else saved
+    prefer_only = nebius_gpu_config is not None and not (
+        claim_checkpoint and NebiusJobOwnership.from_job(job_row).claimed
+    )
     inserted = job_store.insert(
         resume_job_id, resume_job_name, job_row["agent"],
         job_row["dataset"], job_row["model_name"], effective_server_url, command,
         results_job_name=original_job_name,
         github_dataset=source,
         github_token_required=github_token_required,
+        nebius_location_hint=(saved or {}) if prefer_only else None,
         **({"resume_parent_id": job_id} if claim_checkpoint else {}),
     )
     if claim_checkpoint and not inserted:
         raise HTTPException(status_code=409, detail="Checkpoint was claimed or job state changed; refresh before retrying")
-    if job_row.get("nebius_location") and _parse_nebius_url(effective_server_url) is not None:
-        location = job_row["nebius_location"]
-        job_store.record_nebius_location(resume_job_id, json.loads(location) if isinstance(location, str) else location)
+    if saved and nebius_gpu_config is not None and not prefer_only:
+        job_store.record_nebius_location(resume_job_id, saved)
     _job_queue.append(QueuedJob(resume_job_id, command, effective_server_url, job_row["model_name"],
                                 github_dataset=source, github_token=token))
     _job_event.set()

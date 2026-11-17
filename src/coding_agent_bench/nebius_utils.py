@@ -944,6 +944,7 @@ class RegionalNebiusOrchestrator:
         self._children = {}
         self._locations = {}
         self._bound = None
+        self._preferred = None
         self._save = None
         self._job_id = None
         self._legacy_recovery = False
@@ -958,7 +959,7 @@ class RegionalNebiusOrchestrator:
                         "instance_name": f"{instance_name_prefix}-0"}
         self._child(self._legacy)
 
-    def bind_job(self, location, save, *, job_id=None, legacy_recovery=False, can_use=None):
+    def bind_job(self, location, save, *, job_id=None, legacy_recovery=False, can_use=None, preferred_location=None):
         """Restore the current job's placement without consulting mutable discovery."""
         same_job = job_id is not None and job_id == self._job_id
         self._legacy_recovery = legacy_recovery or (same_job and self._legacy_recovery)
@@ -966,6 +967,7 @@ class RegionalNebiusOrchestrator:
         self._can_use = can_use
         self._save = save
         self._bound = dict(location) if location else None
+        self._preferred = dict(preferred_location) if preferred_location else None
         if self._bound:
             self._child(self._bound)
 
@@ -1104,7 +1106,9 @@ class RegionalNebiusOrchestrator:
                 if await child._manager.instance_exists(self._bound["instance_name"]):
                     await child.delete_recovered_instance()
             existing_keys = {self._key(item) for item in existing}
-            locations.sort(key=lambda item: (self._key(item) != bound_key, self._key(item) not in existing_keys))
+            preferred_key = self._key(self._preferred) if self._preferred else None
+            locations.sort(key=lambda item: (self._key(item) != bound_key, self._key(item) not in existing_keys,
+                                             self._key(item) != preferred_key))
             capacity_regions = []
             quota_regions = []
             for location in locations:

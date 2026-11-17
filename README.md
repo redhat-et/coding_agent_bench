@@ -538,9 +538,20 @@ Allocation, preemption recovery, placement exclusion, and cleanup use the same
 | --- | --- |
 | Saved placement | Claim that exact project/name |
 | Confirmed vacant, no saved placement | No VM claim, even with a resume command/checkpoint |
-| Resume command, checkpoint, or active recovery state without placement | Protect the legacy VM and inspect its state before another allocation/restart |
+| New terminal-job resume with only `nebius_location_hint` | Reuse preference, not ownership; selected placement becomes a claim at dispatch |
+| Legacy resume command, checkpoint, or active recovery state without placement or hint | Protect the legacy VM and inspect its state before another allocation/restart |
 | Fresh queued intake without placement | No VM claim |
 | Cancelling legacy row without recovery evidence | Protect the possible legacy owner; cancellation alone does not authorize deletion |
+
+Multiple resumes of the same completed run can be queued: they do not reserve
+the old VM against one another. Their preferred location is stored atomically
+with the queued row (`{}` means a new unallocated resume without a preference).
+The worker records an actual `nebius_location` and clears the hint before a
+provider mutation. Regional selection uses the preference only among eligible,
+unclaimed targets, favoring existing VMs; a hint never authorizes cleanup.
+Paused-job resumes retain their ownership in-place. A failed checkpoint's real
+claim transfers only to its exclusively claimed resume. Existing database rows
+default to no hint, preserving conservative legacy/uncertain ownership on upgrade.
 
 In regional mode a stopped owner's VM can be retained while a different target
 is used. In single-region mode the fixed target stays reserved until its owner

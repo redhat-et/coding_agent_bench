@@ -458,6 +458,10 @@ class NebiusJobOwnership:
             return cls(location=json.loads(saved) if isinstance(saved, str) else saved)
         if row.get("nebius_vacant"):
             return cls()
+        if row.get("nebius_location_hint") is not None:
+            # New terminal-job resumes carry a preference, not a reservation.
+            # A real placement above always wins once the worker selects it.
+            return cls()
         recovery = bool(row.get("pause_checkpointed")) or is_resume_command(json.loads(row["command"]))
         cleanup = recovery or row["status"] in ("running", "completing", "failing", "pausing", "paused")
         return cls(legacy=cleanup or row["status"] == "cancelling", cleanup_legacy=cleanup)
@@ -656,11 +660,13 @@ class NebiusPool:
             return
         job_id = row["job_id"]
         ownership = NebiusJobOwnership.from_job(row)
+        preferred = row.get("nebius_location_hint")
         self.backend.bind_job(
             ownership.location,
             lambda selected: self.store.record_nebius_location(job_id, selected),
             job_id=job_id, legacy_recovery=ownership.cleanup_legacy,
             can_use=lambda selected, legacy: not self.claimed_elsewhere(job_id, selected, legacy),
+            preferred_location=json.loads(preferred) if isinstance(preferred, str) else preferred,
         )
 
     async def cleanup(self, job_id: str) -> bool:
