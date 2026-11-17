@@ -58,6 +58,61 @@ def test_dispatch_policy_is_independent_of_endpoint_hardware(owner, deadline, st
     assert api._next_dispatch(rows, guard, 100) == (expected, delay)
 
 
+@pytest.mark.parametrize("mode", ["single", "regional"])
+@pytest.mark.parametrize("state", ["RUNNING", "STOPPED", "lost_start", "restart_after_read"])
+def test_reuse_only_keeps_model_readiness_when_vm_did_not_restart(guarded, monkeypatch, mode, state):
+    store, manager, backend, ran = guarded
+    manager.lost["start"] = False
+    if mode == "single":
+        backend = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+        monkeypatch.setattr(api, "_nebius", backend)
+    asyncio.run(api._process_queued_job(enqueue(store, "A", "nebius-h200")))
+    original = type(manager).start_instance
+    if state in ("STOPPED", "lost_start"):
+        for details in manager.cloud.values():
+            details["status"]["state"] = "STOPPED"
+    if state == "lost_start":
+        manager.lost["start"] = True
+    if state == "restart_after_read":
+        async def restarted(self, name):
+            await original(self, name)
+            return True  # Provider started a VM that stopped after our first read.
+        monkeypatch.setattr(type(manager), "start_instance", restarted)
+    second = enqueue(store, "B", "nebius-h200")
+    asyncio.run(api._process_queued_job(second))
+    if state == "lost_start":
+        assert ran == ["A"]
+        assert all(item.current_model is None for item in backend.get_instance_states())
+        due(store, "B")
+        asyncio.run(api._process_queued_job(second))
+    assert ran == ["A", "B"]
+    expected_starts = 1 if state == "RUNNING" else 2
+    assert manager.events.count(("model", "primary")) == expected_starts
+    assert manager.events.count(("create", "primary")) == 1  # Reuse VM, reload only model.
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("attempts", [0, 1])
+def test_new_private_dataset_pod_needs_token_before_allocating(guarded, resume, attempts):
+    from tests.test_github_datasets import source, COMMIT
+
+    store, manager, _, ran = guarded
+    enqueue(store, "A", "nebius-h200")
+    store.pin_github_dataset("A", source(commit=COMMIT))
+    command = (["bash", "-c", api._build_resume_shell_command("A", "resume", [], "nebius-h200")]
+               if resume else ["coding-agent-bench", "run"])
+    with store._connect() as conn:
+        conn.execute("UPDATE jobs SET command = ?, github_token_required = 1, nebius_retry_attempts = ? WHERE job_id = 'A'",
+                     (json.dumps(command), attempts))
+    asyncio.run(api._restore_jobs())
+    queued = next(item for item in api._job_queue if item.job_id == "A")
+    assert queued.github_token is None
+    asyncio.run(api._process_queued_job(queued))
+    assert not ran and not manager.events
+    assert store.get("A")["status"] == "failed"
+    assert "fresh GitHub token" in store.get("A")["error"]
+
+
 @pytest.mark.parametrize("phase", ["stop_old_model", "start_new_model"])
 def test_model_readiness_timeout_cancels_task_then_cleans_owned_vm(guarded, monkeypatch, phase):
     store, manager, pool, ran = guarded

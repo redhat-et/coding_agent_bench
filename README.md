@@ -468,9 +468,11 @@ types or pricing policy; cross-region search requires explicit opt-in below.
   responses. Waiting survives queue-service restarts. Matching partially
   created VMs are adopted rather than blindly deleted/recreated.
 - GitHub tokens stay only in memory during a capacity wait. If the queue
-  service restarts before a credential-requiring job starts, that job fails
-  with instructions to resubmit with a fresh token; credentials are never
-  written to SQLite.
+  service restarts and a credential-requiring job needs a new pod, that job
+  fails before fresh VM allocation with instructions to resubmit/resume with
+  a fresh token. This also applies to queued resume commands. An existing
+  prepared pod can reuse its ephemeral dataset without fetching or requiring
+  the token again; credentials are never written to SQLite.
 
 The existing paused/preempted-job recovery remains separate from this
 initial-provisioning retry path.
@@ -504,11 +506,20 @@ is no arbitrary timeout that silently unlocks an uncertain pool; an outcome
 that cannot be established requires operator reconciliation.
 
 Cancellation retains the owner in `cancelling` until its VM is confirmed gone.
+When cancellation or terminal recovery begins after the provisioning guard was
+released, it claims a cleanup guard and records the target before deletion.
+An unresolved VM deletion does not exhaust its retries and advance unrelated
+jobs; the owner remains recoverable until reconciliation confirms cleanup.
 A known deletion can be settled by confirmed absence, including after a lost
 delete response. Startup/idle cleanup do not discard the guard. It survives
 queue-service restarts and also covers uncertain preemption-recovery starts.
 Cancellations during read-only discovery, before any VM request or observation,
 can finish normally because no provider mutation was sent.
+
+Compatible idle VMs still reuse their model server while it remains running.
+If an idle VM stops/restarts, its cached model-ready state is invalidated and
+the server is started again before the next benchmark. A lost start response
+also invalidates readiness; downloaded weights can still be reused on disk.
 
 The settled pool placement is also retained so an idle VM in a region that does
 not support the next job's different hardware can be cleaned up before a new

@@ -667,8 +667,8 @@ class NebiusInstanceManager:
             logger.info(f"Instance {instance_name} in {state}, waiting for {target}...")
             await asyncio.sleep(interval)
 
-    async def start_instance(self, instance_name: str):
-        """Start a stopped instance and wait until it is RUNNING."""
+    async def start_instance(self, instance_name: str) -> bool:
+        """Ensure RUNNING; return whether a restart/transition invalidates model readiness."""
         try:
             instance_details = await self.get_instance(instance_name)
         except Exception as e:
@@ -685,7 +685,7 @@ class NebiusInstanceManager:
 
         if state == "RUNNING":
             logger.info(f"Instance {instance_name} ({instance_id}) is already running")
-            return
+            return False
 
         if state in ["STOPPED", "STOPPING", "STARTING", "CREATING"]:
             if state in ["STOPPED", "STOPPING"]:
@@ -697,11 +697,11 @@ class NebiusInstanceManager:
                 await self.mutate_instance("start", args)
                 await self._wait_for_instance_state(instance_name, "RUNNING")
                 logger.info(f"Instance {instance_name} ({instance_id}) is now running")
-                return
+                return True
             logger.info(f"Instance {instance_name} ({instance_id}) is {state}, waiting for RUNNING")
             await self._wait_for_instance_state(instance_name, "RUNNING")
             logger.info(f"Instance {instance_name} ({instance_id}) is now running")
-            return
+            return True
 
         raise RuntimeError(f"Instance {instance_name} ({instance_id}) is in unexpected state: {state}")
 
@@ -1168,10 +1168,14 @@ class RegionalNebiusOrchestrator:
         self._annotate(child, location)
         return name
 
+    def recovery_location(self):
+        """Return this job's exact cleanup target, without sweeping other projects."""
+        return self._bound or (self._legacy if self._legacy_recovery else None)
+
     async def delete_recovered_instance(self):
         """Clean only this job's recorded or verified legacy placement, never sweep."""
         async with self._lock:
-            location = self._bound or (self._legacy if self._legacy_recovery else None)
+            location = self.recovery_location()
             if location is None:
                 logger.info("Skipping cleanup: this job has not selected or owned a Nebius VM")
                 return

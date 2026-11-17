@@ -1620,20 +1620,6 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             return
         if queued.github_dataset is None and row.get("github_dataset"):
             queued.github_dataset = GitHubDataset.model_validate_json(row["github_dataset"])
-        if (row["status"] == JobStatus.QUEUED.value and row.get("nebius_retry_attempts", 0)
-                and row.get("github_token_required") and queued.github_token is None
-                and not is_resume_command(command)):
-            # Tokens never enter SQLite. A restarted private-repository intake
-            # cannot prepare its dataset without the caller supplying one again.
-            job_store.update_status_if(
-                job_id, JobStatus.QUEUED, JobStatus.FAILING if guard and guard["job_id"] == job_id else JobStatus.FAILED,
-                error="Capacity wait interrupted by restart; resubmit with a fresh GitHub token",
-            )
-            if guard and guard["job_id"] == job_id:
-                row = job_store.get(job_id)
-                if await _nebius_pool().reconcile(row, cleanup=True):
-                    await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=row["error"])
-            return
         if guard and guard["job_id"] == job_id and not await _nebius_pool().reconcile(
             row, cleanup=row["status"] in (JobStatus.CANCELLING.value, JobStatus.FAILING.value, JobStatus.COMPLETING.value),
         ):
@@ -1643,6 +1629,8 @@ async def _process_queued_job(queued: QueuedJob) -> None:
             command = json.loads(row["command"])
             server_url, model_name = row["server_url"], row["model_name"]
         if row["status"] == JobStatus.PAUSED.value:
+            if row.get("github_token_required") and queued.github_token is None:
+                return  # Manual token-aware resume is required for a new pod.
             if not await _recover_paused_job(row):
                 return
             adopt_existing = False
@@ -1654,13 +1642,15 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         if row["status"] in (JobStatus.COMPLETING.value, JobStatus.FAILING.value):
             final_status = JobStatus.COMPLETED if row["status"] == JobStatus.COMPLETING.value else JobStatus.FAILED
             if nebius_gpu_config is not None and _nebius:
-                await _nebius_pool().cleanup(job_id)
+                if not await _nebius_pool().cleanup(job_id):
+                    return
             await _retry_terminal_job(job_id, oj, final_status, error=row["error"])
             return
 
         if row["status"] == JobStatus.CANCELLING.value:
             if nebius_gpu_config is not None and _nebius:
-                await _nebius_pool().cleanup(job_id)
+                if not await _nebius_pool().cleanup(job_id):
+                    return
             await _retry_cancellation(job_id, oj)
             return
 
@@ -1707,13 +1697,17 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                         await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
                         continue
                     if nebius_gpu_config is not None and _nebius:
-                        await _nebius_pool().cleanup(job_id)
+                        job_store.update_status(job_id, JobStatus.FAILING, error=str(e))
+                        if not await _nebius_pool().cleanup(job_id):
+                            return
                     await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=str(e))
                     return
             if existing is None:
                 if row["status"] == JobStatus.RUNNING.value:
                     if nebius_gpu_config is not None and _nebius:
-                        await _nebius_pool().cleanup(job_id)
+                        job_store.update_status(job_id, JobStatus.FAILING, error="OpenShift Job missing after server restart")
+                        if not await _nebius_pool().cleanup(job_id):
+                            return
                     await _retry_terminal_job(
                         job_id,
                         oj,
@@ -1722,6 +1716,20 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                     )
                     return
                 adopt_existing = False
+
+        if not adopt_existing and row.get("github_token_required") and queued.github_token is None:
+            # A prepared existing pod retains its dataset in emptyDir and needs
+            # no fetch. A new pod (including resume) has no cache to reuse.
+            error = "A fresh GitHub token is required to prepare the dataset in a new pod; resubmit or resume with credentials"
+            needs_cleanup = nebius_gpu_config is not None and _nebius and (
+                (guard and guard["job_id"] == job_id) or NebiusJobOwnership.from_job(row).claimed
+            )
+            job_store.update_status(job_id, JobStatus.FAILING if needs_cleanup else JobStatus.FAILED, error=error)
+            if needs_cleanup:
+                if not await _nebius_pool().cleanup(job_id):
+                    return
+                await _retry_terminal_job(job_id, oj, JobStatus.FAILED, error=error)
+            return
 
         if adopt_existing and nebius_gpu_config is not None and _nebius:
             try:
@@ -1847,12 +1855,15 @@ async def _process_queued_job(queued: QueuedJob) -> None:
         if _shutting_down:
             raise
         if _parse_nebius_url(server_url) is not None and _nebius:
+            # _run_job may already have finished workload cancellation. Keep
+            # the durable row recoverable until VM deletion is also confirmed.
+            job_store.update_status(job_id, JobStatus.CANCELLING)
             guard = job_store.nebius_guard()
             if guard and guard["job_id"] == job_id:
-                job_store.update_status_if(job_id, JobStatus.QUEUED, JobStatus.CANCELLING)
                 if not await _nebius_pool().reconcile(job_store.get(job_id), cleanup=True):
                     return
-            await _nebius_pool().cleanup(job_id)
+            if not await _nebius_pool().cleanup(job_id):
+                return
         if not await _finish_cancellation(job_id, oj, signal=True):
             await _retry_cancellation(job_id, oj)
 

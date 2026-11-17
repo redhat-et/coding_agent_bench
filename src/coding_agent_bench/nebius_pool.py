@@ -183,8 +183,18 @@ class NebiusOrchestrator:
             self._observe_vm()
             logger.info(f"Ensuring nebius instance {instance_name} is running")
             try:
-                await self._manager.start_instance(instance_name)
+                state = self._instances[instance_name]
+                if state.current_model is not None:
+                    details = await self._manager.get_instance(instance_name)
+                    if details.get("status", {}).get("state") != "RUNNING":
+                        state.current_model = None
+                # A restart can also happen after the preceding state read.
+                if await self._manager.start_instance(instance_name):
+                    state.current_model = None
             except Exception as e:
+                # A lost start response cannot preserve a claim that the old
+                # container is still running, even if the next lookup says RUNNING.
+                self._instances[instance_name].current_model = None
                 if "not found" in str(e).lower() or "NotFound" in str(e):
                     logger.warning(f"Instance {instance_name} no longer exists, recreating")
                     del self._instances[instance_name]
@@ -628,6 +638,7 @@ class NebiusPool:
             if outcome == ReconcileOutcome.ABSENT:
                 self.store.release_nebius_guard(row["job_id"])
                 self.configure(None)
+                self.backend.forget_placement(location)
             return True
         except Exception as error:
             reason = str(error)
@@ -652,12 +663,15 @@ class NebiusPool:
             can_use=lambda selected, legacy: not self.claimed_elsewhere(job_id, selected, legacy),
         )
 
-    async def cleanup(self, job_id: str) -> None:
-        """Retry scoped deletion, preserving unresolved guards and other owners."""
+    async def cleanup(self, job_id: str) -> bool:
+        """Confirm scoped cleanup before callers finalize a job.
+
+        Terminal/cancellation cleanup needs its own guard after the benchmark's
+        provisioning guard has been released, just like background deletion.
+        """
         assert self.backend is not None
         if job_id == "startup":
-            await self.cleanup_background(startup=True)
-            return
+            return await self.cleanup_background(startup=True)
         for attempt in range(1, self.cleanup_attempts + 1):
             guard = self.store.nebius_guard()
             if guard:
@@ -666,26 +680,32 @@ class NebiusPool:
                 if job_id == guard["job_id"]:
                     row = self.store.get(job_id)
                     if row:
-                        await self.reconcile(row, cleanup=True)
-                return
+                        return await self.reconcile(row, cleanup=True)
+                return False
             row = self.store.get(job_id)
             ownership = NebiusJobOwnership.from_job(row) if row else NebiusJobOwnership()
             if not ownership.claimed:
-                return
+                return True
             try:
                 if isinstance(self.backend, RegionalNebiusOrchestrator):
-                    self.bind(row)
-                    await self.backend.delete_recovered_instance()
+                    location = ownership.location
+                    if location is None:
+                        self.bind(row)
+                        location = self.backend.recovery_location()
                 elif isinstance(self.backend, NebiusOrchestrator):
                     if ownership.location is None and not ownership.cleanup_legacy:
-                        return
+                        return True
                     location = ownership.location or self.backend.configured_location("")
-                    if self.claimed_elsewhere(job_id, location, True):
-                        return
-                    await self.backend.delete_placement(location)
                 else:
                     await self.backend.delete_recovered_instance()
-                return
+                    return True
+                if location is None or self.claimed_elsewhere(job_id, location, self.backend.is_legacy_placement(location)):
+                    return True
+                if not self.store.claim_nebius_guard(job_id):
+                    return False
+                if not self.store.record_nebius_idle_cleanup(job_id, location):
+                    return False
+                return await self.reconcile(row, cleanup=True)
             except Exception:
                 logger.exception(
                     f"Unable to delete recovered Nebius instance for {job_id} "
@@ -693,4 +713,5 @@ class NebiusPool:
                 )
                 if attempt < self.cleanup_attempts:
                     await asyncio.sleep(self.cleanup_retry_seconds)
-        logger.error(f"Nebius cleanup exhausted for {job_id}; advancing recovery")
+        logger.error(f"Nebius cleanup exhausted for {job_id}; retaining recovery state")
+        return False

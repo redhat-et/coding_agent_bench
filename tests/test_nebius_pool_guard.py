@@ -144,6 +144,93 @@ def test_rejected_placement_write_preserves_existing_uncertain_guard(guarded, mo
     assert not manager.events
 
 
+@pytest.mark.parametrize("mode", ["single", "regional"])
+@pytest.mark.parametrize("deleted_remotely", [False, True])
+@pytest.mark.parametrize("restart", [False, True])
+def test_running_job_cancellation_guards_vm_delete_until_confirmed(guarded, monkeypatch, mode, deleted_remotely, restart):
+    store, manager, backend, ran = guarded
+    manager.lost["start"] = False
+    if mode == "single":
+        backend = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+        monkeypatch.setattr(api, "_nebius", backend)
+    original_run = api._run_job
+    original_delete = type(manager).delete_instance
+    monkeypatch.setattr(api.OpenshiftJob, "_signal_job_pod", AsyncMock())
+    first = enqueue(store, "A", "nebius-h200")
+    external = enqueue(store, "external", "https://external.example")
+    seen = []
+
+    async def cancel_running(job_id, *args, **kwargs):
+        assert store.nebius_guard() is None  # Provisioning has already finished.
+        assert backend.has_busy_instance()
+        # Match _run_job: workload cleanup may finish before VM cleanup begins.
+        store.update_status(job_id, api.JobStatus.CANCELLED)
+        raise asyncio.CancelledError
+
+    async def lost_delete(self, name):
+        guard = store.nebius_guard()
+        assert guard["job_id"] == "A"
+        assert guard["operation"] == "delete"
+        assert guard["state"] == "inflight"
+        location = json.loads(guard["location"])
+        assert (location["project_id"], location["instance_name"]) == (self.project_id, name)
+        seen.append(name)
+        if deleted_remotely:
+            await original_delete(self, name)
+        raise NebiusCommandTimeout("Delete response lost")
+
+    monkeypatch.setattr(api, "_run_job", cancel_running)
+    monkeypatch.setattr(type(manager), "delete_instance", lost_delete)
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == "cancelling"
+    assert store.nebius_guard()["job_id"] == "A"
+    assert len(seen) == 1  # Never blindly repeat an uncertain delete.
+    monkeypatch.setattr(api, "_run_job", original_run)
+    asyncio.run(api._process_queued_job(external))
+    assert not ran
+    if restart:
+        monkeypatch.setattr(api, "job_store", api.JobStore(store._db_path))
+        backend = (api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+                   if mode == "single" else regional(manager))
+        monkeypatch.setattr(api, "_nebius", backend)
+        asyncio.run(api._restore_jobs())
+        first = next(item for item in api._job_queue if item.job_id == "A")
+    monkeypatch.setattr(type(manager), "delete_instance", original_delete)
+    due(store, "A")
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == "cancelled"
+    assert store.nebius_guard() is None
+    assert not manager.cloud and not backend.has_busy_instance()
+    asyncio.run(api._process_queued_job(external))
+    assert ran == ["external"]
+    asyncio.run(api._process_queued_job(enqueue(store, "B", "nebius-b200")))
+    assert ran == ["external", "B"]  # No stale busy-cache entry blocks the pool.
+
+
+@pytest.mark.parametrize("status", [api.JobStatus.FAILING, api.JobStatus.COMPLETING])
+def test_terminal_recovery_does_not_finalize_until_vm_cleanup_succeeds(guarded, monkeypatch, status):
+    store, manager, _, _ = guarded
+    manager.lost["start"] = False
+    first = enqueue(store, "A", "nebius-h200")
+    asyncio.run(api._process_queued_job(first))
+    store.update_status("A", status)
+    original = type(manager).delete_instance
+
+    async def timeout(self, name):
+        raise NebiusCommandTimeout("Unknown delete")
+
+    monkeypatch.setattr(type(manager), "delete_instance", timeout)
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == status.value
+    assert store.nebius_guard()["job_id"] == "A"
+    monkeypatch.setattr(type(manager), "delete_instance", original)
+    due(store, "A")
+    asyncio.run(api._process_queued_job(first))
+    expected = "failed" if status == api.JobStatus.FAILING else "completed"
+    assert store.get("A")["status"] == expected
+    assert store.nebius_guard() is None
+
+
 @pytest.mark.parametrize("mode", ["regional", "single"])
 def test_lost_start_blocks_different_hardware_until_owner_runs(guarded, monkeypatch, mode):
     store, manager, pool, ran = guarded
