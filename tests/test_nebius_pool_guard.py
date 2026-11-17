@@ -93,6 +93,57 @@ def due(store, name):
         conn.execute("UPDATE jobs SET nebius_retry_at = 0 WHERE job_id = ?", (name,))
 
 
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("status", [api.JobStatus.QUEUED, api.JobStatus.PAUSED])
+def test_cancel_before_single_region_placement_write_never_provisions(guarded, monkeypatch, restart, status):
+    store, manager, _, ran = guarded
+    monkeypatch.setattr(api, "_nebius", api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600))
+    first = enqueue(store, "A", "nebius-h200")
+    store.update_status("A", status)
+    first.adopt_existing = status == api.JobStatus.PAUSED
+    external = enqueue(store, "external", "https://external.example")
+    original = store.record_nebius_location
+
+    def cancel_before_write(job_id, location):
+        assert store.nebius_guard()["job_id"] == job_id
+        store.update_status(job_id, api.JobStatus.CANCELLING)
+        return original(job_id, location)
+
+    monkeypatch.setattr(store, "record_nebius_location", cancel_before_write)
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == "cancelling"
+    assert store.get("A")["nebius_location"] is None
+    assert nebius_utils.ProvisioningRecord.from_row(store.nebius_guard()).untouched
+    assert not manager.cloud
+    assert not any(event in ("create", "start", "delete", "model") for event, _ in manager.events)
+    if restart:
+        monkeypatch.setattr(api, "job_store", api.JobStore(store._db_path))
+        monkeypatch.setattr(api, "_nebius", api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600))
+        asyncio.run(api._restore_jobs())
+        first = next(item for item in api._job_queue if item.job_id == "A")
+    asyncio.run(api._process_queued_job(first))
+    assert store.get("A")["status"] == "cancelled"
+    assert store.nebius_guard() is None
+    assert not manager.cloud
+    asyncio.run(api._process_queued_job(external))
+    assert ran == ["external"]
+
+
+def test_rejected_placement_write_preserves_existing_uncertain_guard(guarded, monkeypatch):
+    store, manager, _, _ = guarded
+    backend = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+    monkeypatch.setattr(api, "_nebius", backend)
+    enqueue(store, "A", "nebius-h200")
+    assert api._nebius_pool().begin("A", "h200")
+    store.update_nebius_guard("A", "inflight", "create")
+    store.update_nebius_guard("A", "uncertain", "create")
+    store.update_status("A", api.JobStatus.CANCELLING)
+    before = store.nebius_guard()
+    assert not api._nebius_pool().begin("A", "h200")
+    assert store.nebius_guard() == before
+    assert not manager.events
+
+
 @pytest.mark.parametrize("mode", ["regional", "single"])
 def test_lost_start_blocks_different_hardware_until_owner_runs(guarded, monkeypatch, mode):
     store, manager, pool, ran = guarded

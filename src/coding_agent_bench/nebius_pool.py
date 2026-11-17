@@ -506,8 +506,11 @@ class NebiusPool:
         self.configure(job_id)
         if isinstance(self.backend, (NebiusOrchestrator, RegionalNebiusOrchestrator)):
             location = self.backend.configured_location(gpu_config)
-            if location:
-                self.store.record_nebius_location(job_id, location)
+            if location and not self.store.record_nebius_location(job_id, location):
+                # Cancellation may have won before the journal write. Never
+                # provision without it. Keep the guard for normal reconciliation:
+                # an untouched claim releases safely; prior uncertainty must stay.
+                return False
         return True
 
     async def cleanup_background(self, *, startup: bool = False) -> bool:
