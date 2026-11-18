@@ -5,6 +5,8 @@
 #
 # Sends a hard coding prompt (expect gpt-luna), an easy one (expect qwen), and
 # probes the Service from a separate pod. Requires semantic-router-secret/OPENAI_API_KEY.
+# The hard prompt gets a 10000-token budget: GPT Luna is a reasoning model and
+# spends thousands of tokens thinking before it writes any text.
 set -euo pipefail
 
 NS="${1:?usage: $0 <namespace> [prompt]}"
@@ -29,7 +31,7 @@ echo "== hard coding prompt (expect hard-route -> gpt-luna) =="
 code=$(curl -s -o /tmp/sr-chat.json -w '%{http_code}' \
   -X POST "http://127.0.0.1:$PORT/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d "{\"model\":\"vllm-sr/auto\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}")
+  -d "{\"model\":\"vllm-sr/auto\",\"max_tokens\":10000,\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}")
 echo "HTTP $code"
 head -c 400 /tmp/sr-chat.json; echo
 
@@ -37,7 +39,7 @@ echo "== easy coding prompt (expect default-route -> qwen) =="
 code=$(curl -s -o /tmp/sr-chat2.json -w '%{http_code}' \
   -X POST "http://127.0.0.1:$PORT/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"vllm-sr/auto","max_tokens":32,"messages":[{"role":"user","content":"Write a python function that returns the sum of two numbers."}]}')
+  -d '{"model":"vllm-sr/auto","max_tokens":2000,"messages":[{"role":"user","content":"Write a python function that returns the sum of two numbers."}]}')
 echo "HTTP $code"
 head -c 400 /tmp/sr-chat2.json; echo
 

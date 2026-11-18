@@ -5,9 +5,9 @@
 #     (injected from semantic-router-secret by deployment.yaml).
 #   - qwen: self-hosted Qwen served by vLLM on Nebius, outside this namespace.
 #
-# Fill in the two TODO values below before applying:
-#   1. the Qwen endpoint (host:port) and protocol, and its served model name
-#   2. the OpenAI model id for GPT Luna
+# Fill in the TODO values below before applying: the Qwen endpoint (host:port),
+# protocol, and served model name. The router will not start with the
+# placeholders. GPT Luna's model id (gpt-6-luna) is already set.
 # The listener binds 0.0.0.0 so other pods can reach it.
 version: v0.5
 listeners:
@@ -33,8 +33,8 @@ providers:
           protocol: http
           weight: 100
     - name: gpt-luna
-      # TODO: the exact OpenAI model id for GPT Luna.
-      provider_model_id: gpt-luna
+      # OpenAI model id for GPT Luna.
+      provider_model_id: gpt-6-luna
       api_format: openai
       capabilities: [chat]
       backend_refs:
