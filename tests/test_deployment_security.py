@@ -19,6 +19,7 @@ DEPLOYMENT_PATHS = (
 INTAKE_CRONJOB_PATH = (
     Path(__file__).parents[1] / "deploy" / "intake-poller" / "base" / "cronjob.yaml"
 )
+ROUTER_BASE = Path(__file__).parents[1] / "semantic-router"
 
 
 def _deployment_objects() -> dict[str, dict]:
@@ -110,3 +111,59 @@ def test_deployed_workers_use_the_queue_image(overlay, monkeypatch):
     job = OpenshiftJob("benchmark")
     for spec in (job._job_spec(["harbor", "run"]), job._resume_job_spec("resume")):
         assert spec["spec"]["template"]["spec"]["containers"][0]["image"] == container["image"]
+
+
+def _router_container() -> dict:
+    with (ROUTER_BASE / "deployment.yaml").open() as manifest:
+        deployment = yaml.safe_load(manifest)
+    return deployment["spec"]["template"]["spec"]["containers"][0]
+
+
+def test_router_runs_hardened_and_standalone():
+    container = _router_container()
+    # Standalone mode serves config.listeners itself; without these args the
+    # router runs in extproc mode and never listens on 8899.
+    assert "-gateway=standalone" in container["args"]
+    assert "-listener-address=0.0.0.0" in container["args"]
+    assert any(port["containerPort"] == 8899 for port in container["ports"])
+
+    security = container["securityContext"]
+    assert security["runAsNonRoot"] is True
+    assert security["allowPrivilegeEscalation"] is False
+    assert security["readOnlyRootFilesystem"] is True
+    assert security["capabilities"]["drop"] == ["ALL"]
+    assert security["seccompProfile"]["type"] == "RuntimeDefault"
+
+
+def test_router_is_exposed_over_edge_tls():
+    with (ROUTER_BASE / "service.yaml").open() as manifest:
+        service = yaml.safe_load(manifest)
+    with (ROUTER_BASE / "route.yaml").open() as manifest:
+        route = yaml.safe_load(manifest)
+
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"]["ports"][0]["port"] == 8899
+    assert route["spec"]["tls"]["termination"] == "edge"
+    assert route["spec"]["tls"]["insecureEdgeTerminationPolicy"] == "Redirect"
+    assert route["spec"]["to"]["name"] == service["metadata"]["name"]
+    assert route["spec"]["port"]["targetPort"] == service["spec"]["ports"][0]["name"]
+
+
+def test_router_folder_renders_config_route_and_no_envoy():
+    cli = shutil.which("oc") or shutil.which("kubectl")
+    if cli is None:
+        pytest.skip("oc or kubectl is required to render the router folder")
+    rendered = subprocess.run(
+        [cli, "kustomize", str(ROUTER_BASE)], check=True, capture_output=True,
+        text=True, timeout=30,
+    ).stdout
+    objects = {obj["kind"]: obj for obj in yaml.safe_load_all(rendered)}
+    assert "Route" in objects
+    config_map = objects["ConfigMap"]
+    assert "config.yaml" in config_map["data"]
+
+    spec = objects["Deployment"]["spec"]["template"]["spec"]
+    # No Envoy sidecar in standalone mode.
+    assert [c["name"] for c in spec["containers"]] == ["semantic-router"]
+    volumes = {v["name"]: v for v in spec["volumes"]}
+    assert volumes["config-volume"]["configMap"]["name"] == config_map["metadata"]["name"]

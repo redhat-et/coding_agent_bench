@@ -1,0 +1,28 @@
+# Scoped to the one ConfigMap that backs the mounted config file. The router
+# patches it through the Kubernetes API (upstream issue #3688); this grants no
+# general configmaps access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: semantic-router-config-writer
+  labels:
+    app: semantic-router
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["semantic-router-config"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: semantic-router-config-writer
+  labels:
+    app: semantic-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: semantic-router-config-writer
+subjects:
+  - kind: ServiceAccount
+    name: semantic-router

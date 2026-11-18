@@ -1,0 +1,16 @@
+# Holds the decision model and Hugging Face cache (HF_HOME=/app/models/.cache).
+# Upstream's chart default is 10Gi and notes its smallest model alone takes
+# 4.3 GB. No storageClassName: use the cluster's default class.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: semantic-router-models
+  labels:
+    app: semantic-router
+spec:
+  resources:
+    requests:
+      storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce

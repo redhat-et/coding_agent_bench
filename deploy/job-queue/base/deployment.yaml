@@ -66,6 +66,12 @@ spec:
           value: /app/data/jobs.db
         - name: CODING_AGENT_BENCH_IMAGE
           value: ghcr.io/redhat-et/coding_agent_bench:tag
+        # The semantic router is a cluster-internal HTTP service. Only this
+        # named host may resolve privately and skip the HTTPS-only rule; all
+        # other model URLs keep the public-HTTPS requirement. Append after the
+        # entries above: the overlays patch env/0 (ENVIRONMENT).
+        - name: MODEL_ENDPOINT_ALLOWED_HOSTS
+          value: semantic-router
         envFrom:
         - secretRef:
             name: job-queue-secret

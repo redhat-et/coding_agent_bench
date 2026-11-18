@@ -1,6 +1,7 @@
 """Validation helpers for intake requests and model server URLs."""
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -8,6 +9,22 @@ from coding_agent_bench.intake.config import ALLOWED_AGENTS
 from coding_agent_bench.nebius_utils import RESOURCE_CONFIG_REGISTRY
 
 NEBIUS_PREFIX = "nebius-"
+
+# Hostnames permitted to resolve to private addresses and to use plain HTTP.
+# Cluster-internal model endpoints (for example an in-cluster semantic router
+# Service) are otherwise indistinguishable from SSRF targets. Empty by default,
+# so ordinary deployments keep the public-HTTPS-only rule.
+ALLOWED_PRIVATE_HOSTS_ENV = "MODEL_ENDPOINT_ALLOWED_HOSTS"
+
+
+def _allowed_private_hosts() -> set[str]:
+    """Return the configured allowlist of cluster-internal model hostnames."""
+    raw = os.environ.get(ALLOWED_PRIVATE_HOSTS_ENV, "")
+    return {
+        entry.strip().rstrip(".").lower()
+        for entry in raw.split(",")
+        if entry.strip()
+    }
 
 
 def _resolve_server_host(host: str, port: int | None) -> set[str]:
@@ -54,7 +71,9 @@ def validate_server_url(
     """Validate a model URL without requiring a configured hostname allowlist.
 
     Hostnames are resolved during validation so private, loopback, link-local, and
-    reserved addresses cannot be submitted as model endpoints. Callers should
+    reserved addresses cannot be submitted as model endpoints, except for hosts
+    named in MODEL_ENDPOINT_ALLOWED_HOSTS (cluster-internal endpoints, which may
+    also use HTTP). Callers should
     revalidate immediately before worker creation because DNS can change after
     this check. Managed endpoints may opt out of the HTTPS-only check when the
     provider returns a public HTTP endpoint; ordinary intake URLs remain
@@ -62,14 +81,19 @@ def validate_server_url(
     """
     errors: list[str] = []
     parsed = urlparse(server_url)
+    if not parsed.netloc or parsed.hostname is None:
+        errors.append("Server URL is not a valid URL")
+        return errors
 
-    allowed_schemes = {"https"} if require_https else {"http", "https"}
+    host = parsed.hostname.rstrip(".").lower()
+    # An allowlisted host is a named, cluster-internal endpoint: it may use HTTP
+    # and may resolve to a private address. Nothing else changes for it.
+    allowlisted = host in _allowed_private_hosts()
+
+    allowed_schemes = {"https"} if require_https and not allowlisted else {"http", "https"}
     if parsed.scheme not in allowed_schemes:
         expected = "https" if require_https else "http(s)"
         errors.append(f"Server URL must use {expected} scheme, got '{parsed.scheme or 'none'}'")
-        return errors
-    if not parsed.netloc or parsed.hostname is None:
-        errors.append("Server URL is not a valid URL")
         return errors
     if parsed.username or parsed.password:
         errors.append("Server URL must not contain username or password credentials")
@@ -81,8 +105,6 @@ def validate_server_url(
         errors.append("Server URL contains an invalid port")
         return errors
 
-    host = parsed.hostname.rstrip(".").lower()
-
     try:
         addresses = {host} if _is_ip_literal(host) else _resolve_server_host(host, port)
     except ValueError as exc:
@@ -91,6 +113,8 @@ def validate_server_url(
     if not addresses:
         errors.append(f"Server hostname '{host}' did not resolve to an address")
         return errors
+    if allowlisted:
+        return []
 
     blocked = sorted(address for address in addresses if _is_private_or_reserved(address))
     if blocked:
