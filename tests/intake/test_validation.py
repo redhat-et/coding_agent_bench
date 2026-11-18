@@ -139,3 +139,55 @@ def test_dns_private_address_is_rejected(monkeypatch):
     )
     errors = validate_server_url("https://vllm.example.com")
     assert any("private" in error.lower() for error in errors)
+
+
+def _private_dns(monkeypatch, address="192.168.127.2"):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))
+        ],
+    )
+
+
+def test_allowlisted_host_permits_private_http(monkeypatch):
+    """A named in-cluster endpoint may use HTTP and a private address."""
+    monkeypatch.setenv(
+        "MODEL_ENDPOINT_ALLOWED_HOSTS",
+        "semantic-router.coding-agent-bench-with-vllm-sr.svc",
+    )
+    _private_dns(monkeypatch)
+    url = "http://semantic-router.coding-agent-bench-with-vllm-sr.svc:8899"
+    assert validate_server_url(url) == []
+
+
+def test_allowlist_is_case_and_whitespace_insensitive(monkeypatch):
+    monkeypatch.setenv("MODEL_ENDPOINT_ALLOWED_HOSTS", "  Semantic-Router.SVC , other ")
+    _private_dns(monkeypatch)
+    assert validate_server_url("http://semantic-router.svc:8899") == []
+
+
+def test_private_host_is_still_rejected_without_allowlist(monkeypatch):
+    monkeypatch.delenv("MODEL_ENDPOINT_ALLOWED_HOSTS", raising=False)
+    _private_dns(monkeypatch)
+    errors = validate_server_url("https://semantic-router.svc:8899")
+    assert any("private" in error.lower() for error in errors)
+
+
+def test_allowlist_does_not_permit_credentials_or_bad_ports(monkeypatch):
+    monkeypatch.setenv("MODEL_ENDPOINT_ALLOWED_HOSTS", "semantic-router.svc")
+    _private_dns(monkeypatch)
+    assert validate_server_url("http://user:pass@semantic-router.svc:8899")
+    assert validate_server_url("http://semantic-router.svc:99999")
+
+
+def test_allowlisted_host_must_still_resolve(monkeypatch):
+    monkeypatch.setenv("MODEL_ENDPOINT_ALLOWED_HOSTS", "semantic-router.svc")
+
+    def _fail(*args, **kwargs):
+        raise socket.gaierror("nope")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fail)
+    errors = validate_server_url("http://semantic-router.svc:8899")
+    assert any("could not be resolved" in error for error in errors)

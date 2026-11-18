@@ -1,0 +1,24 @@
+# Optional. Inside the cluster, jobs should use http://semantic-router:8899.
+# The Route exists for local inspection of a public cluster; the listener has no
+# client auth (listeners[].api_keys is empty), so on a public cluster anyone with
+# the hostname can spend the router's OpenRouter key.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: semantic-router
+  labels:
+    app: semantic-router
+    component: router
+  annotations:
+    haproxy.router.openshift.io/timeout: 600s
+spec:
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: semantic-router
+    weight: 100
+  wildcardPolicy: None

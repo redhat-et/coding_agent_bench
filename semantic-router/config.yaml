@@ -1,0 +1,86 @@
+# vLLM Semantic Router config (standalone mode).
+#
+# Two backends:
+#   - gpt-luna: OpenAI, the frontier tier. Key comes from OPENAI_API_KEY
+#     (injected from semantic-router-secret by deployment.yaml).
+#   - qwen: self-hosted Qwen served by vLLM on Nebius, outside this namespace.
+#
+# Fill in the two TODO values below before applying:
+#   1. the Qwen endpoint (host:port) and protocol, and its served model name
+#   2. the OpenAI model id for GPT Luna
+# The listener binds 0.0.0.0 so other pods can reach it.
+version: v0.5
+listeners:
+  - name: http-8899
+    address: 0.0.0.0
+    port: 8899
+    timeout: 300s
+providers:
+  defaults:
+    model: qwen
+  models:
+    - name: qwen
+      # TODO: the --served-model-name of the Nebius vLLM server.
+      provider_model_id: QWEN_SERVED_MODEL_NAME
+      api_format: openai
+      capabilities: [chat]
+      backend_refs:
+        - name: nebius-vllm
+          provider: vllm
+          # TODO: Nebius vLLM host:port, no scheme (e.g. 203.0.113.10:8000).
+          endpoint: QWEN_HOST:QWEN_PORT
+          # TODO: http or https, whichever the server speaks.
+          protocol: http
+          weight: 100
+    - name: gpt-luna
+      # TODO: the exact OpenAI model id for GPT Luna.
+      provider_model_id: gpt-luna
+      api_format: openai
+      capabilities: [chat]
+      backend_refs:
+        - name: openai
+          provider: openai-compatible
+          endpoint: https://api.openai.com/v1
+          protocol: https
+          # openai-compatible has no default auth header; without
+          # header/prefix the key is never sent.
+          auth:
+            header: Authorization
+            prefix: Bearer
+            api_key_env: OPENAI_API_KEY
+          weight: 100
+# Clients select routing through the normal OpenAI `model` field. In v0.5 the
+# bare name `auto` has no implicit meaning; `vllm-sr/auto` is the built-in
+# default alias. Declare it explicitly so the benchmark has a stable name:
+#   --model-name vllm-sr/auto
+entrypoints:
+  - model_names: [vllm-sr/auto]
+    recipe: default
+    default: true
+recipes:
+  - name: default
+    signals:
+      complexity:
+        - name: difficulty
+    decisions:
+      - name: hard-route
+        description: Tasks the decision model judges hard; sent to GPT Luna.
+        priority: 150
+        rules:
+          operator: AND
+          conditions:
+            - type: complexity
+              name: difficulty
+              label: hard
+        modelRefs:
+          - model: gpt-luna
+            use_reasoning: false
+      - name: default-route
+        description: Everything else (easy and medium); the self-hosted Qwen on Nebius.
+        priority: 100
+        rules:
+          operator: AND
+          conditions: []
+        modelRefs:
+          - model: qwen
+            use_reasoning: false

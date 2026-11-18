@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: semantic-router
+  labels:
+    app: semantic-router
+    component: router
+spec:
+  type: ClusterIP
+  selector:
+    app: semantic-router
+    component: router
+  ports:
+    - name: http
+      port: 8899
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9190
+      targetPort: metrics
+      protocol: TCP

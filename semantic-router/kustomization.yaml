@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - route.yaml
+
+# Stable name on purpose: the Role grants access by literal name and the router
+# patches this ConfigMap at runtime. Editing config.yaml therefore needs a
+# restart: oc rollout restart deployment/semantic-router -n <namespace>
+configMapGenerator:
+  - name: semantic-router-config
+    files:
+      - config.yaml
+    options:
+      disableNameSuffixHash: true
+
+labels:
+  - pairs:
+      app: semantic-router

@@ -38,6 +38,7 @@ Reproducible benchmarks for coding agents and models using Harbor
   - [Claude Code VertexAI](#claude-code-vertexai)
   - [Codex OpenAI](#codex-openai)
 - [Deploy models with vLLM](#deploy-models-with-vllm)
+- [Smart routing with vLLM Semantic Router](#smart-routing-with-vllm-semantic-router)
 - [SWE-Bench Acceleration](#swe-bench-acceleration)
   - [Use accelerated images for SWE-bench-verified](#use-accelerated-images-for-swe-bench-verified)
   - [Pre-pull base images](#pre-pull-base-images)
@@ -706,6 +707,17 @@ Apply to your cluster by running:
 ```sh
 oc apply -f deploy/qwen-all-in-one.yml
 ```
+
+## Smart routing with vLLM Semantic Router
+
+[`semantic-router/`](./semantic-router/) is a self-contained deployment of the
+[vLLM Semantic Router](https://github.com/vllm-project/semantic-router) in
+standalone mode. It routes requests between a hosted model (OpenAI) and a
+self-hosted Qwen, and serves an OpenAI-compatible API inside the cluster at
+`http://semantic-router:8899` under the model name `vllm-sr/auto`.
+
+See [`semantic-router/README.md`](./semantic-router/README.md) for the routing
+rules, configuration, deployment steps, and the test script.
 
 ## SWE-Bench Acceleration
 
