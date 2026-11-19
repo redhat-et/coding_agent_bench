@@ -211,24 +211,28 @@ def test_newly_exhausted_resume_can_be_resumed_again(store, monkeypatch):
 def test_checkpoint_claim_and_child_insert_are_atomic(store):
     store.insert("original", "benchmark", "codex", "dataset", "model", "https://model.example.com", [])
     store.update_status("original", api.JobStatus.FAILED, error="checkpoint saved for manual resume")
+    location = {"project_id": "secondary", "instance_name": "checkpoint-0"}
 
     def insert_child(child_id):
         return store.insert(
             child_id, "benchmark--resume", "codex", "dataset", "model",
             "https://model.example.com", [], results_job_name="benchmark",
             resume_parent_id="original",
+            nebius_location=location,
         )
 
     # A failed child insertion must not leave an orphaned parent claim.
     with pytest.raises(sqlite3.IntegrityError):
         insert_child("original")
     assert store.get("original")["resumed_by_job_id"] is None
+    assert store.get("original")["nebius_location"] is None
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(insert_child, ["child-a", "child-b"]))
     assert sorted(results) == [False, True]
     winner = ["child-a", "child-b"][results.index(True)]
     assert store.get("original")["resumed_by_job_id"] == winner
+    assert json.loads(store.get(winner)["nebius_location"]) == location
     assert {row["job_id"] for row in store.list()} == {"original", winner}
 
 

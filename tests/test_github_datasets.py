@@ -575,16 +575,19 @@ def test_auto_recovery_skips_paused_jobs_that_need_github_token(client, monkeypa
 
 
 @pytest.mark.parametrize("pinned", [False, True])
-def test_restart_adopts_only_prepared_github_dataset(client, monkeypatch, pinned):
+@pytest.mark.parametrize("status", [api.JobStatus.QUEUED, api.JobStatus.RUNNING])
+def test_restart_adopts_only_prepared_github_dataset(client, monkeypatch, pinned, status):
     job_id = submit(client).json()["job_id"]
     queued = api._job_queue[0]
     queued.github_token = None
     if pinned:
         queued.github_dataset = source(commit=COMMIT)
         api.job_store.pin_github_dataset(job_id, queued.github_dataset)
-    api.job_store.update_status(job_id, api.JobStatus.RUNNING)
+    api.job_store.update_status(job_id, status)
+    queued.adopt_existing = True
     get_job = AsyncMock(
         side_effect=[
+            {},  # Worker discovers the existing pod before deciding it needs a token.
             {},
             {
                 "status": {
@@ -602,7 +605,7 @@ def test_restart_adopts_only_prepared_github_dataset(client, monkeypatch, pinned
     monkeypatch.setattr(OpenshiftJob, "release_github_dataset", release)
     monkeypatch.setattr(OpenshiftJob, "prepare_github_dataset", prepare)
     asyncio.run(
-        api._run_job(job_id, queued.command, adopt_existing=True, queued_job=queued)
+        api._process_queued_job(queued)
     )
     prepare.assert_not_awaited()
     if pinned:
