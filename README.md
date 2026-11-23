@@ -203,6 +203,14 @@ External endpoints and unknown configurations omit this field unless explicitly
 supplied in model metadata. Export/resume preserves the saved value; historical
 results are not backfilled from today's serving configuration.
 
+CAB records one `configuration.reasoning_effort` value. For managed Nebius
+runs it uses the explicit vLLM chat-template default, when present. If you
+enforce a different effort through the harness, provide the known effective value
+in `leaderboard_metadata.configuration.reasoning_effort` to override it for
+that run. This metadata does not change serving or harness behavior. CAB does
+not infer implicit defaults or audit requests. If no effort is specified, the
+leaderboard displays **Not mentioned**.
+
 Dataset names are generic:
 
 - Harbor Hub: the submitted dataset name, for example `owner/dataset`; a

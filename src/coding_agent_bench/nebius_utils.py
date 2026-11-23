@@ -145,15 +145,30 @@ def get_vllm_args(model_config: ModelConfig, resource_config: type[ResourceConfi
     ]
 
 
-def get_kv_cache_dtype(args: list[str]) -> str | None:
-    """Read the configured cache dtype, not a runtime resolution of 'auto'."""
+def _last_vllm_option(args: list[str], option: str) -> str | None:
     value = None
     for index, argument in enumerate(args):
-        if argument.startswith("--kv-cache-dtype="):
+        if argument.startswith(option + "="):
             value = argument.partition("=")[2] or None
-        elif argument == "--kv-cache-dtype":
+        elif argument == option:
             value = args[index + 1] if index + 1 < len(args) and not args[index + 1].startswith("-") else None
     return value
+
+
+def get_kv_cache_dtype(args: list[str]) -> str | None:
+    """Read the configured cache dtype, not a runtime resolution of 'auto'."""
+    return _last_vllm_option(args, "--kv-cache-dtype")
+
+
+def get_model_reasoning_effort(args: list[str]) -> str | None:
+    """Read the explicit server default, without inferring a template default."""
+    value = _last_vllm_option(args, "--default-chat-template-kwargs")
+    try:
+        kwargs = json.loads(value) if value else {}
+    except json.JSONDecodeError:
+        return None
+    effort = kwargs.get("reasoning_effort") if isinstance(kwargs, dict) else None
+    return effort if isinstance(effort, str) and effort.strip() else None
 
 
 def get_model_max_concurrency(gpu_config: str, model_name: str) -> int:

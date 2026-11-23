@@ -492,6 +492,56 @@ def test_external_endpoint_kv_cache_dtype_is_not_inferred(supplied):
         assert "--leaderboard-metadata-json" not in command
 
 
+@pytest.mark.parametrize("agent, endpoint, model, override, expected", [
+    ("opencode", "nebius-h200", "RedHatAI/Mistral-Small-4-119B-2603-NVFP4", {}, "high"),
+    ("opencode", "nebius-h200", "RedHatAI/Mistral-Small-4-119B-2603-NVFP4", {"reasoning_effort": "low"}, "low"),
+    ("opencode", "nebius-h200", "RedHatAI/Mistral-Small-4-119B-2603-NVFP4", {"reasoning_effort": None}, None),
+    ("oracle", "nebius-h200", "RedHatAI/Mistral-Small-4-119B-2603-NVFP4", {}, None),
+    ("opencode", "nebius-h200", "Qwen/Qwen3.8-27B", {}, None),
+    ("opencode", "https://external.example/v1", "RedHatAI/Mistral-Small-4-119B-2603-NVFP4", {}, None),
+])
+def test_queue_records_explicit_model_effort_unless_run_overrides_it(agent, endpoint, model, override, expected):
+    from coding_agent_bench.api import CreateJobRequest, build_cli_command
+
+    command = build_cli_command(CreateJobRequest(
+        job_name="test", agent=agent, dataset="org/bench", server_url=endpoint,
+        model_name=model, leaderboard_metadata={"configuration": override} if override else None,
+    ))
+    metadata = (json.loads(command[command.index("--leaderboard-metadata-json") + 1])
+                if "--leaderboard-metadata-json" in command else {})
+    configuration = metadata.get("configuration", {})
+    assert configuration.get("reasoning_effort") == expected
+    assert ("reasoning_effort" in configuration) == (expected is not None or bool(override))
+
+
+def test_reasoning_effort_uses_final_vllm_option():
+    from coding_agent_bench.nebius_utils import get_model_reasoning_effort
+
+    args = ["--default-chat-template-kwargs", '{"reasoning_effort":"high"}']
+    assert get_model_reasoning_effort(args + ['--default-chat-template-kwargs={"reasoning_effort":"low"}']) == "low"
+    assert get_model_reasoning_effort(args + ['--default-chat-template-kwargs={"enable_thinking":true}']) is None
+    assert get_model_reasoning_effort(args + ["--default-chat-template-kwargs=invalid"]) is None
+
+
+@pytest.mark.parametrize("verified_effort", [None, "xhigh"])
+def test_export_preserves_verified_effort_without_inference(tmp_path, monkeypatch, verified_effort):
+    job = _job_dir(tmp_path)
+    original_id = leaderboard_results.build_leaderboard_result(job)["benchmark"]["id"]
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "medium")
+    _update(job / "config.json", lambda cfg: cfg["agents"][0].update(
+        name="claude-code", kwargs={"reasoning_effort": "high"},
+        env={"CLAUDE_CODE_EFFORT_LEVEL": "low"},
+    ))
+    if verified_effort is not None:
+        leaderboard_results.save_metadata(job, {"configuration": {"reasoning_effort": verified_effort}})
+    first = json.loads(leaderboard_results.export_on_completion(job, 0).read_text())
+    assert first == leaderboard_results.build_leaderboard_result(job)
+    assert first == json.loads(leaderboard_results.export_on_completion(job, 0).read_text())
+    assert first["configuration"].get("reasoning_effort") == verified_effort
+    assert ("reasoning_effort" in first["configuration"]) == (verified_effort is not None)
+    assert first["benchmark"]["id"] == original_id
+
+
 @pytest.mark.parametrize("cache_dtype", ["fp8", "auto"])
 def test_kv_cache_metadata_survives_automatic_and_manual_exports_without_changing_identity(tmp_path, cache_dtype):
     job = _job_dir(tmp_path)

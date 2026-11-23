@@ -19,7 +19,7 @@ from coding_agent_bench.intake.validation import validate_server_url
 from coding_agent_bench.job import OpenshiftJob, _build_logged_shell_step
 from coding_agent_bench.nebius_utils import (
     NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY, get_model_max_concurrency,
-    get_kv_cache_dtype, get_vllm_args,
+    get_kv_cache_dtype, get_model_reasoning_effort, get_vllm_args,
 )
 from coding_agent_bench.models import ModelConfig, MODEL_REGISTRY
 from coding_agent_bench.utils import (
@@ -2145,9 +2145,13 @@ def build_cli_command(req: CreateJobRequest):
         model["gpu_count"] = resource.tensor_parallel_size
         model_config = MODEL_REGISTRY.get(req.model_name)
         if model_config is not None:
-            kv_cache_dtype = get_kv_cache_dtype(get_vllm_args(model_config, resource))
+            vllm_args = get_vllm_args(model_config, resource)
+            kv_cache_dtype = get_kv_cache_dtype(vllm_args)
             if kv_cache_dtype is not None:
                 model["kv_cache_dtype"] = kv_cache_dtype
+            effort = get_model_reasoning_effort(vllm_args)
+            if effort is not None and req.agent != SupportedAgent.oracle:
+                leaderboard_metadata.setdefault("configuration", {}).setdefault("reasoning_effort", effort)
     if leaderboard_metadata:
         command += ["--leaderboard-metadata-json", json.dumps(leaderboard_metadata)]
     if req.max_retries is not None:
