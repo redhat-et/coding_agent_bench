@@ -145,6 +145,10 @@ class OpenshiftJob:
             ["uv", "run", "--no-sync", "--no-cache", *command],
             f"/app/jobs/{artifact_name}",
         )
+        leaderboard_step = shlex.join([
+            "uv", "run", "--no-sync", "--no-cache", "python", "-m",
+            "coding_agent_bench.leaderboard_results", "leaderboard", f"/app/jobs/{artifact_name}",
+        ]) + ' "$harbor_rc"; '
         # Only openrouter jobs need the OpenRouter key, so scope the secret to
         # them rather than exposing it to every job pod.
         env: list[dict] = [
@@ -190,6 +194,7 @@ class OpenshiftJob:
                                     # Preserve partial results without hiding Harbor's failure.
                                     ("" if before_script is None else (shlex.join(before_script) + " || exit $?; "))
                                     + logged_command
+                                     + " " + leaderboard_step
                                     + " export AWS_ACCESS_KEY_ID=\"$STORAGE_ACCESS_KEY\""
                                     + " AWS_SECRET_ACCESS_KEY=\"$STORAGE_SECRET_KEY\""
                                     + " AWS_DEFAULT_REGION=us-east-1"

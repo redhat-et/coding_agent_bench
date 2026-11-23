@@ -184,6 +184,22 @@ class CliPassthroughTests(unittest.TestCase):
 
 
 class QueuePassthroughTests(unittest.TestCase):
+    def test_queue_rejects_non_object_leaderboard_metadata_sections(self):
+        for section in ("benchmark", "environment", "model", "harness", "other"):
+            for section_value in (None, "invalid", []):
+                with self.subTest(section=section, section_value=section_value):
+                    with self.assertRaisesRegex(
+                        ValidationError,
+                        f"leaderboard_metadata\\.{section} must be an object",
+                    ):
+                        _request(leaderboard_metadata={section: section_value})
+
+    def test_queue_preserves_harbor_dataset_version_selector(self):
+        selector = "rounakbende10/rh-swe-bench@v1.0"
+        command = build_cli_command(_request(dataset=selector))
+        dataset_option = command.index("--dataset")
+        self.assertEqual(command[dataset_option + 1], selector)
+
     def test_queue_serializes_raw_args_without_wrapper_option(self):
         command = build_cli_command(
             _request(extra_harbor_flags=["--future=value", "--ae 'KEY=value with spaces'"])
@@ -211,6 +227,7 @@ class UiTests(unittest.TestCase):
         self.assertNotIn('id="env_kwargs"', html)
         self.assertNotIn('id="agent_timeout_multiplier"', html)
         self.assertNotIn('id="allow_agent_host"', html)
+        self.assertIn("Harbor dataset name (or leave blank when using GitHub)", html)
 
 
 if __name__ == "__main__":

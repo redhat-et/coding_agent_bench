@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from coding_agent_bench import api, github_datasets as datasets
+from coding_agent_bench import api, github_datasets as datasets, leaderboard_results
 from coding_agent_bench.job import OpenshiftJob
 from coding_agent_bench.ui import build_submit_form_html
 
@@ -153,6 +153,22 @@ def test_preparation_waits_for_complete_download_and_validates_real_harbor_tasks
     monkeypatch.setattr(datasets, "fetch_github_archive", download)
     assert datasets.prepare_dataset(source(ref="main"), TOKEN, tmp_path) == COMMIT
     assert (tmp_path / "source/benchmarks/tasks/one/task.toml").is_file()
+    assert json.loads((tmp_path / "provenance.json").read_text()) == {
+        "repository_url": "https://github.com/acme/data",
+        "requested_ref": "main",
+        "commit": COMMIT,
+        "subdirectory": "benchmarks/tasks",
+    }
+    monkeypatch.setattr(leaderboard_results, "GITHUB_DATASET_SOURCE", tmp_path / "source")
+    monkeypatch.setattr(leaderboard_results, "GITHUB_DATASET_PROVENANCE", tmp_path / "provenance.json")
+    assert leaderboard_results.runtime_github_source(
+        str(tmp_path / "source/benchmarks/tasks")
+    ) == {
+        "repository_url": "https://github.com/acme/data",
+        "requested_ref": "main",
+        "commit": COMMIT,
+        "subdirectory": "benchmarks/tasks",
+    }
     from harbor.models.job.config import DatasetConfig
     from coding_agent_bench.builder import HarborCommandBuilder
 
@@ -167,6 +183,67 @@ def test_preparation_waits_for_complete_download_and_validates_real_harbor_tasks
     assert (tmp_path / "prepared").is_file()
     # Only the API may release Harbor after persisting the resolved commit.
     assert not (tmp_path / "ready").exists()
+
+
+@pytest.mark.parametrize("directory", ["benchmarks/tasks", "benchmarks/tasks/one"])
+def test_prepared_github_source_reaches_real_harbor_lock_and_resumed_snapshot(tmp_path, monkeypatch, directory):
+    from harbor.job import Job
+    from harbor.models.job.config import DatasetConfig, JobConfig
+    from harbor.models.trial.config import AgentConfig, TaskConfig
+
+    monkeypatch.setenv("HARBOR_TELEMETRY", "0")
+    monkeypatch.setattr(datasets, "resolve_github_commit", lambda *_: COMMIT)
+    monkeypatch.setattr(datasets, "fetch_github_archive", lambda url, ref, token, path, limit: path.write_bytes(task_archive()))
+    root = tmp_path / "dataset"
+    prepared_source = source(ref="main").model_copy(update={"subdirectory": directory})
+    datasets.prepare_dataset(prepared_source, TOKEN, root)
+    monkeypatch.setattr(leaderboard_results, "GITHUB_DATASET_SOURCE", root / "source")
+    monkeypatch.setattr(leaderboard_results, "GITHUB_DATASET_PROVENANCE", root / "provenance.json")
+    selected = root / "source" / directory
+    provenance = leaderboard_results.runtime_github_source(str(selected))
+
+    class StopBeforeTrials(Exception):
+        pass
+
+    async def stop_before_trials(*args, **kwargs):
+        raise StopBeforeTrials
+
+    monkeypatch.setattr(Job, "_run_trials_with_queue", stop_before_trials)
+
+    async def start(config):
+        job = await Job.create(config)
+        with pytest.raises(StopBeforeTrials):
+            await job.run()
+        return job.job_dir
+
+    outputs = []
+    for index, agent in enumerate(("oracle", "opencode"), start=1):
+        scope = ({"tasks": [TaskConfig(path=selected)]} if directory.endswith("/one") else {
+            "datasets": [DatasetConfig(path=selected, task_names=["one" if index == 1 else "on*"], n_tasks=index)],
+        })
+        config = JobConfig(job_name=f"job-{index}", jobs_dir=tmp_path / "jobs", quiet=True,
+                           agents=[AgentConfig(name=agent, model_name=f"model-{index}")], n_attempts=index, **scope)
+        job_dir = config.jobs_dir / config.job_name
+        leaderboard_results.save_metadata(job_dir, leaderboard_results.job_metadata(
+            str(selected), f"model-{index}", agent, github_source=provenance,
+        ))
+        asyncio.run(start(config))
+        assert leaderboard_results.resolved_task_names(job_dir) == ["one"]
+        outputs.append(leaderboard_results.export_on_completion(job_dir, 143))
+
+    first, second = [json.loads(path.read_text()) for path in outputs]
+    assert outputs[0] != outputs[1]
+    assert first["benchmark"]["id"] == second["benchmark"]["id"]
+    assert first["benchmark"]["dataset_source"] == provenance
+    assert first["run"]["n_total_trials"] == 1
+    assert second["run"]["n_total_trials"] == 2
+
+    (root / "provenance.json").unlink()
+    config = JobConfig.model_validate_json((outputs[0].parent / "config.json").read_text())
+    job_dir = asyncio.run(start(config))
+    assert leaderboard_results.export_on_completion(job_dir, 143) == outputs[0]
+    resumed = json.loads(outputs[0].read_text())
+    assert resumed["benchmark"] == first["benchmark"]
 
 
 def test_release_requires_successful_preparation(tmp_path, monkeypatch):

@@ -21,6 +21,10 @@ COMPLETE_RESULT = {
     },
 }
 
+RESOLVED_CONFIG = {
+    "datasets": [{"name": "org/bench", "ref": "sha256:" + "a" * 64}],
+}
+
 
 SHELL_STUBS = r'''
 record() {
@@ -43,6 +47,7 @@ uv() {
                     shift; "$TEST_PYTHON" "$@"
                     ;;
                 cleanup) record cleanup || return $?; shift; "$TEST_PYTHON" "$@" ;;
+                leaderboard) shift; "$TEST_PYTHON" "$@" ;;
                 *) return 99 ;;
             esac
             ;;
@@ -50,7 +55,12 @@ uv() {
             record harbor
             printf 'Harbor stdout\n'
             printf 'Harbor stderr\n' >&2
-            printf '{"resumed": true}\n' > "$JOB_DIR/config.json"
+            if [ "$KEEP_CONFIG" != 1 ]; then
+                printf '%s\n' "$CONFIG_JSON" > "$JOB_DIR/config.json"
+            fi
+            if [ ! -f "$JOB_DIR/lock.json" ]; then
+                printf '{"trials":[{"task":{"name":"org/task-1"}},{"task":{"name":"org/task-2"}}]}\n' > "$JOB_DIR/lock.json"
+            fi
             printf '%s\n' "$RESULT_JSON" > "$JOB_DIR/result.json"
             if [ "$PAUSE_REQUESTED" = 1 ]; then
                 printf '{"reason": "preempted"}\n' > "$CAB_PAUSE_REQUEST_PATH"
@@ -72,7 +82,7 @@ uv() {
 '''
 
 
-def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, bucket_mode="", result_data=None, pause_requested=False):
+def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, bucket_mode="", result_data=None, pause_requested=False, seed_job=None):
     """Run a pod script, retaining local and remote artifacts for assertions."""
     trace = tmp_path / "trace"
     remote = tmp_path / "remote"
@@ -86,6 +96,9 @@ def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, buck
     (original / "preemption.json").write_text('{"state": "paused"}')
     (original / "stale-trial").mkdir()
     (original / "stale-trial" / "result.json").write_text("old trial")
+    if seed_job is not None:
+        import shutil
+        shutil.copytree(seed_job, original, dirs_exist_ok=True)
     (remote / "results-staging").mkdir(exist_ok=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -103,7 +116,9 @@ def run_shell(tmp_path, command, harbor_rc=0, fail_stage="", job_name=None, buck
             "FAIL_STAGE": fail_stage,
             "BUCKET_MODE": bucket_mode,
             "RESULT_JSON": json.dumps(COMPLETE_RESULT if result_data is None else result_data),
+            "CONFIG_JSON": json.dumps(RESOLVED_CONFIG),
             "PAUSE_REQUESTED": "1" if pause_requested else "0",
+            "KEEP_CONFIG": "1" if seed_job is not None else "0",
             "CAB_PAUSE_REQUEST_PATH": str(tmp_path / "pause-request.json"),
             "TEST_PYTHON": sys.executable,
             "FAKE_S3": str(Path(__file__).with_name("fake_s3.py")),
@@ -172,6 +187,9 @@ def test_upload_runs_after_harbor_and_preserves_exit_status(
 
     assert calls == expected
     assert status == harbor_rc
+    snapshot = tmp_path / "remote/results" / ("job with spaces" if resume else "test") / "leaderboard-result.json"
+    exported = json.loads(snapshot.read_text())
+    assert exported["run"]["status"] == ("completed" if harbor_rc == 0 else "stopped" if harbor_rc == 143 else "failed")
 
 
 @pytest.mark.parametrize("harbor_rc", [0, 1])
@@ -329,7 +347,7 @@ def test_resume_keeps_recoverable_snapshots(tmp_path, queue_api, failure):
     if failure == "promote":
         # The fake transfer copied one object before failing: both snapshots
         # remain usable even though the canonical prefix is now a mixed version.
-        assert (canonical / "config.json").read_text() == '{"resumed": true}\n'
+        assert json.loads((canonical / "config.json").read_text()) == RESOLVED_CONFIG
         assert (canonical / "result.json").read_text() == "original result\n"
 
 

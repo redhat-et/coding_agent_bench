@@ -9,7 +9,9 @@ from fastapi.testclient import TestClient
 from coding_agent_bench import api
 from coding_agent_bench.nebius_utils import (
     NebiusInstanceManager,
+    get_kv_cache_dtype,
     get_model_max_concurrency,
+    get_vllm_args,
 )
 
 
@@ -112,6 +114,56 @@ def test_start_model_uses_resource_tensor_parallelism_and_extra_args(monkeypatch
     assert "--tensor-parallel-size 8" in shell_command
     assert "--moe-backend deep_gemm_mega_moe" in shell_command
     assert "--attention_config.use_fp4_indexer_cache True" in shell_command
+
+
+@pytest.mark.parametrize("arguments, expected", [
+    ([], None),
+    (["--kv-cache-dtype", "fp8"], "fp8"),
+    (["--kv-cache-dtype=auto"], "auto"),
+    (["--kv-cache-dtype", "fp8", "--kv-cache-dtype=bfloat16"], "bfloat16"),
+    (["--kv-cache-dtype=fp8", "--kv-cache-dtype", "auto"], "auto"),
+    (["--kv-cache-dtype"], None),
+    (["--kv-cache-dtype", "--dtype", "auto"], None),
+])
+def test_kv_cache_dtype_reads_effective_configured_value(arguments, expected):
+    assert get_kv_cache_dtype(arguments) == expected
+
+
+def test_queue_metadata_and_server_launch_use_same_hardware_overrides(monkeypatch):
+    from coding_agent_bench.models import MODEL_REGISTRY
+    from coding_agent_bench.nebius_utils import B200x8
+
+    model_name = "Qwen/Qwen3.8-27B"
+    model_config = MODEL_REGISTRY[model_name]
+    monkeypatch.setattr(model_config, "default_args", [*model_config.default_args, "--kv-cache-dtype=fp8_e5m2"])
+    monkeypatch.setattr(B200x8, "model_extra_args", {model_name: ["--kv-cache-dtype", "auto"]})
+    expected_args = get_vllm_args(model_config, B200x8)
+    assert get_kv_cache_dtype(expected_args) == "auto"
+    command = api.build_cli_command(api.CreateJobRequest(
+        job_name="test", agent="opencode", dataset="org/bench",
+        model_name=model_name, server_url="nebius-b200x8",
+        leaderboard_metadata={"model": {"kv_cache_dtype": "incorrect"}},
+    ))
+    metadata = json.loads(command[command.index("--leaderboard-metadata-json") + 1])
+    assert metadata["model"]["kv_cache_dtype"] == "auto"
+
+    manager = object.__new__(NebiusInstanceManager)
+    commands = []
+
+    async def get_instance(_):
+        return {"spec": {"resources": {"platform": B200x8.platform, "preset": B200x8.preset}}}
+
+    async def instance_exec(**kwargs):
+        commands.append(kwargs["command"])
+
+    monkeypatch.setattr(manager, "get_instance", get_instance)
+    monkeypatch.setattr(manager, "instance_exec", instance_exec)
+    asyncio.run(manager.start_model("instance", model_name))
+    import shlex
+
+    launch_args = shlex.split(commands[0][2])
+    assert launch_args[-len(expected_args):] == expected_args
+    assert get_kv_cache_dtype(launch_args) == metadata["model"]["kv_cache_dtype"]
 
 
 def test_create_instance_uses_preemptible_pricing_policy(monkeypatch):
