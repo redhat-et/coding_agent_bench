@@ -12,6 +12,7 @@ from coding_agent_bench.nebius_utils import (
     NebiusCapacityError, NebiusCommandError, NebiusCommandTimeout,
     NebiusInstanceManager, RESOURCE_CONFIG_REGISTRY, RegionalNebiusOrchestrator,
 )
+from tests.async_helpers import wait_for_signal
 
 
 def capacity():
@@ -200,7 +201,7 @@ def test_cancel_during_discovery_preserves_other_paused_vms(regional_store, monk
 
         monkeypatch.setattr(manager, "discover_locations", discovery)
         task = asyncio.create_task(api._process_queued_job(api.QueuedJob("fresh", [], "nebius-h200", "model")))
-        await entered.wait()
+        await wait_for_signal(entered, task)
         regional_store.update_status("fresh", api.JobStatus.CANCELLING)
         task.cancel()
         await asyncio.wait_for(task, 1)
@@ -340,6 +341,16 @@ def test_all_regions_short_on_capacity_produce_one_durable_retry_round(tmp_path,
     api._run_job.assert_awaited_once()
     assert store.get("job")["nebius_retry_at"] == 0
     assert len(manager.cloud) == 1
+
+
+def test_mixed_regional_rejection_reports_quota_and_keeps_capacity_retryable():
+    manager = RegionalManager()
+    manager.failures["primary"].append(capacity())
+    manager.failures["secondary"].append(quota())
+    with pytest.raises(NebiusCapacityError, match="quota exceeded in eu-west1") as error:
+        asyncio.run(regional(manager).acquire_instance("model", "h200"))
+    assert error.value.regions == ["us-central1"]
+    assert error.value.quota_regions == ["eu-west1"]
 
 
 @pytest.mark.parametrize("all_quota", [False, True])

@@ -686,6 +686,8 @@ target projects. Local CLI access does not imply the queue has these grants.
   for another round after `NEBIUS_CAPACITY_RETRY_SECONDS`. The attempt counter
   increments **once per unsuccessful round**, not once per region. Other jobs
   can run between rounds, and cancellation remains available.
+  If some targets rejected for quota and others for capacity, the retry status
+  reports both outcomes: a capacity-constrained project can still become usable.
 - An uncertain create/start timeout stops the round. CAB first reconciles that
   placement on the next attempt rather than risking a second allocation.
   Failed target VMs are cleaned up before advancing to another region.

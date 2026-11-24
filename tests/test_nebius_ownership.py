@@ -73,6 +73,25 @@ def test_owner_state_checked_before_allocation_or_recovery(guarded, monkeypatch,
         pool = regional(manager) if mode == "regional" else api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
         monkeypatch.setattr(api, "_nebius", pool)
         asyncio.run(api._restore_jobs())
+        if dispatch == "recover":
+            # Paused rows are scheduled by the periodic recovery scan, not
+            # queued by startup restoration.
+            monkeypatch.setattr(api, "PAUSED_POLL_INTERVAL_SECONDS", 0)
+
+            async def schedule_paused():
+                api._job_event.clear()
+                scanner = asyncio.create_task(api._resume_paused_jobs_loop())
+                try:
+                    async with asyncio.timeout(1):
+                        while not any(job.job_id == "B" for job in api._job_queue):
+                            await api._job_event.wait()
+                            api._job_event.clear()
+                finally:
+                    scanner.cancel()
+                    await asyncio.gather(scanner, return_exceptions=True)
+
+            asyncio.run(schedule_paused())
+        second = next(job for job in api._job_queue if job.job_id == "B")
     before = deepcopy(manager.cloud)
     asyncio.run(api._process_queued_job(second))
     allowed = state in ("STOPPED", "missing") and (mode == "regional" or signal == "saved")

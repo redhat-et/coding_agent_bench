@@ -116,6 +116,8 @@ async def reconcile_placement(backend, location, record: ProvisioningRecord, *, 
     if state not in ("RUNNING", "STOPPED", "ERROR", "CRASHED"):
         raise RuntimeError(f"VM is still transitioning ({state})")
     if not cleanup:
+        if record.operation == "delete" and record.phase in (PoolPhase.REQUEST_PENDING, PoolPhase.UNKNOWN):
+            raise RuntimeError("VM deletion is not yet confirmed")
         record_event(PoolPhase.PREPARING, "observe")
         return ReconcileOutcome.VM_READY
     if not can_cleanup(location, backend.is_legacy_placement(location)):
@@ -201,6 +203,18 @@ async def _close_process(process, *, graceful=False):
             except ProcessLookupError:
                 pass
         logger.warning("Timed out draining a terminated Nebius/SSH subprocess")
+
+
+def _is_transport_error(text: str) -> bool:
+    # Distinguish an Unavailable RPC status from an ordinary message about
+    # unavailable GPU capacity.
+    return bool(re.search(r"(?m)(?:\b(?:code|status)\s*[:=]\s*|^\s*)unavailable\b", text)) or any(
+        marker in text for marker in (
+            "deadlineexceeded", "deadline exceeded", "deadline_exceeded", "context deadline",
+            "connection reset", "transport is closing", "timed out", "unexpected eof",
+            "service unavailable",
+        )
+    )
 
 
 def _is_capacity_error(args: list[str], output: str) -> bool:
@@ -381,10 +395,7 @@ class NebiusInstanceManager:
                 raise NebiusCommandTimeout(
                     "Nebius mutating CLI exited without a conclusive provider response; remote outcome needs reconciliation"
                 ) from error
-            if not isinstance(error, NebiusCapacityError) and any(marker in text for marker in (
-                "deadlineexceeded", "deadline exceeded", "context deadline", "unavailable",
-                "connection reset", "transport is closing", "timed out", "unexpected eof",
-            )):
+            if _is_transport_error(text):
                 raise NebiusCommandTimeout("Nebius mutating request returned a transport/deadline error; remote outcome needs reconciliation") from error
             if notify:
                 notify(PoolPhase.REJECTED, operation)
@@ -1150,9 +1161,13 @@ class RegionalNebiusOrchestrator:
                 self._annotate(child, location)
                 return answer
             if capacity_regions:
+                detail = "Not enough resources in regions: " + ", ".join(capacity_regions)
+                if quota_regions:
+                    detail += "; quota exceeded in " + ", ".join(quota_regions)
                 error = NebiusCapacityError(["compute", "instance", "create"], 1, "",
-                                             "Not enough resources in regions: " + ", ".join(capacity_regions))
+                                             detail)
                 error.regions = capacity_regions
+                error.quota_regions = quota_regions
                 raise error
             raise RuntimeError("No regional allocation available: quota exceeded in " + ", ".join(quota_regions))
 

@@ -162,6 +162,56 @@ def test_worker_allows_other_jobs_and_keeps_token_until_retry_succeeds(store, mo
     assert b"volatile-token-never-save" not in store._db_path.read_bytes()
 
 
+@pytest.mark.parametrize("retry", [False, True])
+def test_worker_retries_bookkeeping_without_redispatch_or_losing_token(store, monkeypatch, retry):
+    token = SecretStr("ephemeral")
+    first = enqueue(store, "A", token=token)
+    enqueue(store, "B", server="https://external.example")
+    ran, bookkeeping = [], 0
+    real_reschedule = api._reschedule_after_dispatch
+    monkeypatch.setattr(api, "CLEANUP_RETRY_INTERVAL_SECONDS", 0)
+
+    async def scenario():
+        done = asyncio.Event()
+
+        async def process(job):
+            ran.append(job.job_id)
+            if job is first and retry and ran.count("A") == 1:
+                store.defer_nebius("A", time.time() - 1, "Waiting for capacity")
+                return
+            if job is first and retry:
+                assert job.github_token is token
+            store.update_status(job.job_id, api.JobStatus.COMPLETED)
+            if len(ran) == (3 if retry else 2):
+                done.set()
+
+        def reschedule(job):
+            nonlocal bookkeeping
+            if job is first:
+                assert api._active_job is None
+                bookkeeping += 1
+                if bookkeeping == 1:
+                    assert job.github_token is token
+                    raise sqlite3.OperationalError("database is locked")
+            real_reschedule(job)
+
+        monkeypatch.setattr(api, "_process_queued_job", process)
+        monkeypatch.setattr(api, "_reschedule_after_dispatch", reschedule)
+        api._job_event.set()
+        worker = asyncio.create_task(api._worker())
+        try:
+            await asyncio.wait_for(done.wait(), 2)
+        finally:
+            monkeypatch.setattr(api, "_shutting_down", True)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert ran == (["A", "B", "A"] if retry else ["A", "B"])
+    assert bookkeeping == (3 if retry else 2)
+    assert first.github_token is None
+
+
 def test_worker_retains_retry_and_token_when_deadline_expires_during_commit(store, monkeypatch):
     token = SecretStr("volatile-retry-token")
     waiting = enqueue(store, token=token)

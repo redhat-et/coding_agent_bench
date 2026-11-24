@@ -942,6 +942,10 @@ async def _nebius_cleanup_loop(*, startup: bool):
         try:
             guard = job_store.nebius_guard()
             delay = NEBIUS_CAPACITY_RETRY_SECONDS if guard and guard["job_id"] == NEBIUS_CLEANUP_OWNER else 60
+        except sqlite3.Error:
+            logger.exception("Unable to read the Nebius maintenance guard; retrying")
+            delay = min(60, NEBIUS_CAPACITY_RETRY_SECONDS)
+        try:
             await asyncio.wait_for(_nebius_cleanup_event.wait(), timeout=delay)
         except asyncio.TimeoutError:
             pass
@@ -1783,6 +1787,8 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                               else "Waiting for Nebius provisioning: CLI attempt timed out")
                     if getattr(error, "regions", None):
                         reason += " in " + ", ".join(error.regions)
+                    if getattr(error, "quota_regions", None):
+                        reason += "; quota exceeded in " + ", ".join(error.quota_regions)
                     if job_store.defer_nebius(
                         job_id, time.time() + NEBIUS_CAPACITY_RETRY_SECONDS,
                         f"{reason}; retrying in {NEBIUS_CAPACITY_RETRY_SECONDS:g}s",
@@ -1991,9 +1997,20 @@ async def _worker():
                 # the queue moves on to the next job.
                 logger.exception(f"Queue handler crashed while processing {job_id}")
             finally:
-                _reschedule_after_dispatch(queued)
                 if _active_job and _active_job[0] == job_id:
                     _active_job = None
+                while True:
+                    try:
+                        _reschedule_after_dispatch(queued)
+                        break
+                    except sqlite3.Error:
+                        # Retry only bookkeeping, never the completed handler.
+                        # Keep the original entry and token until confirmed.
+                        logger.exception("Unable to reschedule queue job %s; retrying bookkeeping", job_id)
+                        if _shutting_down:
+                            queued.github_token = None
+                            break
+                        await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
 
 @router.get("/")
 async def read_root():

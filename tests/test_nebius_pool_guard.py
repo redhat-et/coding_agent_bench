@@ -405,12 +405,13 @@ def test_guard_claim_is_atomic_between_jobs(tmp_path):
     assert store.nebius_guard()["job_id"] in ("A", "B")
 
 
-def test_mutating_cli_transport_error_keeps_request_unsettled(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stderr", [b"rpc error: DeadlineExceeded", b"rpc error: code = Unavailable desc = not enough resources"])
+def test_mutating_cli_transport_error_keeps_request_unsettled(tmp_path, monkeypatch, stderr):
     store = api.JobStore(tmp_path / "request.db")
     store.claim_nebius_guard("A")
     manager = object.__new__(NebiusInstanceManager)
     manager.set_mutation_observer(lambda state, operation: store.update_nebius_guard("A", state, operation))
-    process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(b"", b"rpc error: DeadlineExceeded")))
+    process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(b"", stderr)))
 
     async def create(*args, **kwargs):
         assert store.nebius_guard()["state"] == "inflight"
@@ -493,6 +494,47 @@ def test_different_hardware_cleans_idle_vm_outside_its_eligible_regions(guarded,
     assert len(manager.cloud) == 1
     assert next(iter(manager.cloud))[0] == "secondary"
     assert manager.events.index(("delete", "primary")) < manager.events.index(("create", "secondary"))
+
+
+@pytest.mark.parametrize("phase", ["inflight", "uncertain", "rejected"])
+def test_provisioning_reconciliation_checks_pending_delete(phase):
+    backend = SimpleNamespace(inspect_placement=AsyncMock(return_value={"status": {"state": "RUNNING"}}))
+    record = nebius_utils.ProvisioningRecord(nebius_utils.PoolPhase(phase), "delete", True)
+    events = []
+
+    async def reconcile():
+        return await nebius_utils.reconcile_placement(
+            backend, {}, record, cleanup=False, can_cleanup=lambda *_: False,
+            record_event=lambda *args: events.append(args),
+        )
+
+    if phase == "rejected":
+        assert asyncio.run(reconcile()) == nebius_utils.ReconcileOutcome.VM_READY
+        assert events == [(nebius_utils.PoolPhase.PREPARING, "observe")]
+    else:
+        with pytest.raises(RuntimeError, match="deletion is not yet confirmed"):
+            asyncio.run(reconcile())
+        assert events == []
+        backend.inspect_placement.side_effect = RuntimeError("NotFound")
+        assert asyncio.run(reconcile()) == nebius_utils.ReconcileOutcome.ABSENT
+
+
+def test_lost_delete_during_cached_gpu_replacement_reconciles_absence(guarded, monkeypatch):
+    store, manager, _, ran = guarded
+    pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+    monkeypatch.setattr(api, "_nebius", pool)
+    manager.lost["start"] = False
+    asyncio.run(api._process_queued_job(enqueue(store, "A", "nebius-h200")))
+    second = enqueue(store, "B", "nebius-b200")
+    manager.lost["delete"] = True
+    asyncio.run(api._process_queued_job(second))
+    guard = store.nebius_guard()
+    assert guard["job_id"] == "B" and guard["operation"] == "delete" and guard["mutation_seen"]
+    assert not manager.cloud and ran == ["A"]
+    due(store, "B")
+    asyncio.run(api._process_queued_job(second))
+    assert ran == ["A", "B"] and len(manager.cloud) == 1
+    assert store.nebius_guard() is None
 
 
 def test_discovery_timeout_without_mutation_does_not_lock_the_pool(guarded, monkeypatch):

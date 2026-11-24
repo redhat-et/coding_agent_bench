@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import sqlite3
 import time
 
 import pytest
 
 from coding_agent_bench import api
 from coding_agent_bench.nebius_utils import NebiusCommandTimeout
+from tests.async_helpers import wait_for_signal
 from tests.test_nebius_pool_guard import enqueue
 from tests.test_nebius_pool_guard import guarded as guarded
 from tests.test_nebius_regions import regional, seed_vm
@@ -51,12 +53,13 @@ def test_background_delete_blocks_dispatch_and_recovers_after_restart(guarded, m
             entered.set()
             await release.wait()
             if outcome == "timeout_after":
+                self.lost["delete"] = True
                 await original(self, name)
             raise NebiusCommandTimeout("Lost delete response")
 
         monkeypatch.setattr(type(manager), "delete_instance", interrupted_delete)
         task = asyncio.create_task(api._nebius_pool().cleanup_background())
-        await entered.wait()
+        await wait_for_signal(entered, task)
         guard = store.nebius_guard()
         assert not api._nebius_pool().begin("B", "b200")
         await api._process_queued_job(managed)
@@ -76,7 +79,8 @@ def test_background_delete_blocks_dispatch_and_recovers_after_restart(guarded, m
         else:
             release.set()
             await task
-        assert store.nebius_guard() is not None
+        pending = store.nebius_guard()
+        assert (pending["state"], pending["operation"]) == ("inflight", "delete")
         assert not pool.cleanup_active
         monkeypatch.setattr(type(manager), "delete_instance", original)
 
@@ -89,13 +93,14 @@ def test_background_delete_blocks_dispatch_and_recovers_after_restart(guarded, m
         assert store.nebius_guard()["job_id"] == api.NEBIUS_CLEANUP_OWNER
         api._job_event.clear()
         loop = asyncio.create_task(api._nebius_cleanup_loop(startup=False))
-        await api._job_event.wait()  # First automatic maintenance pass completed.
+        await wait_for_signal(api._job_event, loop)
         loop.cancel()
         with pytest.raises(asyncio.CancelledError):
             await loop
         assert store.nebius_guard() is None
         assert not manager.cloud
-        await api._process_queued_job(external)
+        restored = next(item for item in api._job_queue if item.job_id == external.job_id)
+        await api._process_queued_job(restored)
         assert ran == ["external"]
 
     asyncio.run(scenario())
@@ -116,7 +121,7 @@ def test_startup_discovery_rechecks_worker_before_deleting(guarded, monkeypatch)
 
         monkeypatch.setattr(manager, "discover_locations", discovery)
         task = asyncio.create_task(api._nebius_pool().cleanup_background(startup=True))
-        await entered.wait()
+        await wait_for_signal(entered, task)
         assert store.nebius_guard() is None
         # A worker may dispatch while discovery is still read-only.
         monkeypatch.setattr(api, "_active_job", ("B", None))
@@ -195,7 +200,7 @@ def test_deferred_startup_preserves_warm_cache_until_idle_expiry(guarded, monkey
         monkeypatch.setattr(api, "_active_job", ("external", None))
         task = asyncio.create_task(api._nebius_cleanup_loop(startup=True))
         try:
-            await api._job_event.wait()  # Initial startup sweep deferred.
+            await wait_for_signal(api._job_event, task)  # Initial startup sweep deferred.
             monkeypatch.setattr(api, "_active_job", None)
             manager.lost["start"] = False
             await api._process_queued_job(enqueue(store, "A", "nebius-h200"))
@@ -203,14 +208,14 @@ def test_deferred_startup_preserves_warm_cache_until_idle_expiry(guarded, monkey
             assert manager.cloud and pool.get_instance_states()
             api._job_event.clear()
             api._nebius_cleanup_event.set()
-            await api._job_event.wait()
+            await wait_for_signal(api._job_event, task)
             assert manager.cloud
             assert not any(event == "delete" for event, _ in manager.events)
             for state in pool.get_instance_states():
                 state.last_job_completed_at = time.time() - 700
             api._job_event.clear()
             api._nebius_cleanup_event.set()
-            await api._job_event.wait()
+            await wait_for_signal(api._job_event, task)
             assert not manager.cloud
             assert store.nebius_guard() is None
         finally:
@@ -237,7 +242,7 @@ def test_job_completing_during_startup_discovery_keeps_warm_cache(guarded, monke
 
         monkeypatch.setattr(manager, "discover_locations", discovery)
         task = asyncio.create_task(api._nebius_pool().cleanup_background(startup=True))
-        await entered.wait()
+        await wait_for_signal(entered, task)
         manager.lost["start"] = False
         await api._process_queued_job(enqueue(store, "A", "nebius-h200"))
         assert store.get("A")["status"] == "completed"
@@ -260,4 +265,51 @@ def test_live_cache_does_not_skip_pending_cleanup_reconciliation(guarded):
     store.update_nebius_guard(owner, "inflight", "delete")
     asyncio.run(api._nebius_pool().cleanup_background(startup=False))
     assert store.nebius_guard() is None
+    assert not manager.cloud
+
+
+def test_cleanup_loop_survives_guard_read_error(guarded, monkeypatch):
+    store, manager, pool, _ = guarded
+    location = expired_vm(pool, manager, "regional")
+    owner = api.NEBIUS_CLEANUP_OWNER
+    assert store.claim_nebius_guard(owner)
+    assert store.record_nebius_idle_cleanup(owner, location)
+    original = store.nebius_guard
+
+    async def scenario():
+        first_pass = asyncio.Event()
+        may_recover = asyncio.Event()
+        finished = asyncio.Event()
+        wake = asyncio.Event()
+        monkeypatch.setattr(api, "_nebius_cleanup_event", wake)
+        original_cleanup = api.NebiusPool.cleanup_background
+
+        def guard():
+            if first_pass.is_set() and not may_recover.is_set():
+                may_recover.set()
+                raise sqlite3.OperationalError("database is locked")
+            return original()
+
+        async def cleanup(self, **kwargs):
+            if not first_pass.is_set():
+                first_pass.set()
+                return False
+            result = await original_cleanup(self, **kwargs)
+            finished.set()
+            return result
+
+        monkeypatch.setattr(store, "nebius_guard", guard)
+        monkeypatch.setattr(api.NebiusPool, "cleanup_background", cleanup)
+        task = asyncio.create_task(api._nebius_cleanup_loop(startup=False))
+        try:
+            await wait_for_signal(may_recover, task)
+            assert original()["job_id"] == owner
+            wake.set()
+            await wait_for_signal(finished, task)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert original() is None
     assert not manager.cloud

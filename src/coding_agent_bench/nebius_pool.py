@@ -153,6 +153,7 @@ class NebiusOrchestrator:
                 logger.info(f"Deleting nebius instance {name} (gpu_config mismatch, had {self._instances[name].gpu_config}, need {gpu_config})")
                 # An earlier delete may have completed despite a CLI timeout.
                 if await self._manager.instance_exists(name):
+                    self._observe_vm()
                     await self._manager.delete_instance(name)
                 del self._instances[name]
 
