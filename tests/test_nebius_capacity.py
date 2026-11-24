@@ -341,8 +341,11 @@ def test_private_source_requires_fresh_token_if_capacity_wait_restarts(store, mo
     queued = enqueue(store, token=SecretStr("private-token"))
     store.defer_nebius(queued.job_id, time.time() - 1, "Waiting for Nebius capacity")
     monkeypatch.setattr(api, "_nebius", FakeNebius([]))
+    get_job = AsyncMock(return_value=None)
+    monkeypatch.setattr(api.OpenshiftJob, "_get_job", get_job)
     asyncio.run(api._restore_jobs())
     asyncio.run(api._process_queued_job(api._job_queue[0]))
+    get_job.assert_awaited_once()
     row = store.get(queued.job_id)
     assert row["status"] == "failed"
     assert "fresh GitHub token" in row["error"]
