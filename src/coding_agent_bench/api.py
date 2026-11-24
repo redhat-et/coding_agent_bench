@@ -1948,11 +1948,16 @@ async def _worker():
             _reorder_queue_for_nebius()
             # Do not sleep inside a provisioning attempt: due jobs may overtake
             # capacity waiters, and enqueue/cancel events interrupt the timer.
-            rows = [job_store.get(item.job_id) for item in _job_queue]
-            guard = job_store.nebius_guard()
-            for row in rows:
-                if row and guard and row["job_id"] != guard["job_id"]:
-                    job_store.wait_nebius_guard(row["job_id"], f"Waiting for confirmed Nebius provisioning outcome before starting another job (job {guard['job_id']})", delay=False)
+            try:
+                rows = [job_store.get(item.job_id) for item in _job_queue]
+                guard = job_store.nebius_guard()
+                for row in rows:
+                    if row and guard and row["job_id"] != guard["job_id"]:
+                        job_store.wait_nebius_guard(row["job_id"], f"Waiting for confirmed Nebius provisioning outcome before starting another job (job {guard['job_id']})", delay=False)
+            except sqlite3.Error:
+                logger.exception("Unable to read or update dispatch state; retrying selection")
+                await asyncio.sleep(CLEANUP_RETRY_INTERVAL_SECONDS)
+                continue
             ready, delay = _next_dispatch(rows, guard, time.time())
             if ready is None:
                 try:
@@ -1963,7 +1968,7 @@ async def _worker():
                 continue
             queued = _job_queue.pop(ready)
             job_id, adopt_existing = queued.job_id, queued.adopt_existing
-            row = job_store.get(job_id)
+            row = rows[ready]
             recoverable_statuses = (
                 JobStatus.QUEUED.value,
                 JobStatus.RUNNING.value,

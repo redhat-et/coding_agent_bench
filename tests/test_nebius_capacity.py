@@ -13,6 +13,7 @@ from coding_agent_bench import api, nebius_utils
 from coding_agent_bench.nebius_utils import (
     NebiusCapacityError, NebiusCommandError, NebiusCommandTimeout, NebiusInstanceManager,
 )
+from tests.async_helpers import wait_for_signal
 
 
 def capacity_error():
@@ -160,6 +161,57 @@ def test_worker_allows_other_jobs_and_keeps_token_until_retry_succeeds(store, mo
     assert neb.calls[1] - neb.calls[0] >= 0.02
     assert waiting.github_token is None
     assert b"volatile-token-never-save" not in store._db_path.read_bytes()
+
+
+@pytest.mark.parametrize("method", ["get", "nebius_guard", "wait_nebius_guard"])
+def test_worker_retries_dispatch_selection_without_losing_jobs(store, monkeypatch, method):
+    token = SecretStr("ephemeral")
+    external = enqueue(store, "B", server="https://external.example")
+    owner = enqueue(store, "A", token=token)
+    assert store.claim_nebius_guard("A")
+    monkeypatch.setattr(api, "_nebius", None)
+    monkeypatch.setattr(api, "CLEANUP_RETRY_INTERVAL_SECONDS", 0)
+    original = getattr(store, method)
+    failed = False
+    dispatched = []
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            assert api._job_queue == [external, owner]
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    async def scenario():
+        done = asyncio.Event()
+
+        async def process(job):
+            dispatched.append(job.job_id)
+            if job is owner:
+                assert job.github_token is token
+                store.release_nebius_guard("A")
+            else:
+                assert store.nebius_guard() is None
+            store.update_status(job.job_id, api.JobStatus.COMPLETED)
+            if job is external:
+                done.set()
+
+        monkeypatch.setattr(store, method, fail_once)
+        monkeypatch.setattr(api, "_process_queued_job", process)
+        api._job_event.set()
+        worker = asyncio.create_task(api._worker())
+        try:
+            await wait_for_signal(done, worker)
+        finally:
+            monkeypatch.setattr(api, "_shutting_down", True)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert failed
+    assert dispatched == ["A", "B"]
+    assert not api._job_queue
 
 
 @pytest.mark.parametrize("retry", [False, True])
