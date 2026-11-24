@@ -553,6 +553,32 @@ def test_discovery_timeout_without_mutation_does_not_lock_the_pool(guarded, monk
     assert ran == ["B"]
 
 
+@pytest.mark.parametrize("existing_claim", [False, True])
+def test_single_region_unobserved_timeout_restores_prior_ownership(guarded, monkeypatch, existing_claim):
+    store, manager, _, ran = guarded
+    pool = api.NebiusOrchestrator(manager, "subnet-primary", "queue", 600)
+    monkeypatch.setattr(api, "_nebius", pool)
+    manager.lost["start"] = False
+    first = enqueue(store, "A", "nebius-b200")
+    second = enqueue(store, "B", "nebius-b200")
+    prior = pool.configured_location("h200") if existing_claim else None
+    if prior:
+        seed_vm(manager, prior)
+        store.record_nebius_location("A", prior)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "instance_exists", AsyncMock(side_effect=NebiusCommandTimeout("read-only lookup timed out")))
+        asyncio.run(api._process_queued_job(first))
+
+    assert store.nebius_guard() is None
+    row = api.JobStore(store._db_path).get("A")
+    assert row["status"] == "queued" and row["nebius_retry_attempts"] == 1
+    assert json.loads(row["nebius_location"] or "null") == prior
+    assert bool(row["nebius_vacant"]) is not existing_claim
+    asyncio.run(api._process_queued_job(second))
+    assert ran == ([] if existing_claim else ["B"])
+
+
 def test_single_region_config_change_does_not_probe_the_wrong_project(guarded, monkeypatch):
     store, manager, _, _ = guarded
     first = enqueue(store, "A", "nebius-h200")

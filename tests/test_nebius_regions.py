@@ -454,7 +454,19 @@ def test_delayed_startup_cleanup_cannot_delete_new_job_region(monkeypatch):
 
 
 def test_queue_restart_reconstructs_pending_region_before_retry(tmp_path, monkeypatch):
-    manager = RegionalManager()
+    class JournaledCreateManager(RegionalManager):
+        async def create_instance(self, name, subnet, gpu_config):
+            # The real CLI journals the request before the provider can lose its reply.
+            self._mutation_callback("inflight", "create")
+            try:
+                await super().create_instance(name, subnet, gpu_config)
+            except NebiusCommandError:
+                self._mutation_callback("rejected", "create")
+                raise
+            else:
+                self._mutation_callback("settled", "create")
+
+    manager = JournaledCreateManager()
     manager.failures["primary"].append(capacity())
     manager.failures["secondary"].append(NebiusCommandTimeout("response lost"))
     store = api.JobStore(tmp_path / "queue.db")
@@ -467,6 +479,7 @@ def test_queue_restart_reconstructs_pending_region_before_retry(tmp_path, monkey
     monkeypatch.setattr(api, "_run_job", AsyncMock())
     asyncio.run(api._process_queued_job(api.QueuedJob("job", command, "nebius-h200", "model")))
     assert json.loads(store.get("job")["nebius_location"])["region"] == "eu-west1"
+    assert store.nebius_guard()["state"] == "uncertain"
 
     monkeypatch.setattr(api, "_nebius", regional(manager))
     monkeypatch.setattr(api.OpenshiftJob, "_get_job", AsyncMock(return_value=None))

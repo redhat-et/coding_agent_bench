@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -545,17 +545,31 @@ class JobStore:
         conn.close()
         return cur.rowcount > 0
 
-    def release_nebius_guard(self, job_id: str, *, release_vacant_claim: bool = False) -> None:
+    def release_nebius_guard(
+        self, job_id: str, *, release_vacant_claim: bool = False,
+        restore_untouched_placement: dict | None = None,
+    ) -> None:
         """Release a settled guard and optionally its confirmed-vacant job claim.
 
         A capacity rejection with no known VM is an attempted location, not
         ownership. Clear that job's claim atomically with the guard release.
         Persist vacancy so resume/checkpoint metadata cannot recreate a legacy claim.
         A rejected start on a known VM retains its recovery placement.
+        An untouched timeout restores ownership from before the placement write.
         """
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            if release_vacant_claim:
+            if restore_untouched_placement is not None:
+                guard = conn.execute("SELECT * FROM nebius_pool_guard WHERE job_id = ?", (job_id,)).fetchone()
+                if not guard or not ProvisioningRecord.from_row(guard).untouched:
+                    return
+                prior = restore_untouched_placement
+                conn.execute(
+                    "UPDATE jobs SET nebius_location = ?, nebius_vacant = ?, nebius_location_hint = ? WHERE job_id = ?",
+                    (prior.get("nebius_location"), int(not NebiusJobOwnership.from_job(prior).claimed),
+                     prior.get("nebius_location_hint"), job_id),
+                )
+            elif release_vacant_claim:
                 guard = conn.execute("SELECT * FROM nebius_pool_guard WHERE job_id = ?", (job_id,)).fetchone()
                 if guard and not ProvisioningRecord.from_row(guard).needs_cleanup:
                     conn.execute("UPDATE jobs SET nebius_location = NULL, nebius_vacant = 1 WHERE job_id = ?", (job_id,))
@@ -564,7 +578,6 @@ class JobStore:
                 "location = CASE WHEN job_id = ? THEN NULL ELSE location END WHERE job_id = ?",
                 (NEBIUS_CLEANUP_OWNER, job_id),
             )
-        conn.close()
 
     def resolve_nebius_absent(self, job_id: str, request: ResolveNebiusAbsentRequest, *, is_legacy_placement) -> dict:
         """Audit manual absence confirmation and release only the expected owner.
@@ -1766,6 +1779,9 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                 except NebiusPoolBusy as error:
                     job_store.wait_nebius_guard(job_id, str(error))
                     return
+                prior_placement = job_store.get(job_id)
+                if not prior_placement:
+                    return
                 if not _nebius_pool().begin(job_id, nebius_gpu_config):
                     return
                 try:
@@ -1779,7 +1795,7 @@ async def _process_queued_job(queued: QueuedJob) -> None:
                         if guard and ProvisioningRecord.from_row(guard).untouched:
                             # Read-only preparation failed before a mutation or
                             # an existing VM was observed for this attempt.
-                            job_store.release_nebius_guard(job_id)
+                            job_store.release_nebius_guard(job_id, restore_untouched_placement=prior_placement)
                             _nebius_pool().configure(None)
                         else:
                             job_store.update_nebius_guard(job_id, PoolPhase.UNKNOWN)
