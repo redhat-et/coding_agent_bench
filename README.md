@@ -676,6 +676,11 @@ target projects. Local CLI access does not imply the queue has these grants.
   requested GPU family and GPU count and it has one unambiguous `default-`
   subnet. The known `-a` platform variants are supported without changing the
   GPU family, count, or requested preemptible policy.
+- Fresh capacity advisory data (`nebius capacity resource-advice list`) only
+  **orders** eligible regions, preferring high/medium levels over low or
+  unknown. Stale, missing, or failed advisory data leaves the configured order
+  untouched. An advisory entry is never proof of capacity and never a rejection.
+  Set `NEBIUS_CAPACITY_ADVISORY_ORDER=0` to disable ordering.
 - Each round refreshes discovery and tries eligible locations sequentially,
   preferring an existing owned VM or a persisted pending placement. Allocation
   is the authoritative quota/capacity check, not a prediction from platform

@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import tempfile
+import time
 
 from coding_agent_bench.models import (
     get_model_config,
@@ -36,6 +37,15 @@ if not 0 < NEBIUS_CLI_TIMEOUT_SECONDS < float("inf"):
 NEBIUS_MODEL_START_TIMEOUT_SECONDS = float(os.environ.get("NEBIUS_MODEL_START_TIMEOUT_SECONDS", "1800"))
 if not 0 < NEBIUS_MODEL_START_TIMEOUT_SECONDS < float("inf"):
     raise ValueError("NEBIUS_MODEL_START_TIMEOUT_SECONDS must be positive")
+NEBIUS_ADVISORY_REFRESH_SECONDS = float(os.environ.get("NEBIUS_ADVISORY_REFRESH_SECONDS", "60"))
+if not 0 <= NEBIUS_ADVISORY_REFRESH_SECONDS < float("inf"):
+    raise ValueError("NEBIUS_ADVISORY_REFRESH_SECONDS must be non-negative")
+NEBIUS_ADVISORY_TIMEOUT_SECONDS = float(os.environ.get("NEBIUS_ADVISORY_TIMEOUT_SECONDS", "10"))
+if not 0 < NEBIUS_ADVISORY_TIMEOUT_SECONDS < float("inf"):
+    raise ValueError("NEBIUS_ADVISORY_TIMEOUT_SECONDS must be positive")
+NEBIUS_CAPACITY_ADVISORY_ORDER = os.environ.get(
+    "NEBIUS_CAPACITY_ADVISORY_ORDER", "1",
+).strip().lower() not in {"0", "false", "no", "off"}
 
 
 class PoolPhase(str, Enum):
@@ -238,6 +248,29 @@ def _is_capacity_error(args: list[str], output: str) -> bool:
         "insufficient resources", "no available capacity",
     ))
 
+# Capacity advisory ranks: lower is better. Advisory is a hint for ordering
+# eligible regions, never evidence that a region can or cannot allocate.
+_ADVISORY_LEVELS = {
+    "AVAILABILITY_LEVEL_HIGH": 0,
+    "AVAILABILITY_LEVEL_MEDIUM": 1,
+    "AVAILABILITY_LEVEL_LOW": 2,
+}
+_ADVISORY_UNKNOWN = 3
+
+
+def _advisory_key(location: dict) -> tuple[str, str, str] | None:
+    """Map a placement to the advisory's region/platform/preset key."""
+    resource = RESOURCE_CONFIG_REGISTRY.get(location.get("gpu_config") or "")
+    if resource is None:
+        return None
+    return location.get("region", ""), resource.platform, resource.preset
+
+
+def _advisory_rank(location: dict, rankings: dict) -> int:
+    key = _advisory_key(location)
+    return rankings.get(key, _ADVISORY_UNKNOWN) if key else _ADVISORY_UNKNOWN
+
+
 # Note: Resources with the '-a' subscript are specific to the me-west1 region.
 
 class ResourceConfig(ABC):
@@ -420,6 +453,7 @@ class NebiusInstanceManager:
         self._parent_id = parent_id
         self._tenant_id = tenant_id
         self._service_account_id = service_account_id
+        self._advisory_cache: tuple[float, dict] | None = None
 
         self._ssh_key = Path(self._ssh_public_key_path).expanduser().resolve().read_text()
 
@@ -505,6 +539,42 @@ class NebiusInstanceManager:
             if token in seen:
                 raise ValueError("Nebius returned a repeated pagination token")
             seen.add(token)
+
+    async def capacity_advisory(self) -> dict[tuple[str, str, str], int]:
+        """Return fresh capacity guidance keyed by region/platform/preset.
+
+        This is ordering guidance only. A missing, stale, or failed advisory is
+        treated as unknown so callers keep their configured region order, and
+        no advisory entry is ever treated as an allocation verdict.
+        """
+        now = time.monotonic()
+        if self._advisory_cache and now - self._advisory_cache[0] < NEBIUS_ADVISORY_REFRESH_SECONDS:
+            return self._advisory_cache[1]
+        rankings: dict[tuple[str, str, str], int] = {}
+        try:
+            rows = await self.list_resources(
+                ["capacity", "resource-advice", "list", "--parent-id", self._tenant_id],
+            )
+        except (NebiusCommandError, NebiusCommandTimeout, NebiusCommandNotStarted, ValueError) as error:
+            logger.warning("Nebius capacity advisory unavailable; keeping configured region order: %s", error)
+            self._advisory_cache = (now, rankings)
+            return rankings
+        for row in rows:
+            status = (row.get("status") or {}).get("preemptible") or {}
+            if status.get("data_state") != "DATA_STATE_FRESH":
+                continue
+            instance = (row.get("spec") or {}).get("compute_instance") or {}
+            preset = (instance.get("preset") or {}).get("name")
+            key = ((row.get("spec") or {}).get("region"), instance.get("platform"), preset)
+            if not all(key):
+                continue
+            level = str(status.get("availability_level") or "").upper()
+            rank = _ADVISORY_LEVELS.get(level, _ADVISORY_UNKNOWN)
+            if status.get("available") == 0 and rank < _ADVISORY_LEVELS["AVAILABILITY_LEVEL_LOW"]:
+                rank = _ADVISORY_LEVELS["AVAILABILITY_LEVEL_LOW"]
+            rankings[key] = rank
+        self._advisory_cache = (now, rankings)
+        return rankings
 
     async def discover_locations(self, gpu_config: str | None, project_prefix: str, regions: set[str]) -> list[dict]:
         """Find approved projects/subnets supporting the requested GPU and pricing.
@@ -1076,6 +1146,16 @@ class RegionalNebiusOrchestrator:
             state.region = location["region"]
             state.project_id = location["project_id"]
 
+    async def _capacity_ranking(self):
+        """Fetch advisory ordering guidance; never let it block provisioning."""
+        try:
+            return await asyncio.wait_for(
+                self._manager.capacity_advisory(), timeout=NEBIUS_ADVISORY_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            logger.warning("Ignoring Nebius capacity advisory: %s", error)
+            return {}
+
     async def acquire_instance(self, model_name, gpu_config):
         """Try each eligible region once; only all-capacity failures defer the job."""
         async with self._lock:
@@ -1124,7 +1204,9 @@ class RegionalNebiusOrchestrator:
                     await child.delete_recovered_instance()
             existing_keys = {self._key(item) for item in existing}
             preferred_key = self._key(self._preferred) if self._preferred else None
+            ranking = await self._capacity_ranking() if NEBIUS_CAPACITY_ADVISORY_ORDER else {}
             locations.sort(key=lambda item: (self._key(item) != bound_key, self._key(item) not in existing_keys,
+                                             _advisory_rank(item, ranking),
                                              self._key(item) != preferred_key))
             capacity_regions = []
             quota_regions = []

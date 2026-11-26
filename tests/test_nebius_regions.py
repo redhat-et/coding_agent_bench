@@ -40,6 +40,12 @@ class RegionalManager(NebiusInstanceManager):
     async def discover_locations(self, gpu_config, project_prefix, regions):
         return [dict(item) for item in self.locations if not regions or item["region"] in regions]
 
+    async def capacity_advisory(self):
+        advisory = getattr(self, "advisory", {})
+        if isinstance(advisory, Exception):
+            raise advisory
+        return dict(advisory)
+
     async def instance_exists(self, name):
         self.events.append(("exists", self._parent_id))
         return (self._parent_id, name) in self.cloud
@@ -140,6 +146,92 @@ def test_falls_back_on_capacity_and_records_placement_before_creating_vm():
     state = orchestrator.get_instance_states()[0]
     assert state.region == "eu-west1"
     assert state.project_id == "secondary"
+
+
+def test_fresh_capacity_advisory_orders_new_allocation():
+    manager = RegionalManager()
+    manager.advisory = {
+        ("us-central1", "gpu-h200-sxm", "1gpu-16vcpu-200gb"): 2,
+        ("eu-west1", "gpu-h200-sxm", "1gpu-16vcpu-200gb"): 0,
+    }
+    orchestrator = regional(manager)
+    orchestrator.bind_job(None, lambda _: True)
+    asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert [project for event, project in manager.events if event == "create"] == ["secondary"]
+    assert orchestrator.get_instance_states()[0].region == "eu-west1"
+
+
+@pytest.mark.parametrize("advisory", [{}, RuntimeError("advisory unavailable")])
+def test_unknown_or_failed_advisory_keeps_configured_order(advisory):
+    manager = RegionalManager()
+    manager.advisory = advisory
+    orchestrator = regional(manager)
+    orchestrator.bind_job(None, lambda _: True)
+    asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert [project for event, project in manager.events if event == "create"] == ["primary"]
+
+
+def test_bound_placement_outranks_advisory_order():
+    manager = RegionalManager()
+    manager.advisory = {
+        ("us-central1", "gpu-h200-sxm", "1gpu-16vcpu-200gb"): 2,
+        ("eu-west1", "gpu-h200-sxm", "1gpu-16vcpu-200gb"): 0,
+    }
+    orchestrator = regional(manager)
+    bound = orchestrator._named(manager.locations[0])
+    seed_vm(manager, bound)
+    orchestrator.bind_job(bound, lambda _: True)
+    asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert not any(event == "create" for event, _ in manager.events)
+    assert orchestrator.get_instance_states()[0].region == "us-central1"
+
+
+def test_slow_advisory_does_not_delay_provisioning(monkeypatch):
+    monkeypatch.setattr("coding_agent_bench.nebius_utils.NEBIUS_ADVISORY_TIMEOUT_SECONDS", 0.01)
+    manager = RegionalManager()
+
+    async def advisory():
+        await asyncio.sleep(5)
+
+    manager.capacity_advisory = advisory
+    orchestrator = regional(manager)
+    orchestrator.bind_job(None, lambda _: True)
+    asyncio.run(orchestrator.acquire_instance("model", "h200"))
+    assert [project for event, project in manager.events if event == "create"] == ["primary"]
+
+
+def test_capacity_advisory_reads_fresh_rows_and_caches(monkeypatch):
+    manager = object.__new__(NebiusInstanceManager)
+    manager._tenant_id = "tenant"
+    manager._advisory_cache = None
+    calls = []
+
+    async def list_resources(command):
+        calls.append(command)
+        return [
+            {"spec": {"region": "us-central1", "compute_instance": {
+                "platform": "gpu-b200-sxm", "preset": {"name": "8gpu-160vcpu-1792gb"}}},
+             "status": {"preemptible": {"data_state": "DATA_STATE_FRESH",
+                                        "availability_level": "AVAILABILITY_LEVEL_LOW", "available": None}}},
+            {"spec": {"region": "me-west1", "compute_instance": {
+                "platform": "gpu-b200-sxm-a", "preset": {"name": "8gpu-160vcpu-1792gb"}}},
+             "status": {"preemptible": {"data_state": "DATA_STATE_FRESH",
+                                        "availability_level": "AVAILABILITY_LEVEL_MEDIUM", "available": 3}}},
+            {"spec": {"region": "eu-north1", "compute_instance": {
+                "platform": "gpu-h200-sxm", "preset": {"name": "8gpu-128vcpu-1600gb"}}},
+             "status": {"preemptible": {"data_state": "DATA_STATE_STALE",
+                                        "availability_level": "AVAILABILITY_LEVEL_HIGH"}}},
+        ]
+
+    monkeypatch.setattr(manager, "list_resources", list_resources)
+    ranking = asyncio.run(manager.capacity_advisory())
+    assert ranking == {
+        ("us-central1", "gpu-b200-sxm", "8gpu-160vcpu-1792gb"): 2,
+        ("me-west1", "gpu-b200-sxm-a", "8gpu-160vcpu-1792gb"): 1,
+    }
+    assert calls[0][:3] == ["capacity", "resource-advice", "list"]
+    asyncio.run(manager.capacity_advisory())
+    assert len(calls) == 1
 
 
 def test_legacy_vm_keeps_configured_subnet_when_discovery_differs():
